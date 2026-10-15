@@ -14,25 +14,45 @@ This is an early community release, not a claim that AI-generated software is au
 
 Click any screenshot to view it at full size.
 
-| Workspace | Light theme |
-| --- | --- |
-| ![Workspace](docs/screenshots/DNW_Workspace.png) | ![Light theme](docs/screenshots/DNW_LightTheme.png) |
+### Workspace
 
-| Projects and categories | Fab library |
-| --- | --- |
-| ![Projects and categories](docs/screenshots/DNW_ProjectCatgories.png) | ![Fab library](docs/screenshots/DNW_FabLibrary.png) |
+![Workspace](docs/screenshots/DNW_Workspace.png)
 
-| Engine plugins | Engine versions |
-| --- | --- |
-| ![Engine plugins](docs/screenshots/DNW_Plugins.png) | ![Engine versions](docs/screenshots/DNW_EngineVersions.png) |
+### Light theme
 
-| Engine installation | Installation progress |
-| --- | --- |
-| ![Engine installation](docs/screenshots/DNW_EngineInstall.png) | ![Installation progress](docs/screenshots/DNW_EngineInstaller_Progression.png) |
+![Light theme](docs/screenshots/DNW_LightTheme.png)
 
-| Downloads | Settings |
-| --- | --- |
-| ![Downloads](docs/screenshots/DNW_Downloads.png) | ![Settings](docs/screenshots/DNW_Settings.png) |
+### Projects and categories
+
+![Projects and categories](docs/screenshots/DNW_ProjectCatgories.png)
+
+### Fab library
+
+![Fab library](docs/screenshots/DNW_FabLibrary.png)
+
+### Engine plugins
+
+![Engine plugins](docs/screenshots/DNW_Plugins.png)
+
+### Engine versions
+
+![Engine versions](docs/screenshots/DNW_EngineVersions.png)
+
+### Engine installation
+
+![Engine installation](docs/screenshots/DNW_EngineInstall.png)
+
+### Installation progress
+
+![Installation progress](docs/screenshots/DNW_EngineInstaller_Progression.png)
+
+### Downloads
+
+![Downloads](docs/screenshots/DNW_Downloads.png)
+
+### Settings
+
+![Settings](docs/screenshots/DNW_Settings.png)
 
 ## Download and install
 
