@@ -313,7 +313,7 @@ impl Workspace {
         }
         let area = c.rect([266., 109., c.width - 292., c.height - 159.]);
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
-            ScrollArea::vertical()
+            AppScrollArea::vertical(&self.theme)
                 .id_salt("library-scroll")
                 .show(ui, |ui| {
                     let local = Canvas {

@@ -1,8 +1,76 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 static TRAY_PRESENT: AtomicBool = AtomicBool::new(false);
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
+static UI_CONTEXT: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::new();
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub const fn tray_enabled() -> bool {
+    !cfg!(feature = "portable")
+}
+
+#[cfg(test)]
+pub fn tray_present() -> bool {
+    TRAY_PRESENT.load(Ordering::Relaxed)
+}
+
+/// Wake the event loop explicitly: hidden windows may never receive WM_PAINT.
+/// The event loop performs a normal eframe shutdown, including on_exit/save.
+pub fn request_exit() {
+    EXIT_REQUESTED.store(true, Ordering::Release);
+    if let Some(ctx) = UI_CONTEXT.get() {
+        ctx.request_repaint();
+    }
+}
+
+pub fn take_exit_request() -> bool {
+    EXIT_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+pub fn remove_tray_icon() {
+    #[cfg(windows)]
+    unsafe {
+        let hwnd = WINDOW.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+        if !hwnd.is_null() && TRAY_PRESENT.load(Ordering::Relaxed) {
+            tray(hwnd, false);
+        }
+    }
+    TRAY_PRESENT.store(false, Ordering::Relaxed);
+}
+
+pub fn close_button() -> bool {
+    if tray_enabled() {
+        hide_to_tray()
+    } else {
+        request_exit();
+        true
+    }
+}
+
+/// Native visibility is authoritative: SW_HIDE does not set egui's minimized flag.
+pub fn is_backgrounded() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+        let hwnd = WINDOW.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+        return !hwnd.is_null() && (IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Progress can be coalesced while hidden; completion events still wake immediately.
+pub fn progress_repaint(ctx: &eframe::egui::Context) {
+    if is_backgrounded() {
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    } else {
+        ctx.request_repaint();
+    }
+}
 // Only the close button hides the window. Ordinary minimization stays on the taskbar.
 pub fn hide_to_tray() -> bool {
+    if !tray_enabled() {
+        return false;
+    }
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
@@ -16,6 +84,9 @@ pub fn hide_to_tray() -> bool {
 }
 #[cfg(windows)]
 unsafe fn tray(hwnd: windows_sys::Win32::Foundation::HWND, add: bool) -> bool {
+    if add && !tray_enabled() {
+        return false;
+    }
     use windows_sys::Win32::UI::{Shell::*, WindowsAndMessaging::*};
     unsafe {
         let mut n: NOTIFYICONDATAW = std::mem::zeroed();
@@ -50,6 +121,11 @@ pub fn completion_notice(message: &str) {
         if hwnd.is_null() {
             return;
         }
+        if !tray_enabled() {
+            // Portable builds use the taskbar and in-app activity history only.
+            FlashWindow(hwnd, 1);
+            return;
+        }
         if !TRAY_PRESENT.load(Ordering::Relaxed) && !tray(hwnd, true) {
             return;
         }
@@ -77,6 +153,7 @@ pub fn completion_notice(message: &str) {
 // hit-testing synchronously, so fast drags work without waiting for an egui frame.
 #[cfg(windows)]
 pub fn install(cc: &eframe::CreationContext<'_>) {
+    let _ = UI_CONTEXT.set(cc.egui_ctx.clone());
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = cc.window_handle() {
         if let RawWindowHandle::Win32(window) = handle.as_raw() {
@@ -113,6 +190,11 @@ unsafe extern "system" fn frame_proc(
         },
     };
     unsafe {
+        if message == WM_SHOWWINDOW || message == WM_SIZE {
+            if let Some(ctx) = UI_CONTEXT.get() {
+                ctx.request_repaint();
+            }
+        }
         if message == WM_APP + 78 {
             if wparam == 1 {
                 REPLACE_REQUESTED.store(true, Ordering::SeqCst);
@@ -123,9 +205,7 @@ unsafe extern "system" fn frame_proc(
             return 0;
         }
         if message == WM_NCDESTROY {
-            if TRAY_PRESENT.load(Ordering::Relaxed) {
-                tray(hwnd, false);
-            }
+            remove_tray_icon();
             WINDOW.store(0, Ordering::Relaxed);
             RemoveWindowSubclass(hwnd, Some(frame_proc), subclass);
         }
@@ -159,13 +239,15 @@ unsafe extern "system" fn frame_proc(
                     std::ptr::null(),
                 );
                 DestroyMenu(menu);
+                // Finish the native popup's message sequence before returning.
+                PostMessageW(hwnd, WM_NULL, 0, 0);
                 if choice == 1 {
                     ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                     tray(hwnd, false);
                 }
                 if choice == 2 {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    request_exit();
                 }
                 return 0;
             }

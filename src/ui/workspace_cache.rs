@@ -21,6 +21,7 @@ struct Snapshot {
     engines: HashMap<String, bool>,
     projects: HashMap<String, bool>,
     counts: HashMap<String, usize>,
+    last_opened: HashMap<String, u64>,
 }
 impl WorkspaceCache {
     pub fn invalidate(&mut self) {
@@ -47,6 +48,12 @@ impl Workspace {
                     // An install, removal or rescan may have finished while this worker ran.
                     // Never let that older result overwrite the newly invalidated state.
                     if self.workspace_cache.accepts(&snapshot, &paths) {
+                        if engine_workspace::project_history::merge(
+                            &mut self.projects,
+                            &snapshot.last_opened,
+                        ) {
+                            self.persist();
+                        }
                         self.workspace_cache.engines = snapshot.engines;
                         self.workspace_cache.projects = snapshot.projects;
                         self.plugin_counts = snapshot.counts;
@@ -98,6 +105,7 @@ impl Workspace {
                     })
                     .collect();
                 let _ = tx.send(Snapshot {
+                    last_opened: engine_workspace::project_history::collect(&paths.projects),
                     revision,
                     paths,
                     engines: ready,
@@ -128,6 +136,7 @@ mod tests {
             engines: HashMap::new(),
             projects: HashMap::new(),
             counts: HashMap::new(),
+            last_opened: HashMap::new(),
         };
         assert!(cache.accepts(&snapshot, &paths("project")));
         assert!(!cache.accepts(&snapshot, &paths("new project")));

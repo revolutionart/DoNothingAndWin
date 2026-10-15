@@ -9,6 +9,7 @@ mod plugin_jobs;
 mod plugins_view;
 mod project_cards;
 mod project_visibility;
+mod scrollbar;
 mod settings_flow;
 mod transfers;
 mod workspace_cache;
@@ -20,6 +21,7 @@ use engine_workspace::{
     storage::{self, Preferences},
     theme::{Theme, color},
 };
+use scrollbar::AppScrollArea;
 use std::{
     collections::HashMap,
     path::Path,
@@ -82,6 +84,7 @@ pub struct Workspace {
     pinned_only: bool,
     category_filter: Option<String>,
     category_manager: bool,
+    category_add_project: Option<String>,
     category_name: String,
     filter: String,
     sort_name: bool,
@@ -417,6 +420,11 @@ impl Workspace {
             );
         }
         cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.options_mut(|options| {
+            // Faster wheel travel across pages and dialogs; retain egui's smoothing
+            // and the native pixel deltas used by precision touchpads.
+            options.input_options.line_scroll_speed = 100.;
+        });
         cc.egui_ctx.style_mut(|style| {
             style.spacing.button_padding = vec2(16., 8.);
             style.spacing.interact_size.y = 34.;
@@ -462,6 +470,7 @@ impl Workspace {
             pinned_only: false,
             category_filter: None,
             category_manager: false,
+            category_add_project: None,
             category_name: String::new(),
             filter: "All versions".into(),
             sort_name: false,
@@ -1061,7 +1070,7 @@ impl Workspace {
         }
         if c.window_button(ui, c.width - 21., "×") {
             self.persist();
-            if !crate::window_frame::hide_to_tray() {
+            if !crate::window_frame::close_button() {
                 self.notify("Could not create the tray icon. The launcher is still open.");
             }
         }
@@ -1643,7 +1652,7 @@ impl Workspace {
         let wrap = c.width < 1320.;
         let extra = if wrap { 44. } else { 0. };
         let bottom = c.height - 50.;
-        let columns = card_columns(c.width - 315., 240.8, 14.);
+        let columns = card_columns(c.width - 315., PROJECT_CARD_WIDTH, PROJECT_CARD_GAP);
         c.text(
             ui,
             271.,
@@ -1734,13 +1743,12 @@ impl Workspace {
             let track = c.rect([
                 c.width - 36.,
                 y + 98. + extra,
-                10.,
+                scrollbar::WIDTH,
                 (bottom - y - 98. - extra).max(1.),
             ]);
             let visible = (bottom - y - 98. - extra).max(1.);
-            let thumb_height = (track.height() * visible / (rows as f32 * row_h))
-                .max(28. * c.sy)
-                .min(track.height());
+            let thumb_height =
+                scrollbar::thumb_length(track.height(), visible, rows as f32 * row_h);
             let travel = (track.height() - thumb_height).max(1.);
             let thumb = Rect::from_min_size(
                 pos2(
@@ -1771,7 +1779,7 @@ impl Workspace {
                         .clamp(0., max_scroll);
                 }
             }
-            ui.painter().rect_filled(track, 5., color(self.theme.card));
+            ui.painter().rect_filled(track, 4., color(self.theme.card));
             let thumb = Rect::from_min_size(
                 pos2(
                     track.min.x,
@@ -1780,7 +1788,7 @@ impl Workspace {
                 vec2(track.width(), thumb_height),
             );
             ui.painter().rect_filled(
-                thumb.shrink2(vec2(2. * c.sx, 0.)),
+                thumb,
                 4.,
                 color(if thumb_response.hovered() || thumb_response.dragged() {
                     self.theme.text
@@ -1800,7 +1808,7 @@ impl Workspace {
                 )
             } else {
                 (
-                    271. + (position % columns) as f32 * 254.8,
+                    271. + (position % columns) as f32 * (PROJECT_CARD_WIDTH + PROJECT_CARD_GAP),
                     y + 100. + extra + (position / columns) as f32 * row_h - self.project_scroll,
                 )
             };
@@ -1904,7 +1912,7 @@ impl Workspace {
                 }
                 continue;
             }
-            self.project_card(&mut child, c, index, [x, cy, 240.8, 188.]);
+            self.project_card(&mut child, c, index, [x, cy, PROJECT_CARD_WIDTH, 188.]);
         }
         let _ = ctx;
     }
@@ -2000,7 +2008,7 @@ impl Workspace {
             Align2::LEFT_CENTER,
         );
         let area = c.rect([271., 307., c.width - 318., (c.height - 384.).max(100.)]);
-        ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{ScrollArea::vertical().id_salt("release-scroll").show(ui,|ui|{
+        ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{AppScrollArea::vertical(&self.theme).id_salt("release-scroll").show(ui,|ui|{
             for r in self.snapshot.releases.clone(){
                 let (rect,_)=ui.allocate_exact_size(vec2(area.width()-15.,65.*c.sy),Sense::hover());let p=ui.painter().clone();p.rect_filled(rect,4.,color(self.theme.card));
                 let font=FontId::proportional(15.*c.scale());let v=r.version.as_ref().map(|v|v.to_string()).unwrap_or_else(||r.app.trim_start_matches("UE_").to_owned());
@@ -2157,6 +2165,8 @@ impl eframe::App for Workspace {
         self.persist();
     }
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let backgrounded = crate::window_frame::is_backgrounded()
+            || ctx.input(|i| i.viewport().minimized == Some(true));
         ctx.input(|i| {
             let viewport = i.viewport();
             if viewport.minimized != Some(true) {
@@ -2172,22 +2182,28 @@ impl eframe::App for Workspace {
             }
         });
         engine_workspace::download_policy::configure(&self.prefs.downloads);
-        self.run_layout_probe(ctx);
-        resize_window_edges(ctx);
+        if !backgrounded {
+            self.run_layout_probe(ctx);
+            resize_window_edges(ctx);
+        }
         self.poll(ctx);
         self.poll_transfers(ctx);
         self.poll_plugins(ctx);
         self.poll_library(ctx);
-        self.poll_workspace_cache(ctx);
-        egui::CentralPanel::default()
-            .frame(Frame::NONE)
-            .show(ctx, |ui| {
-                self.layout(ui, ctx);
-            });
-        self.plugin_dialog(ctx);
-        self.category_dialog(ctx);
-        self.dialogs(ctx);
-        self.install_dialog(ctx);
+        // Continue consuming worker results and running scheduled release checks,
+        // but do not build invisible widgets, animate spinners or start UI-only scans.
+        if !backgrounded {
+            self.poll_workspace_cache(ctx);
+            egui::CentralPanel::default()
+                .frame(Frame::NONE)
+                .show(ctx, |ui| {
+                    self.layout(ui, ctx);
+                });
+            self.plugin_dialog(ctx);
+            self.category_dialog(ctx);
+            self.dialogs(ctx);
+            self.install_dialog(ctx);
+        }
         if crate::window_frame::take_replace_request() {
             if self.transfer.busy()
                 || self.library_transfer_status().is_some()
@@ -2198,15 +2214,24 @@ impl eframe::App for Workspace {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        if self.pending.is_some() || self.transfer.busy() || self.scan.receiver.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        } else {
-            ctx.request_repaint_after(Duration::from_secs(5));
-        }
+        let busy = self.pending.is_some()
+            || self.transfer.busy()
+            || self.scan.receiver.is_some()
+            || self.library_transfer_status().is_some()
+            || self.plugin_work.mutating;
+        ctx.request_repaint_after(idle_frame_interval(backgrounded, busy));
     }
 }
 
 const SIDEBAR_HIGHLIGHT: [u8; 3] = [234, 189, 93];
+fn idle_frame_interval(backgrounded: bool, busy: bool) -> Duration {
+    match (backgrounded, busy) {
+        (true, true) => Duration::from_secs(1),
+        (true, false) => Duration::from_secs(30),
+        (false, true) => Duration::from_millis(100),
+        (false, false) => Duration::from_secs(5),
+    }
+}
 const SIDEBAR_ON_HIGHLIGHT: [u8; 3] = [0, 0, 0];
 
 struct Canvas {
@@ -2811,6 +2836,9 @@ impl Canvas {
 }
 
 // Card geometry stays in logical pixels; window size changes only the column count.
+const PROJECT_CARD_WIDTH: f32 = 240.8;
+const PROJECT_CARD_GAP: f32 = 14.;
+const PROJECT_THUMBNAIL_HEIGHT: f32 = 124.;
 fn card_columns(available: f32, width: f32, gap: f32) -> usize {
     ((available + gap) / (width + gap)).floor().max(1.) as usize
 }

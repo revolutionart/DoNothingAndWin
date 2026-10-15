@@ -5,6 +5,7 @@
 AppId={{C5C3A601-CFC1-4597-A7CA-D77735208B6D}
 AppName=DoNothing&Win Launcher
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
 AppPublisher=Revolutionart
 AppPublisherURL=https://github.com/revolutionart/DoNothingAndWin
 AppSupportURL=https://github.com/revolutionart/DoNothingAndWin/issues

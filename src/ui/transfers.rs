@@ -213,7 +213,7 @@ impl Workspace {
         std::thread::spawn(move || {
             let report = discovery::scan_stream(&roots, cancel, progress, |p| {
                 let _ = tx.send(ScanEvent::Found(p));
-                ctx.request_repaint();
+                crate::window_frame::progress_repaint(&ctx);
             });
             let _ = tx.send(ScanEvent::Finished(report));
             ctx.request_repaint();

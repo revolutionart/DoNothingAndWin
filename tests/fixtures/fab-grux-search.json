@@ -1,0 +1,59 @@
+{
+  "title": "Paragon: Grux",
+  "description": "<p>\u201cOnce the Chieftain of his tribe, Grux disobeyed the wishes of his gods by waging a brutal war against a neighboring tribe. Soon after, plague and pestilence hit, and Grux was cast out. Now he wanders Zechin, seeking the forgiveness of his gods.\u201d</p><p></p><p>Grux includes the character model, animations, skins and FX released to the Unreal Engine community for free to use as you like in your Unreal Engine projects! Now includes Animation Blueprints!</p><p></p><p><strong>You may not use the trademark PARAGON to advertise or name your game.</strong></p>",
+  "tags": [
+    {
+      "name": "Pbr",
+      "slug": "pbr",
+      "uid": "080edd3b-d10a-4f32-ace2-30f5baa480dc"
+    },
+    {
+      "name": "Fantasy",
+      "slug": "fantasy",
+      "uid": "5c48e966-39f9-4b98-9803-78335e942570"
+    },
+    {
+      "name": "Warrior",
+      "slug": "warrior",
+      "uid": "6bb5b38d-0c7e-4865-82f7-b8785a61f449"
+    },
+    {
+      "name": "Animated",
+      "slug": "animated",
+      "uid": "8e61a209-4e02-4dd1-8e44-cc2bf9356e7a"
+    },
+    {
+      "name": "Realistic",
+      "slug": "realistic",
+      "uid": "93b0d3f1-a96c-4d68-9d44-69a313519e32"
+    },
+    {
+      "name": "Moba",
+      "slug": "moba",
+      "uid": "95051e1d-5727-430d-af27-ed33c0312253"
+    },
+    {
+      "name": "Creature",
+      "slug": "creature",
+      "uid": "b7c8bc17-3869-44ce-b7d7-b6620439012b"
+    },
+    {
+      "name": "Monster",
+      "slug": "monster",
+      "uid": "bc536312-b1e7-4c8f-b756-9ebc89b5cdfc"
+    },
+    {
+      "name": "Rigged",
+      "slug": "rigged",
+      "uid": "c5c1f70c-aabe-41d4-bd3a-e7e00ab60f0c"
+    },
+    {
+      "name": "Character",
+      "slug": "character",
+      "uid": "f07e8c06-66ed-4396-81cf-108f0afcb6d6"
+    }
+  ],
+  "user": {
+    "sellerName": "Epic Games"
+  }
+}

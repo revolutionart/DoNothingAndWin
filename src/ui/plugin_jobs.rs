@@ -42,7 +42,7 @@ impl Workspace {
             .rx
             .as_ref()
             .and_then(|rx| rx.try_recv().ok());
-        if self.plugin_work.rx.is_some() {
+        if self.plugin_work.rx.is_some() && !crate::window_frame::is_backgrounded() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
         if let Some(event) = event {
@@ -346,7 +346,7 @@ impl Workspace {
                 }
                 let rows = self.plugins.clone();
                 let mut shown = 0;
-                let list_area = ScrollArea::vertical()
+                let list_area = AppScrollArea::vertical(&t)
                     .id_salt("plugin-dialog-list")
                     .max_height((ctx.content_rect().height() - 520.).clamp(120., 400.))
                     .auto_shrink([false, true])
@@ -449,24 +449,13 @@ impl Workspace {
                                 .as_ref()
                                 .map(|i| i.status.as_str())
                                 .unwrap_or("Not checked");
-                            let status = if update.is_some() {
-                                "Update available"
-                            } else if checked.is_none() {
-                                "Not checked"
-                            } else if matches!(
-                                detail,
-                                "Up to date"
-                                    | "Installed version is newer"
-                                    | "Managed by its publisher"
-                                    | "No entitled compatible build"
-                            ) {
-                                "No updates"
-                            } else {
-                                "Check failed"
-                            };
+                            let status = checked
+                                .as_ref()
+                                .map(|item| item.status_label())
+                                .unwrap_or("Not checked");
                             let col = if update.is_some() {
                                 t.warning
-                            } else if status == "No updates" {
+                            } else if matches!(status, "Up to date" | "Installed newer") {
                                 t.success
                             } else {
                                 t.muted

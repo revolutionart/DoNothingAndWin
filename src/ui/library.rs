@@ -1,5 +1,7 @@
 use super::*;
 use engine_workspace::fab::{self, Item};
+use engine_workspace::fab_listing::{self, DateEvent, Sort};
+use engine_workspace::fab_search::{SearchDocument, SearchQuery};
 enum Event {
     Status(String),
     Loaded(Result<Vec<Item>, String>),
@@ -17,8 +19,13 @@ pub(super) struct Library {
     attempted: bool,
     status: String,
     search: String,
+    search_index: std::collections::HashMap<String, SearchDocument>,
     pub filter: usize,
-    sort_desc: bool,
+    sort: Sort,
+    engine_filter: String,
+    date_rx: Option<Receiver<DateEvent>>,
+    date_status: String,
+    date_refresh_pending: bool,
     list_view: bool,
     category: usize,
     sync_error: bool,
@@ -102,13 +109,41 @@ impl Workspace {
         std::thread::spawn(move || {
             let result = fab::library(&session, |n| {
                 let _ = tx.send(Event::Status(format!("Loaded {n} library items...")));
-                ctx.request_repaint();
+                crate::window_frame::progress_repaint(&ctx);
             });
             if let Ok(items) = &result {
                 let _ = fab::save_library_cache(&session.account_id, items);
             }
             let _ = tx.send(Event::Loaded(result));
             ctx.request_repaint();
+        });
+    }
+    fn rebuild_library_search(&mut self) {
+        self.library.search_index = self
+            .library
+            .items
+            .iter()
+            .map(|item| (item.key(), SearchDocument::new(item)))
+            .collect();
+    }
+    fn refresh_library_dates(&mut self, ctx: &Context) {
+        if self.library.date_rx.is_some() {
+            self.library.date_refresh_pending = true;
+            return;
+        }
+        if self.library.items.is_empty() {
+            return;
+        }
+        let items = self.library.items.clone();
+        let (tx, rx) = mpsc::channel();
+        self.library.date_rx = Some(rx);
+        self.library.date_status = "Loading library details…".into();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            fab_listing::refresh_dates(&items, |event| {
+                let _ = tx.send(event);
+                crate::window_frame::progress_repaint(&ctx);
+            })
         });
     }
     pub(super) fn poll_library(&mut self, ctx: &Context) {
@@ -131,6 +166,8 @@ impl Workspace {
                     self.queue_library_thumbnail(format!("fab:{}", item.key()), url, ctx);
                 }
             }
+            self.rebuild_library_search();
+            self.refresh_library_dates(ctx);
         }
         while let Some(event) = self.library.rx.as_ref().and_then(|r| r.try_recv().ok()) {
             match event {
@@ -143,7 +180,9 @@ impl Workspace {
                             self.library.status =
                                 format!("{} items from your Fab account", items.len());
                             self.library.items = items;
+                            self.rebuild_library_search();
                             self.library.sync_error = false;
+                            self.refresh_library_dates(ctx);
                             let session = self.session.clone().unwrap();
                             let engines = self.engines.clone();
                             let items = self.library.items.clone();
@@ -163,9 +202,17 @@ impl Workspace {
                                         for entry in
                                             checked.into_iter().filter(|p| p.update.is_some())
                                         {
+                                            let listing_id =
+                                                engine_workspace::plugins::fab_listing_id(
+                                                    &entry.plugin,
+                                                );
                                             if let Some(item) = items.iter().find(|i| {
                                                 entry.plugin.catalog_id.as_deref()
                                                     == Some(i.asset_id.as_str())
+                                                    || listing_id.as_ref().is_some_and(|id| {
+                                                        fab_listing::listing_id(i).as_ref()
+                                                            == Some(id)
+                                                    })
                                             }) {
                                                 updates.entry(item.key()).or_default().push((
                                                     engine.path.clone(),
@@ -223,6 +270,47 @@ impl Workspace {
                 }
             }
         }
+        while let Some(event) = self
+            .library
+            .date_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            match event {
+                DateEvent::Batch(dates) => {
+                    let dates: std::collections::HashMap<_, _> = dates
+                        .into_iter()
+                        .map(|(key, date, search)| (key, (date, search)))
+                        .collect();
+                    for item in &mut self.library.items {
+                        if let Some((date, search)) = dates.get(&item.key()) {
+                            item.listing_updated_at = *date;
+                            item.listing_search = search.clone();
+                            self.library
+                                .search_index
+                                .insert(item.key(), SearchDocument::new(item));
+                        }
+                    }
+                }
+                DateEvent::Progress(done, total) => {
+                    self.library.date_status = format!("Loading library details… {done}/{total}");
+                }
+                DateEvent::Finished(unavailable) => {
+                    self.library.date_rx = None;
+                    self.library.date_status = if unavailable > 0 {
+                        format!(
+                            "Full details unavailable for {unavailable} items; search may be incomplete."
+                        )
+                    } else {
+                        String::new()
+                    };
+                    if self.library.date_refresh_pending {
+                        self.library.date_refresh_pending = false;
+                        self.refresh_library_dates(ctx);
+                    }
+                }
+            }
+        }
         if let Some(result) = self
             .library
             .update_rx
@@ -249,7 +337,11 @@ impl Workspace {
         for i in done.into_iter().rev() {
             self.library.images.remove(i);
         }
-        if self.library.rx.is_some() || !self.library.images.is_empty() {
+        if !crate::window_frame::is_backgrounded()
+            && (self.library.rx.is_some()
+                || self.library.date_rx.is_some()
+                || !self.library.images.is_empty())
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -298,18 +390,7 @@ impl Workspace {
             ui.spacing_mut().button_padding = vec2(14., 8.);
             ui.spacing_mut().item_spacing = vec2(16., 12.);
             ui.spacing_mut().interact_size.y = 36.;
-            let scroll = &mut ui.style_mut().spacing.scroll;
-            scroll.floating = false;
-            scroll.bar_width = 6.;
-            scroll.floating_width = 6.;
-            scroll.bar_inner_margin = 2.;
-            scroll.bar_outer_margin = 2.;
-            let old = (
-                self.library.filter,
-                self.library.search.clone(),
-                self.library.category,
-                self.library.sort_desc,
-            );
+            let branches = fab_listing::engine_branches(&self.library.items);
             ui.horizontal_wrapped(|ui| {
                 ui.style_mut().override_font_id = Some(FontId::proportional(14. * c.scale()));
                 ui.spacing_mut().button_padding = vec2(10., 5.) * c.scale();
@@ -350,10 +431,10 @@ impl Workspace {
                         self.library.filter = index;
                     }
                 }
-                if rect.width() < 1200. {
+                if rect.width() < 1360. {
                     ui.end_row();
                 } else {
-                    ui.add_space((rect.right() - ui.cursor().left() - 624. * c.scale()).max(0.));
+                    ui.add_space((rect.right() - ui.cursor().left() - 780. * c.scale()).max(0.));
                 }
                 search_field(
                     ui,
@@ -362,7 +443,7 @@ impl Workspace {
                     258. * c.scale(),
                     &theme,
                     c.scale(),
-                );
+                ).on_hover_text("Search titles, descriptions, tags, and publishers. Title matches appear first; your chosen sort applies within each group.");
                 ComboBox::from_id_salt("library-category")
                     .width(130. * c.scale())
                     .selected_text(
@@ -379,21 +460,25 @@ impl Workspace {
                     })
                     .response
                     .on_hover_cursor(CursorIcon::PointingHand);
-                ComboBox::from_id_salt("library-sort")
-                    .width(132. * c.scale())
-                    .selected_text(if self.library.sort_desc {
-                        "Name Z – A"
-                    } else {
-                        "Name A – Z"
-                    })
+                ComboBox::from_id_salt("library-engine")
+                    .width(140. * c.scale())
+                    .selected_text(if self.library.engine_filter.is_empty() {"All engines".into()} else {format!("UE {}",self.library.engine_filter)})
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.library.sort_desc, false, "Name A – Z")
-                            .on_hover_cursor(CursorIcon::PointingHand);
-                        ui.selectable_value(&mut self.library.sort_desc, true, "Name Z – A")
-                            .on_hover_cursor(CursorIcon::PointingHand);
-                    })
-                    .response
-                    .on_hover_cursor(CursorIcon::PointingHand);
+                        ui.selectable_value(&mut self.library.engine_filter,String::new(),"All engines").on_hover_cursor(CursorIcon::PointingHand);
+                        for branch in &branches {
+                            ui.selectable_value(&mut self.library.engine_filter,branch.clone(),format!("UE {branch}")).on_hover_cursor(CursorIcon::PointingHand);
+                        }
+                    }).response.on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Show content that lists support for this engine version on Windows.");
+                ComboBox::from_id_salt("library-sort")
+                    .width(140. * c.scale())
+                    .selected_text(self.library.sort.label())
+                    .show_ui(ui, |ui| {
+                        for sort in [Sort::LatestUpdate,Sort::NameAscending,Sort::NameDescending] {
+                            ui.selectable_value(&mut self.library.sort,sort,sort.label()).on_hover_cursor(CursorIcon::PointingHand);
+                        }
+                    }).response.on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Latest update uses Fab listing update dates, newest first. Dates are cached for up to 6 hours; unavailable dates appear last.");
                 for (list, icon) in [(false, Icon::Grid), (true, Icon::List)] {
                     let (r, response) =
                         ui.allocate_exact_size(vec2(32., 32.) * c.scale(), Sense::click());
@@ -446,15 +531,11 @@ impl Workspace {
                     }
                 }
             });
-            if old
-                != (
-                    self.library.filter,
-                    self.library.search.clone(),
-                    self.library.category,
-                    self.library.sort_desc,
-                )
-            {
-                // Scroll identity changes with the filters below.
+            if !self.library.date_status.is_empty() {
+                ui.horizontal(|ui| {
+                    if self.library.date_rx.is_some() { ui.add(egui::Spinner::new().size(16.).color(color(theme.text))); }
+                    ui.label(RichText::new(&self.library.date_status).size(13.).color(color(theme.muted)));
+                });
             }
             if self.library.loading
                 || self.library.installing
@@ -479,39 +560,43 @@ impl Workspace {
                     );
                 });
             }
-            let query = self.library.search.to_lowercase();
+            let query = SearchQuery::new(&self.library.search);
             let mut items: Vec<_> = self
                 .library
                 .items
                 .iter()
                 .filter(|i| {
-                    i.title.to_lowercase().contains(&query)
+                    self.library.search_index.get(&i.key()).and_then(|doc| query.rank(doc)).is_some()
                         && library_kind(i, self.library.filter)
                         && library_kind(i, self.library.category)
+                        && fab_listing::supports_engine(i, &self.library.engine_filter)
                 })
                 .cloned()
                 .collect();
-            items.sort_by_key(|i| i.title.to_lowercase());
-            if self.library.sort_desc {
-                items.reverse();
+            fab_listing::sort(&mut items, self.library.sort);
+            // Stable relevance grouping preserves the selected ordering within each group.
+            if !query.is_empty() {
+                items.sort_by_cached_key(|i| self.library.search_index.get(&i.key()).and_then(|doc| query.rank(doc)));
             }
             self.library.footer = format!("{} items", items.len());
-            let columns = ((ui.available_width() + 16.) / 326.).floor().max(1.) as usize;
             let list = self.library.list_view;
-            ScrollArea::vertical()
+            let columns = card_columns(ui.available_width() - scrollbar::ALLOCATED_WIDTH, PROJECT_CARD_WIDTH, PROJECT_CARD_GAP);
+            if !list { ui.spacing_mut().item_spacing = vec2(PROJECT_CARD_GAP, PROJECT_CARD_GAP); }
+            AppScrollArea::vertical(&self.theme)
                 .id_salt((
                     "fab-owned-items",
                     self.library.filter,
                     self.library.category,
                     self.library.search.clone(),
-                    self.library.sort_desc,
+                    self.library.sort,
+                    self.library.engine_filter.clone(),
                     self.library.list_view,
                 ))
                 .max_height(ui.available_height())
                 .auto_shrink([false, false])
                 .show_rows(
                     ui,
-                    if list { 96. } else { 234. },
+                    if list { 96. } else { PROJECT_THUMBNAIL_HEIGHT + 84. },
                     items.len().div_ceil(if list { 1 } else { columns }),
                     |ui, range| {
                         for row in items
@@ -528,9 +613,9 @@ impl Workspace {
                                     let width = if list {
                                         ui.available_width()
                                     } else {
-                                        310_f32.min(ui.available_width())
+                                        PROJECT_CARD_WIDTH.min(ui.available_width())
                                     };
-                                    let height = if list { 92. } else { 230. };
+                                    let height = if list { 92. } else { PROJECT_THUMBNAIL_HEIGHT + 84. };
                                     let (r, _) =
                                         ui.allocate_exact_size(vec2(width, height), Sense::hover());
                                     let mut card_ui = ui.new_child(UiBuilder::new().max_rect(r));
@@ -547,7 +632,7 @@ impl Workspace {
                                     } else {
                                         Rect::from_min_size(
                                             r.min + vec2(1., 1.),
-                                            vec2(width - 2., 140.),
+                                            vec2(width - 2., PROJECT_THUMBNAIL_HEIGHT),
                                         )
                                     };
                                     if let Some(tex) = self.textures.get(&key) {
@@ -580,14 +665,20 @@ impl Workspace {
                                         )
                                     } else {
                                         Rect::from_min_size(
-                                            r.min + vec2(12., 149.),
+                                            r.min + vec2(10., PROJECT_THUMBNAIL_HEIGHT + 9.),
                                             vec2(width - 24., 25.),
                                         )
                                     };
+                                    let title_response = ui.interact(
+                                        title,
+                                        ui.id().with((&key, "title")),
+                                        Sense::click(),
+                                    ).on_hover_cursor(CursorIcon::PointingHand);
+                                    let title_color = color(if title_response.hovered() { theme.accent_hover } else { theme.text });
                                     let mut job = egui::text::LayoutJob::simple_singleline(
                                         item.title.clone(),
-                                        FontId::proportional(16.),
-                                        color(theme.text),
+                                        FontId::proportional(if list { 16. } else { 14. }),
+                                        title_color,
                                     );
                                     job.wrap.max_width = title.width();
                                     job.wrap.max_rows = 1;
@@ -596,21 +687,27 @@ impl Workspace {
                                     ui.painter().galley(
                                         pos2(title.left(), title.center().y - galley.size().y / 2.),
                                         galley,
-                                        color(theme.text),
+                                        title_color,
                                     );
-                                    ui.interact(
-                                        title,
-                                        ui.id().with((&key, "title")),
-                                        Sense::hover(),
-                                    )
-                                    .on_hover_text(&item.title);
+                                    let listing = fab_listing::listing_id(item);
+                                    let action = if listing.is_some() { "Open listing on Fab" } else { "Search for this title on Fab" };
+                                    if title_response.on_hover_text(format!("{}\n{action}\nLast updated: {} (Fab listing)", item.title, fab_listing::date_label(item.listing_updated_at))).clicked() {
+                                        let url = if let Some(id) = listing {
+                                            format!("https://www.fab.com/listings/{id}")
+                                        } else {
+                                            let mut url = reqwest::Url::parse("https://www.fab.com/search").expect("static Fab URL");
+                                            url.query_pairs_mut().append_pair("q", &item.title);
+                                            url.into()
+                                        };
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                    }
                                     let y = if list { r.center().y } else { r.bottom() - 28. };
                                     let badge = Rect::from_min_size(
                                         pos2(
                                             if list {
                                                 r.left() + 140.
                                             } else {
-                                                r.left() + 12.
+                                                r.left() + 10.
                                             },
                                             if list { r.bottom() - 36. } else { y - 16. },
                                         ),
@@ -645,14 +742,15 @@ impl Workspace {
                                     let updates = self.library.updates.get(&item.key());
                                     let has_update = updates.is_some_and(|u| !u.is_empty());
                                     let info = Rect::from_center_size(
-                                        pos2(r.right() - 22., y),
-                                        vec2(28., 32.),
+                                        pos2(picture.right() - 20., picture.top() + 20.),
+                                        vec2(28., 28.),
                                     );
                                     let tint = if has_update {
                                         Color32::from_rgb(255, 153, 0)
                                     } else {
-                                        color(theme.muted)
+                                        color(theme.text)
                                     };
+                                    ui.painter().circle_filled(info.center(), 14., color(theme.card));
                                     ui.painter().circle_stroke(
                                         info.center(),
                                         10.,
@@ -688,8 +786,8 @@ impl Workspace {
                                     )
                                     .on_hover_text(tooltip);
                                     let action = Rect::from_min_size(
-                                        pos2(r.right() - 190., y - 17.),
-                                        vec2(146., 34.),
+                                        pos2(r.right() - if list { 158. } else { 136. }, y - 17.),
+                                        vec2(if list { 146. } else { 126. }, 34.),
                                     );
                                     let response = ui
                                         .interact(
@@ -736,7 +834,7 @@ impl Workspace {
                                     }
                                 }
                             });
-                            ui.add_space(4.);
+                            if list { ui.add_space(4.); }
                         }
                         if items.is_empty() && !self.library.loading {
                             ui.label(if self.library.status.contains("items from") {
@@ -999,7 +1097,7 @@ impl Workspace {
                                     || item.compatible(&t.2).is_some())
                         })
                         .collect();
-                    ScrollArea::vertical().id_salt("fab-project-picker").max_height((ctx.content_rect().height()-530.).clamp(120.,300.)).auto_shrink([false,true]).show(ui,|ui|{
+                    AppScrollArea::vertical(&self.theme).id_salt("fab-project-picker").max_height((ctx.content_rect().height()-530.).clamp(120.,300.)).auto_shrink([false,true]).show(ui,|ui|{
                         let width=(ui.available_width()-24.)/3.;
                         for row in visible.chunks(3){ui.horizontal(|ui|{for &(index,(name,path,version)) in row {
                             let compatible=item.compatible(version).is_some();
@@ -1114,7 +1212,7 @@ impl Workspace {
                     &engine,
                     |s| {
                         let _ = tx.send(Event::Status(s));
-                        ctx.request_repaint();
+                        crate::window_frame::progress_repaint(&ctx);
                     },
                 );
                 let _ = tx.send(Event::Installed(result));
@@ -1287,7 +1385,7 @@ impl Workspace {
                     &branch,
                     |s| {
                         let _ = tx.send(Event::Status(s));
-                        ctx.request_repaint();
+                        crate::window_frame::progress_repaint(&ctx);
                     },
                 );
                 let _ = tx.send(Event::Installed(result));

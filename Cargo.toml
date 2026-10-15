@@ -1,18 +1,23 @@
 [package]
 name = "engine-workspace"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "A developer-only Unreal Engine workspace and release monitor"
 license = "MIT"
 repository = "https://github.com/revolutionart/DoNothingAndWin"
 
+[features]
+portable = []
+
 [dependencies]
 eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
 raw-window-handle = "0.6"
+winit = { version = "0.30", default-features = false }
 wgpu = { version = "27", default-features = false, features = ["dx12", "wgsl"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+time = { version = "=0.3.55", features = ["parsing"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.15"
 flate2 = "1"

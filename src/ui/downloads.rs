@@ -230,14 +230,10 @@ impl Workspace {
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.spacing_mut().item_spacing = vec2(12., 10.);
             ui.style_mut().override_font_id = Some(FontId::proportional(16.));
-            let scroll = &mut ui.spacing_mut().scroll;
-            scroll.floating = false;
-            scroll.bar_width = 6.;
-            scroll.floating_width = 6.;
-            ScrollArea::vertical()
+            AppScrollArea::vertical(&theme)
                 .id_salt("downloads-content")
                 .show(ui, |ui| {
-                    ui.set_width((rect.width() - 12.).max(250.));
+                    ui.set_width(ui.available_width().max(250.));
                     if self.downloads.settings {
                         self.download_settings(ui, &theme);
                     } else {
@@ -882,12 +878,12 @@ impl Workspace {
                 .color(ui.visuals().text_color())
                 .size(23.),
         );
-        ui.label(
-            "Minimize keeps the launcher in the taskbar. Close (X) hides it in the system tray.",
-        );
-        ui.label(
-            "Use the tray icon to restore the launcher, or right-click it and choose Exit to quit.",
-        );
+        if crate::window_frame::tray_enabled() {
+            ui.label("Minimize keeps the launcher in the taskbar. Close (X) hides it in the system tray.");
+            ui.label("Use the tray icon to restore the launcher, or right-click it and choose Exit to quit.");
+        } else {
+            ui.label("Minimize keeps the portable launcher in the taskbar. Close (X) exits the application.");
+        }
         ui.add_space(12.);
         self.hidden_project_preferences(ui);
         ui.add_space(12.);

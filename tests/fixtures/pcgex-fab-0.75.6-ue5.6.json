@@ -1,0 +1,124 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.75.6",
+  "FriendlyName": "PCGEx",
+  "EngineVersion": "5.6.0",
+  "MarketplaceURL": "",
+  "CreatedBy": "Timothé Lapetite",
+  "CreatedByURL": "https://github.com/Nebukam/PCGExtendedToolkit",
+  "Installed": true,
+  "Modules": [
+    {
+      "Name": "PCGExtendedToolkit"
+    },
+    {
+      "Name": "PCGExtendedToolkitEditor"
+    },
+    {
+      "Name": "PCGExBlending"
+    },
+    {
+      "Name": "PCGExCollections"
+    },
+    {
+      "Name": "PCGExCollectionsEditor"
+    },
+    {
+      "Name": "PCGExCore"
+    },
+    {
+      "Name": "PCGExCoreEditor"
+    },
+    {
+      "Name": "PCGExElementsActions"
+    },
+    {
+      "Name": "PCGExElementsBridges"
+    },
+    {
+      "Name": "PCGExElementsClipper2"
+    },
+    {
+      "Name": "PCGExElementsClusters"
+    },
+    {
+      "Name": "PCGExElementsClustersDecomp"
+    },
+    {
+      "Name": "PCGExElementsClustersDiagrams"
+    },
+    {
+      "Name": "PCGExElementsClustersEditor"
+    },
+    {
+      "Name": "PCGExElementsClustersRefine"
+    },
+    {
+      "Name": "PCGExElementsClustersRelax"
+    },
+    {
+      "Name": "PCGExElementsFloodFill"
+    },
+    {
+      "Name": "PCGExElementsMeta"
+    },
+    {
+      "Name": "PCGExElementsPathfinding"
+    },
+    {
+      "Name": "PCGExElementsPathfindingNavmesh"
+    },
+    {
+      "Name": "PCGExElementsPaths"
+    },
+    {
+      "Name": "PCGExElementsProbing"
+    },
+    {
+      "Name": "PCGExElementsSampling"
+    },
+    {
+      "Name": "PCGExElementsShapes"
+    },
+    {
+      "Name": "PCGExElementsSpatial"
+    },
+    {
+      "Name": "PCGExElementsTensors"
+    },
+    {
+      "Name": "PCGExElementsTopology"
+    },
+    {
+      "Name": "PCGExFilters"
+    },
+    {
+      "Name": "PCGExFoundations"
+    },
+    {
+      "Name": "PCGExFoundationsEditor"
+    },
+    {
+      "Name": "PCGExGraphs"
+    },
+    {
+      "Name": "PCGExHeuristics"
+    },
+    {
+      "Name": "PCGExMatching"
+    },
+    {
+      "Name": "PCGExNoise3D"
+    },
+    {
+      "Name": "PCGExPickers"
+    },
+    {
+      "Name": "PCGExProperties"
+    },
+    {
+      "Name": "PCGExPropertiesEditor"
+    }
+  ]
+}

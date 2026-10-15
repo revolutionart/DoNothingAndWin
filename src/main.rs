@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod event_loop;
 mod ui;
 mod window_frame;
 fn main() -> eframe::Result {
@@ -104,7 +105,7 @@ fn main() -> eframe::Result {
             .with_title("DoNothing&Win Launcher"),
         ..Default::default()
     };
-    eframe::run_native(
+    event_loop::run(
         "DoNothing&Win Launcher",
         options,
         Box::new(move |cc| {

@@ -54,12 +54,6 @@ pub(super) fn show_with_icon(
             ui.spacing_mut().button_padding = vec2(18., 9.);
             ui.spacing_mut().interact_size.y = 40.;
             ui.spacing_mut().text_edit_width = width;
-            let scroll = &mut ui.style_mut().spacing.scroll;
-            scroll.floating = false;
-            scroll.bar_width = 6.;
-            scroll.floating_width = 6.;
-            scroll.bar_inner_margin = 2.;
-            scroll.bar_outer_margin = 2.;
             let visuals = ui.visuals_mut();
             for widget in [
                 &mut visuals.widgets.inactive,
@@ -154,7 +148,7 @@ pub(super) fn show_with_icon(
                 .clone()
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .clicked();
-            ScrollArea::vertical()
+            AppScrollArea::vertical(theme)
                 .id_salt((id, "body"))
                 .max_height((ctx.content_rect().height() - 200.).max(160.))
                 .auto_shrink([false, true])

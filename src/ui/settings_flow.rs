@@ -130,9 +130,7 @@ impl Workspace {
             ui.style_mut().text_styles.insert(TextStyle::Body,FontId::proportional(16.));
             ui.style_mut().text_styles.insert(TextStyle::Button,FontId::proportional(16.));
             ui.style_mut().text_styles.insert(TextStyle::Heading,FontId::proportional(23.));
-            ui.spacing_mut().scroll.bar_width=6.;
-            ui.spacing_mut().scroll.floating=false;
-            ScrollArea::vertical().id_salt("settings-flow").auto_shrink([false,true]).show(ui,|ui|{
+            AppScrollArea::vertical(&theme).id_salt("settings-flow").auto_shrink([false,true]).show(ui,|ui|{
                 ui.set_width(ui.available_width());ui.spacing_mut().item_spacing=vec2(14.,14.);ui.spacing_mut().button_padding=vec2(18.,10.);
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Epic account");

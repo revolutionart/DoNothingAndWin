@@ -56,17 +56,17 @@ Click any screenshot to view it at full size.
 
 ## Download and install
 
-Download the **[1.0.0 Windows installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.0.0/DoNothingAndWin-Setup-1.0.0.exe)**, or get the portable ZIP and SHA-256 checksums from the **[1.0.0 release](https://github.com/revolutionart/DoNothingAndWin/releases/tag/v1.0.0)**.
+Download the **[1.1.0 Windows installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.1.0/DoNothingAndWin-Setup-1.1.0.exe)**, or get the portable ZIP and SHA-256 checksums from the **[1.1.0 release](https://github.com/revolutionart/DoNothingAndWin/releases/tag/v1.1.0)**. See the [changelog](CHANGELOG.md) for changes.
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
 - **Launch after setup** is checked by default.
 - **Start with Windows** is optional. When selected, **start minimized** is enabled by default and can be unchecked during setup.
-- Minimize keeps the launcher in the taskbar; Close (X) hides it in the system tray. Right-click the tray icon and choose Exit to quit. Downloads settings include an option to start minimized with Windows.
+- Minimize keeps both versions in the taskbar. In the installed version, Close (X) hides the launcher in the system tray; right-click the tray icon and choose Exit to quit. In the portable version, Close (X) exits the application and no tray icon is created. Downloads settings include an option to start minimized with Windows.
 - Setup and uninstall do not delete your Unreal projects or engine installations. Uninstall removes launcher files and its startup entry; local launcher settings are retained.
 - Setup refuses to replace a running launcher. Finish your transfers and exit before installing an update. It never force-closes a download.
 
-The first release is unsigned; Windows may display an unknown-publisher/SmartScreen prompt. Download only from this repository's releases and compare the provided SHA-256 checksums if needed.
+This release is unsigned; Windows may display an unknown-publisher/SmartScreen prompt. Download only from this repository's releases and compare the provided SHA-256 checksums if needed.
 
 ## What it does
 
@@ -76,19 +76,20 @@ The first release is unsigned; Windows may display an unknown-publisher/SmartScr
 - Double-click a project to open it with its associated engine. Missing-engine indicators help identify projects that need another engine installed.
 - Switch between grid and list views, search with a clear button, filter by engine version, and sort by name or recently opened.
 - Browse **All projects**, **Pinned**, and your own category tabs.
+- Last-opened times also use Unreal Editor's local recent-project history when available, including projects opened outside this launcher. Projects without a recorded time show **Last opened unknown**.
 
 Right-click a project, or open its **three-dot menu**, for these actions:
 
 | Option | What it does |
 | --- | --- |
-| **Categories** | Assign a category, remove the assignment, or open the category manager. |
+| **Categories** | Choose an existing category, add a new category and assign the project, or remove its current assignment. |
 | **Hide project** | Keep a project out of the launcher’s project lists without deleting or moving its files. Useful for screenshots or keeping your workspace focused. |
 | **Create desktop shortcut** | Create a shortcut to open the project. |
 | **Clone project** | Make a separate copy of a project. |
 | **Pin project / Unpin** | Add or remove the project from the Pinned tab. |
 | **Show in Folder** | Open the project’s folder in Windows Explorer. |
 
-**Manage categories** sits next to Refresh. Deleting a category removes its assignments; its projects remain under All projects unless hidden. Hidden projects stay hidden across restarts. Restore one project or all of them in **Settings → Hidden projects**.
+**Manage categories** sits next to Refresh. Empty categories can be removed from the manager or by right-clicking their tab. Categories containing projects, including hidden projects, must be emptied first. Hidden projects stay hidden across restarts. Restore one project or all of them in **Settings → Hidden projects**.
 
 ### Engine versions
 
@@ -99,11 +100,13 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 
 ### Fab library and plugins
 
-- Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search, sorting, and engine-version filtering.
+- Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update** (the default) or by name. Fab listing dates load in the background and are cached; items without a date appear last.
+- Search titles, descriptions, tags, and publisher names. Title matches appear first, followed by metadata matches, with the chosen sort order applied within each group. Listing details are cached for responsive searches.
 - Add assets to an existing project, create projects from supported library templates, and install compatible plugins into a selected engine.
 - Enable **Show all projects** when choosing an asset destination. Projects too old for every available asset version are greyed out, with a reason on hover.
 - Manage plugins separately for each engine: search installed plugins, see installed and available versions, check for updates, update, or remove them.
 - Sidebar indicators highlight available plugin updates beside Library and Engine versions.
+- Click a library item's title to open its Fab listing in your default browser. Details sit at the top-right of each thumbnail, and compact cards fit more items per row.
 
 ### Downloads and activity
 
@@ -116,8 +119,9 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 ### Everyday use
 
 - Dark and daylight themes, remembered window size, and cached Workspace checks refreshed in the background.
-- Optional Windows startup and minimized startup. Minimize keeps the app in the taskbar; Close (X) hides it in the tray, where **Exit** quits it.
+- Optional Windows startup and minimized startup. Minimize keeps the app in the taskbar. Close (X) hides the installed version in the tray, where **Exit** quits it; the portable version exits directly.
 - A single launcher instance, with build handoff allowed only when idle so active transfers are preserved.
+- Consistent scrollbars across pages, with a minimum thumb size for large lists. Hidden and minimized windows skip UI rendering and UI-only scans while download workers and scheduled release checks continue.
 
 This does not include Unreal Engine, paid assets, plugins, or games. You use your own Epic account and entitlements. Engine and asset license terms remain their owners' terms. Older assets may be offered for explicit import into a newer project; compatibility is not guaranteed. Assets requiring a newer engine are blocked from older projects.
 
@@ -137,7 +141,9 @@ cargo test --locked --lib --bins --tests
 .\target\release\engine-workspace.exe
 ```
 
-Live account/CDN tests are ignored by default. One offline streaming test writes and verifies a temporary file slightly over 1 GiB, so allow space on your temporary drive.
+Live account/CDN tests and the native-window test are ignored by default. One offline streaming test writes and verifies a temporary file slightly over 1 GiB, so allow space on your temporary drive.
+
+For portable window behavior, build with `cargo build --release --locked --bin engine-workspace --features portable`. The packaging script builds separate installed and portable executables automatically.
 
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php), then run:
 

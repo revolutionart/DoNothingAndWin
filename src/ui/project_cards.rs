@@ -69,7 +69,7 @@ impl Workspace {
             color(t.text),
         );
         let age = if p.last_opened == 0 {
-            "Not opened yet".into()
+            "Last opened unknown".into()
         } else {
             let hours = epic::now().saturating_sub(p.last_opened) / 3600;
             if hours == 0 {

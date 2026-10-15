@@ -4,12 +4,14 @@ Small, focused issues and pull requests are welcome. Include the launcher versio
 
 Run `cargo fmt --check` and `cargo test --locked --lib --bins --tests` before submitting code. Never run ignored live repair/install tests against important data. They require explicit environment configuration.
 
+Also run `cargo test --locked --features portable --bin engine-workspace` for the portable variant. On a Windows desktop, the isolated native-window regression test can be run with `cargo test --release --locked --bin engine-workspace background_window_processes_workers_and_exits_cleanly -- --ignored`; repeat with `--features portable`. It checks background wakeups and normal shutdown without loading accounts or project data.
+
 Keep disk and network work off the UI thread. Preserve download-safe single-instance behavior, streaming writes, path traversal checks, and installation rollback. Never commit local account state or downloaded marketplace content.
 
 ## Release
 
-1. Update `Cargo.toml` and `Cargo.lock`, then test and build with the lockfile.
-2. Run `scripts/package.ps1` with Inno Setup 6 installed. The installer version comes from Cargo.toml.
+1. Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and the README download links, then test and build with the lockfile.
+2. Run `scripts/package.ps1` with Inno Setup 6 installed. The installer version comes from Cargo.toml. The script builds separate installed and portable executables; the portable build uses `--features portable` and never creates a tray icon.
 3. Test install, launch, startup/minimized choices, upgrade refusal while running, and uninstall in an isolated Windows environment. Verify projects outside the application folder are untouched.
 4. Tag the reviewed commit `vVERSION`. The tag workflow builds installer/portable ZIP/checksums as Actions artifacts for review; publication is manual.
 5. Attach the installer, portable ZIP, and SHA256SUMS.txt to a GitHub release.

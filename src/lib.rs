@@ -15,8 +15,11 @@ pub mod login;
 pub mod maintenance;
 
 pub mod fab;
+pub mod fab_listing;
+pub mod fab_search;
 
 pub mod project_clone;
+pub mod project_history;
 
 pub mod download_policy;
 

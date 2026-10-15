@@ -21,6 +21,15 @@ pub struct Version {
     #[serde(default)]
     pub target_platforms: Vec<String>,
 }
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SearchMetadata {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub publisher: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
@@ -28,11 +37,21 @@ pub struct Item {
     pub asset_namespace: String,
     pub title: String,
     #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub seller: Option<String>,
+    #[serde(default)]
+    pub listing_search: Option<SearchMetadata>,
+    #[serde(default)]
     pub distribution_method: String,
     #[serde(default)]
     pub project_versions: Vec<Version>,
     #[serde(default)]
     pub images: Option<Vec<Value>>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub listing_updated_at: Option<i64>,
 }
 impl Item {
     pub fn key(&self) -> String {
@@ -174,6 +193,15 @@ pub fn library(session: &Session, progress: impl Fn(usize)) -> Result<Vec<Item>,
                 continue;
             }
             if let Some(old) = items.get_mut(&item.key()) {
+                if old.url.is_none() {
+                    old.url = item.url;
+                }
+                if old.description.is_none() {
+                    old.description = item.description;
+                }
+                if old.seller.is_none() {
+                    old.seller = item.seller;
+                }
                 for v in item.project_versions {
                     if let Some(existing) = old
                         .project_versions
