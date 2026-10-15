@@ -1,0 +1,1194 @@
+{
+  "metadata": {},
+  "elements": [
+    {
+      "id": "fbc8f00a16b9411989ae12a00060ff34",
+      "title": "Unreal Engine Preview",
+      "description": "Preview 4",
+      "longDescription": "Preview",
+      "technicalDetails": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines"
+        },
+        {
+          "path": "engines/ue4"
+        },
+        {
+          "path": "engines/preview"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2014-07-17T18:24:47.798Z",
+      "lastModifiedDate": "2021-08-19T12:49:27.899Z",
+      "customAttributes": {
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "UE_Production",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "unsearchable": false
+    },
+    {
+      "id": "ed2b249a315e4493b084233d5167fea3",
+      "title": "4.27-Chaos",
+      "description": "4.27-Chaos",
+      "longDescription": "Preview 3",
+      "technicalDetails": "Warning: This is a custom distribution of UE4 with Chaos Engine enabled.",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/unstable"
+        },
+        {
+          "path": "engines"
+        },
+        {
+          "path": "engines/ue4"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2021-08-17T14:52:54.981Z",
+      "lastModifiedDate": "2022-12-07T13:35:50.671Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_4.27Chaos:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 14, \"MinRevision\": 6 }}}"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "ed2b249a315e4493b084233d5167fea3",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "6edcbae7662b47c3bb41248e847ccd22",
+          "appId": "UE_4.27Chaos",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2020-11-11T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "aa3bb95475084190ac97c8cab3c79ab1",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [
+        {
+          "type": "DieselGameBoxTall",
+          "url": "https://cdn1.epicgames.com/item/ue/ue_tall_1200x1600-bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "md5": "bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "width": 1200,
+          "height": 1600,
+          "size": 455570,
+          "uploadedDate": "2024-10-18T16:12:43.273Z"
+        }
+      ],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2023-06-20T14:27:30.750Z",
+      "lastModifiedDate": "2024-10-18T16:12:46.213Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.3:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}}"
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "aa3bb95475084190ac97c8cab3c79ab1",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "938c3caefaf149ae9b4efa42f4459e9e",
+          "appId": "UE_5.3",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "971660b9efb0475f929ccd9770061fe9",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [
+        {
+          "type": "DieselGameBoxTall",
+          "url": "https://cdn1.epicgames.com/item/ue/ue_tall_1200x1600-bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "md5": "bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "width": 1200,
+          "height": 1600,
+          "size": 455570,
+          "uploadedDate": "2024-10-18T16:14:24.729Z"
+        }
+      ],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2022-08-31T20:42:57.504Z",
+      "lastModifiedDate": "2024-10-18T16:14:27.357Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.1:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 14, \"MinRevision\": 6 }}}"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "UE5_Release-5.1",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "0ea18e08ae144556a59c9b962424d84a",
+          "appId": "UE_5.1",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "73923380f4d944d5bcb6d77a0640d26d",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2025-04-18T13:55:18.540Z",
+      "lastModifiedDate": "2025-06-03T13:23:08.283Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.4:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}} "
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "73923380f4d944d5bcb6d77a0640d26d",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "eaa3054def4849c185df6c9ceeff22e4",
+          "appId": "UE_5.6",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine2"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "7299c1cd206b4bb58658a98199b66860",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2025-08-29T14:27:32.938Z",
+      "lastModifiedDate": "2025-11-12T14:04:24.371Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.4:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}} "
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "7299c1cd206b4bb58658a98199b66860",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "eaa3054def4849c185df6c9ceeff22e4",
+          "appId": "UE_5.7",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2025-08-29T14:26:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine2"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "5e7c497460f64ae19e6c3aaef8b421cc",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [
+        {
+          "type": "DieselGameBoxTall",
+          "url": "https://cdn1.epicgames.com/item/ue/ue_tall_1200x1600-bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "md5": "bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "width": 1200,
+          "height": 1600,
+          "size": 455570,
+          "uploadedDate": "2024-10-18T16:12:25.211Z"
+        }
+      ],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2024-01-25T23:49:03.834Z",
+      "lastModifiedDate": "2024-10-18T16:12:28.643Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.4:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}} "
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "UE5_Release-5.4",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "eaa3054def4849c185df6c9ceeff22e4",
+          "appId": "UE_5.4",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine2"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "5cba2afac392412a99c6b42d04c816e2",
+      "title": "Unreal Engine Chaos",
+      "description": "4.26-Chaos",
+      "longDescription": "Preview 3",
+      "technicalDetails": "Warning: Watch for falling rocks\n\nHelp us improve and harden the future of physics simulation in Unreal Engine with this special Chaos-enabled build. It may be a little rough around the edges, and we will be actively improving it with bug fixes and features, so we don’t recommend using it for active development. If you love being on the cutting edge of technology, or just like testing the limits of what’s possible, jump in and let us know what you think.\n\nAdditional information about this release is available on the <ExternalLink style=\"SelfUpdateError.Hyperlink\" href=\"https://forums.unrealengine.com/unreal-engine/announcements-and-releases/1843949\">Unreal Engine Forums.</>\n\nPlease submit feedback and bugs to: <ExternalLink style=\"SelfUpdateError.Hyperlink\" href=\"https://www.unrealengine.com/support/report-a-bug\">https://www.unrealengine.com/support/report-a-bug</>",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/unstable"
+        },
+        {
+          "path": "engines"
+        },
+        {
+          "path": "engines/ue4"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2020-11-20T23:45:42.669Z",
+      "lastModifiedDate": "2022-12-07T13:36:03.487Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_4.26Chaos:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 14, \"MinRevision\": 6 }}} "
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "5cba2afac392412a99c6b42d04c816e2",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "6de4a7ce22194f3fa08816488ea0274f",
+          "appId": "UE_4.26Chaos",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2020-11-20T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "59faf4b47bc847c1946463e6a6e6cc98",
+      "title": "UE5 Preview",
+      "description": "Preview 2",
+      "longDescription": "",
+      "technicalDetails": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines"
+        },
+        {
+          "path": "engines/preview"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2022-02-02T17:52:19.028Z",
+      "lastModifiedDate": "2022-04-05T15:05:09.212Z",
+      "customAttributes": {
+        "UE_5.0:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 15, \"MinRevision\": 7 }}}"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "59faf4b47bc847c1946463e6a6e6cc98",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "3ddb1bad6e004b99a7192c1a29f2318a",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "technicalDetails": "",
+      "keyImages": [
+        {
+          "type": "DieselGameBoxTall",
+          "url": "https://cdn1.epicgames.com/salesEvent/salesEvent/EGS_UE_Image_1200x1600_v02_1200x1600-bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "md5": "bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "width": 1200,
+          "height": 1600,
+          "size": 455570,
+          "uploadedDate": "2021-07-28T15:36:38.374Z",
+          "alt": "Unreal Engine"
+        },
+        {
+          "type": "DieselGameBox",
+          "url": "https://cdn1.epicgames.com/salesEvent/salesEvent/EGS_UE_Image_1920x1080_v02_1920x1080-bbd3ff6a952904dede246c3e6e9827da",
+          "md5": "bbd3ff6a952904dede246c3e6e9827da",
+          "width": 1920,
+          "height": 1080,
+          "size": 542586,
+          "uploadedDate": "2021-07-28T15:36:48.975Z",
+          "alt": "Unreal Engine"
+        }
+      ],
+      "categories": [
+        {
+          "path": "engines"
+        },
+        {
+          "path": "engines/ue4"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2014-07-17T18:24:26.207Z",
+      "lastModifiedDate": "2023-03-20T20:10:16.975Z",
+      "customAttributes": {
+        "UE_4.21:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.26:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 14, \"MinRevision\": 6 }}} "
+        },
+        "UE_4.15:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 11, \"MinRevision\": 6 }}}"
+        },
+        "egs.links.github_source": {
+          "type": "STRING",
+          "value": "https://github.com/"
+        },
+        "UE_4.13:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 10, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.23:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}} "
+        },
+        "UE_4.24:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}} "
+        },
+        "UE_4.17:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 11, \"MinRevision\": 6 }}}"
+        },
+        "RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 }}}"
+        },
+        "UE_4.11:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 10, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.19:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 12, \"MinRevision\": 6 }}}"
+        },
+        "UE_4.27:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 14, \"MinRevision\": 6 }}} "
+        },
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_4.14:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 10, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.20:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.25:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}} "
+        },
+        "UE_4.22:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}}"
+        },
+        "egs.links.release_notes": {
+          "type": "STRING",
+          "value": "https://www.unrealengine.com/en-US/release-notes"
+        },
+        "UE_4.12:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 10, \"MinRevision\": 5 }}}"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_4.16:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 11, \"MinRevision\": 6 }}}"
+        },
+        "UE_MagicLeapEA:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 13, \"MinRevision\": 5 }}}"
+        },
+        "UE_4.18:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 10, \"MinMinorVersion\": 12, \"MinRevision\": 6 }}}"
+        }
+      },
+      "entitlementName": "UE_Production",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "SUBSCRIPTION",
+      "releaseInfo": [
+        {
+          "id": "6b7d9f02bd364f058fc925449cfc45b2",
+          "appId": "UE_4.0",
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-03-20T00:00:00.000Z"
+        },
+        {
+          "id": "14bb5c576d6647778a17edbc51447de0",
+          "appId": "UE_4.1",
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-04-23T00:00:00.000Z"
+        },
+        {
+          "id": "935749e839f5436dade69e0ae55bd22f",
+          "appId": "UE_4.10",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2015-11-11T00:00:00.000Z"
+        },
+        {
+          "id": "65e1e369867d4fb8a88911ab4597b867",
+          "appId": "UE_4.11",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2016-03-31T00:00:00.000Z"
+        },
+        {
+          "id": "970401e2ff664aaf92db7b20efc071b7",
+          "appId": "UE_4.12",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2016-06-01T00:00:00.000Z"
+        },
+        {
+          "id": "6d41f2937c5f495d8f2003bca8d735d3",
+          "appId": "UE_4.13",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2016-09-01T00:00:00.000Z"
+        },
+        {
+          "id": "037948e2bd6c41e6b3ce9ddbd65cdf59",
+          "appId": "UE_4.14",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2016-11-15T00:00:00.000Z"
+        },
+        {
+          "id": "30ff5f00ea1c4bbe95ee63597f68161a",
+          "appId": "UE_4.15",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2017-02-15T00:00:00.000Z"
+        },
+        {
+          "id": "0bce45edc8e943c58e69e8c8227e45de",
+          "appId": "UE_4.16",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2017-05-24T00:00:00.000Z"
+        },
+        {
+          "id": "d4f86e79ac8d448eb39917648e6308e0",
+          "appId": "UE_4.17",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2017-08-07T00:00:00.000Z"
+        },
+        {
+          "id": "b1e5ebab78e1425594c0c5fbcb1fe51a",
+          "appId": "UE_4.18",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2017-10-24T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "af696eb9e07741b5894c0651eb121cee",
+          "appId": "UE_4.19",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2018-03-14T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "b2f209140e4f4ba3878ed745071d2580",
+          "appId": "UE_4.2",
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-06-04T00:00:00.000Z"
+        },
+        {
+          "id": "668c65f2e9334b48a5d8630804f08a98",
+          "appId": "UE_4.20",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2018-07-18T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "3558f6d13a0c421bb1a50e863342b143",
+          "appId": "UE_4.21",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2018-11-07T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "fa8edb77654543cc8d7abc4169ba6c65",
+          "appId": "UE_4.22",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2019-04-02T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "becd81dcfbbb45738c820f618516d1fa",
+          "appId": "UE_4.23",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2019-09-04T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "64f0b0e080d64916a25d0039e170f598",
+          "appId": "UE_4.24",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2019-12-09T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "6e6feacfb11c4718b73d3474c7f53119",
+          "appId": "UE_4.25",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2020-05-05T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "f1e23a89e68e49e2a841772cffe1d8a6",
+          "appId": "UE_4.26",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2020-12-03T00:00:00.000Z",
+          "releaseNote": "",
+          "versionTitle": ""
+        },
+        {
+          "id": "f1469bc8bc8349fcadc69444e63cc928",
+          "appId": "UE_4.27",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2021-08-19T13:04:07.026Z"
+        },
+        {
+          "id": "bc5486f6c11342c59c1c889ecf24342c",
+          "appId": "UE_4.3",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-07-31T00:00:00.000Z"
+        },
+        {
+          "id": "03dae926ef914357a9366467bcb19ef7",
+          "appId": "UE_4.4",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-08-01T00:00:00.000Z"
+        },
+        {
+          "id": "07ec21e5607c4b408f617349e18dc0c8",
+          "appId": "UE_4.5",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-10-13T00:00:00.000Z"
+        },
+        {
+          "id": "865ac60f89f64685ade731db46afa605",
+          "appId": "UE_4.6",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2014-12-02T00:00:00.000Z"
+        },
+        {
+          "id": "438f35e1307844ea90cc092b44378800",
+          "appId": "UE_4.7",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2015-02-23T00:00:00.000Z"
+        },
+        {
+          "id": "ac5a38480a7c4f0897f6cbb0197096ba",
+          "appId": "UE_4.8",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2015-06-10T00:00:00.000Z"
+        },
+        {
+          "id": "5eed501cc2284e2f99701b4267659ca4",
+          "appId": "UE_4.9",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2015-08-31T00:00:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "unsearchable": false
+    },
+    {
+      "id": "1b3c549b6a724e90ad94d9c1f410bc96",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2024-09-05T13:28:27.382Z",
+      "lastModifiedDate": "2024-11-12T13:39:09.965Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.4:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}} "
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "1b3c549b6a724e90ad94d9c1f410bc96",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "eaa3054def4849c185df6c9ceeff22e4",
+          "appId": "UE_5.5",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine2"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "18b3b415bc434c5b974f50488360ca31",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2026-04-10T13:37:23.556Z",
+      "lastModifiedDate": "2026-06-17T13:05:32.738Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.7:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}}   "
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "18b3b415bc434c5b974f50488360ca31",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "eaa3054def4849c185df6c9ceeff22e4",
+          "appId": "UE_5.8",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2026-04-10T13:33:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine2"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    },
+    {
+      "id": "0eac53dcfe8748598f1dbded4daa624a",
+      "title": "Unreal Engine",
+      "description": "Unreal Engine",
+      "longDescription": "",
+      "keyImages": [
+        {
+          "type": "DieselGameBoxTall",
+          "url": "https://cdn1.epicgames.com/item/ue/ue_tall_1200x1600-bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "md5": "bde65bd99ba98e9bf0c9aed33e92ffd5",
+          "width": 1200,
+          "height": 1600,
+          "size": 455570,
+          "uploadedDate": "2024-10-18T16:13:20.395Z"
+        }
+      ],
+      "categories": [
+        {
+          "path": "engines/ue5"
+        },
+        {
+          "path": "engines"
+        }
+      ],
+      "namespace": "ue",
+      "status": "ACTIVE",
+      "creationDate": "2023-01-25T18:03:17.573Z",
+      "lastModifiedDate": "2024-10-18T16:13:22.530Z",
+      "customAttributes": {
+        "CanSkipCabinedWarning": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "UE_5.2:RequirementsJson": {
+          "type": "STRING",
+          "value": "{\"Requirements\": {\"Windows\": { \"MinMajorVersion\": 6, \"MinMinorVersion\": 1, \"MinServicePackVersion\": 1 },\"MacOS\": { \"MinMajorVersion\": 12, \"MinMinorVersion\": 5, \"MinRevision\": 0 }}}"
+        },
+        "NotarizedAndSigned": {
+          "type": "STRING",
+          "value": "true"
+        },
+        "AllowMultipleInstances": {
+          "type": "STRING",
+          "value": "true"
+        }
+      },
+      "entitlementName": "0eac53dcfe8748598f1dbded4daa624a",
+      "entitlementType": "EXECUTABLE",
+      "itemType": "DURABLE",
+      "releaseInfo": [
+        {
+          "id": "b0206ad7ed6948e69da89e7a7b632162",
+          "appId": "UE_5.2",
+          "compatibleApps": [],
+          "platform": [
+            "Windows",
+            "Mac"
+          ],
+          "dateAdded": "2022-04-04T14:17:00.000Z"
+        }
+      ],
+      "developer": "Epic Games",
+      "developerId": "o-aa83a0a9bc45e98c80c1b1c9d92e9e",
+      "eulaIds": [
+        "unreal_engine"
+      ],
+      "endOfSupport": false,
+      "ageGatings": {},
+      "applicationId": "",
+      "requiresSecureAccount": false,
+      "unsearchable": false
+    }
+  ],
+  "paging": {
+    "count": 100,
+    "start": 0,
+    "total": 13
+  }
+}

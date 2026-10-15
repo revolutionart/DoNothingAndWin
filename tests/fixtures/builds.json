@@ -1,0 +1,275 @@
+﻿[
+    {
+        "appName":  "UE_5.2",
+        "namespace":  "ue",
+        "catalogItemId":  "0eac53dcfe8748598f1dbded4daa624a",
+        "buildVersion":  "5.2.1-26001984+++UE5+Release-5.2-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.8",
+        "namespace":  "ue",
+        "catalogItemId":  "18b3b415bc434c5b974f50488360ca31",
+        "buildVersion":  "5.8.3-58210709+++UE5+Release-5.8-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.5",
+        "namespace":  "ue",
+        "catalogItemId":  "1b3c549b6a724e90ad94d9c1f410bc96",
+        "buildVersion":  "5.5.4-40574608+++UE5+Release-5.5-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.0",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.0.2-2034640+++depot+UE4-Releases+4.0-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.1",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.1.2-2109544+++depot+UE4-Releases+4.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.10",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.10.4-2872498+++depot+UE4-Releases+4.10-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.11",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.11.2-2946394+++UE4+Release-4.11-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.12",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.12.5-3039270+++UE4+Release-4.12-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.13",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.13.2-3172292+++UE4+Release-4.13-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.14",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.14.3-3249277+++UE4+Release-4.14-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.15",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.15.3-3450819+++UE4+Release-4.15-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.16",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.16.3-3561208+++UE4+Release-4.16-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.17",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.17.2-3658906+++UE4+Release-4.17-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.18",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.18.3-3832480+++UE4+Release-4.18-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.19",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.19.2-4033788+++UE4+Release-4.19-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.2",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.2.1-2101290+++depot+UE4-Releases+4.2-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.20",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.20.3-4369336+++UE4+Release-4.20-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.21",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.21.2-4753647+++UE4+Release-4.21-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.22",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.22.3-7053642+++UE4+Release-4.22-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.23",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.23.1-9631420+++UE4+Release-4.23-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.24",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.24.3-11590370+++UE4+Release-4.24-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.25",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.25.4-14469661+++UE4+Release-4.25-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.26",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.26.2-15973114+++UE4+Release-4.26-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.27",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.27.2-18319896+++UE4+Release-4.27-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.3",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.3.1-2226335+++depot+UE4-Releases+4.3-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.4",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.4.3-2296771+++depot+UE4-Releases+4.4-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.5",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.5.1-2336687+++depot+UE4-Releases+4.5-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.6",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.6.1-2386410+++depot+UE4-Releases+4.6-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.7",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.7.6-2513093+++depot+UE4-Releases+4.7-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.8",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.8.3-2634408+++depot+UE4-Releases+4.8-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.9",
+        "namespace":  "ue",
+        "catalogItemId":  "3ddb1bad6e004b99a7192c1a29f2318a",
+        "buildVersion":  "4.9.2-2707645+++depot+UE4-Releases+4.9-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.26Chaos",
+        "namespace":  "ue",
+        "catalogItemId":  "5cba2afac392412a99c6b42d04c816e2",
+        "buildVersion":  "4.26.2-15903758+++UE4+Release-4.26-Chaos-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.4",
+        "namespace":  "ue",
+        "catalogItemId":  "5e7c497460f64ae19e6c3aaef8b421cc",
+        "buildVersion":  "5.4.4-35576357+++UE5+Release-5.4-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.7",
+        "namespace":  "ue",
+        "catalogItemId":  "7299c1cd206b4bb58658a98199b66860",
+        "buildVersion":  "5.7.4-51494982+++UE5+Release-5.7-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.6",
+        "namespace":  "ue",
+        "catalogItemId":  "73923380f4d944d5bcb6d77a0640d26d",
+        "buildVersion":  "5.6.1-44394996+++UE5+Release-5.6-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.1",
+        "namespace":  "ue",
+        "catalogItemId":  "971660b9efb0475f929ccd9770061fe9",
+        "buildVersion":  "5.1.1-23901901+++UE5+Release-5.1-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.3",
+        "namespace":  "ue",
+        "catalogItemId":  "aa3bb95475084190ac97c8cab3c79ab1",
+        "buildVersion":  "5.3.2-29314046+++UE5+Release-5.3-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_5.0",
+        "namespace":  "ue",
+        "catalogItemId":  "d33c86e1279b45fc9a889f5e64ed6705",
+        "buildVersion":  "5.0.3-20979098+++UE5+Release-5.0-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    },
+    {
+        "appName":  "UE_4.27Chaos",
+        "namespace":  "ue",
+        "catalogItemId":  "ed2b249a315e4493b084233d5167fea3",
+        "buildVersion":  "4.27.2-18386882+++UE4+Release-4.27-Chaos-2023.1-Windows",
+        "labelName":  "Live-Windows"
+    }
+]

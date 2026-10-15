@@ -1,0 +1,29 @@
+name: Windows build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Format
+        run: cargo +stable fmt --check
+      - name: Test
+        run: cargo +stable test --release --locked --lib --bins --tests
+      - name: Package
+        run: ./scripts/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DoNothingAndWin-Windows
+          path: |
+            dist/DoNothingAndWin-Setup-*.exe
+            dist/DoNothingAndWin-Portable-*.zip
+            dist/SHA256SUMS.txt

@@ -1,0 +1,922 @@
+use super::*;
+use engine_workspace::{
+    download_policy,
+    storage::{Activity, DownloadSettings},
+};
+#[derive(Default)]
+pub(super) struct Downloads {
+    pub settings: bool,
+    recent: bool,
+    search: String,
+    history: Vec<Activity>,
+    save_error: Option<String>,
+    saved_at: Option<Instant>,
+}
+impl Downloads {
+    pub fn load() -> Self {
+        Self {
+            history: storage::read_json(&storage::data_dir().join("download-history.json"))
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+}
+fn draw_icon(ui: &Ui, theme: &Theme, icon: Icon, rect: Rect, tint: [u8; 3]) {
+    let canvas = Canvas {
+        origin: rect.min,
+        width: rect.width(),
+        height: rect.height(),
+        sx: 1.,
+        sy: 1.,
+        theme: theme.clone(),
+    };
+    canvas.icon(ui, icon, 0., 0., rect.width(), tint);
+}
+fn icon_button(ui: &mut Ui, theme: &Theme, label: &str, icon: Icon) -> bool {
+    let text =
+        ui.painter()
+            .layout_no_wrap(label.into(), FontId::proportional(16.), color(theme.text));
+    let (rect, response) = ui.allocate_exact_size(vec2(text.size().x + 60., 38.), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    let hover = response.hovered() || response.is_pointer_button_down_on();
+    ui.painter().rect(
+        rect,
+        5.,
+        color(if hover { SIDEBAR_HIGHLIGHT } else { theme.card }),
+        if hover {
+            Stroke::NONE
+        } else {
+            Stroke::new(1., color(theme.border))
+        },
+        StrokeKind::Inside,
+    );
+    draw_icon(
+        ui,
+        theme,
+        icon,
+        Rect::from_min_size(rect.min + vec2(14., 10.), vec2(18., 18.)),
+        if hover {
+            SIDEBAR_ON_HIGHLIGHT
+        } else {
+            theme.text
+        },
+    );
+    ui.painter().galley_with_override_text_color(
+        rect.min + vec2(40., (38. - text.size().y) / 2.),
+        text,
+        color(if hover {
+            SIDEBAR_ON_HIGHLIGHT
+        } else {
+            theme.text
+        }),
+    );
+    response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+}
+fn panel<R>(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    subtitle: Option<&str>,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    Frame::new()
+        .fill(color(theme.panel))
+        .stroke(Stroke::new(1., color(theme.border)))
+        .corner_radius(6.)
+        .inner_margin(20)
+        .show(ui, |ui| {
+            ui.set_width((ui.available_width() - 2.).max(100.));
+            if title != "Latest activity" {
+                ui.horizontal(|ui| {
+                    let icon = match title {
+                        "Installation preferences" => Icon::Gear,
+                        "Download speed" => Icon::Speed,
+                        "Install location" => Icon::Folder,
+                        "Fab asset cache" => Icon::Database,
+                        "Download queue" => Icon::Layers,
+                        "Storage" => Icon::Storage,
+                        "Latest activity" => Icon::List,
+                        _ => Icon::Search,
+                    };
+                    let (rect, _) = ui.allocate_exact_size(vec2(30., 30.), Sense::hover());
+                    draw_icon(ui, theme, icon, rect, theme.text);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(title)
+                                .size(22.)
+                                .strong()
+                                .color(ui.visuals().text_color()),
+                        );
+                        if let Some(s) = subtitle {
+                            ui.label(RichText::new(s).size(14.).color(color(theme.muted)));
+                        }
+                    });
+                });
+                ui.add_space(10.);
+                ui.separator();
+                ui.add_space(10.);
+            }
+            body(ui)
+        })
+        .inner
+}
+fn toggle(ui: &mut Ui, theme: &Theme, value: &mut bool, title: &str, description: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal_top(|ui| {
+        let (r, response) = ui.allocate_exact_size(vec2(46., 26.), Sense::click());
+        if response
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            *value = !*value;
+            changed = true;
+        }
+        response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, *value, title));
+        ui.painter().rect_filled(
+            r,
+            13.,
+            color(if *value { theme.accent } else { theme.button }),
+        );
+        ui.painter().circle_filled(
+            pos2(
+                if *value {
+                    r.right() - 13.
+                } else {
+                    r.left() + 13.
+                },
+                r.center().y,
+            ),
+            9.,
+            Color32::WHITE,
+        );
+        ui.add_space(8.);
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(title)
+                    .strong()
+                    .color(ui.visuals().text_color())
+                    .size(16.),
+            );
+            ui.label(
+                RichText::new(description)
+                    .color(color(theme.muted))
+                    .size(14.),
+            );
+        });
+    });
+    ui.add_space(14.);
+    changed
+}
+impl Workspace {
+    pub(super) fn record_activity(
+        &mut self,
+        item: String,
+        engine: String,
+        result: &Result<String, String>,
+    ) {
+        if self.demo {
+            return;
+        }
+        let success = result.is_ok();
+        let message = match result {
+            Ok(s) | Err(s) => s.clone(),
+        };
+        self.downloads.history.insert(
+            0,
+            Activity {
+                item,
+                engine,
+                completed: epic::now(),
+                success,
+                message: message.clone(),
+                seen: false,
+            },
+        );
+        self.downloads.history.truncate(500);
+        if let Err(e) = storage::write_json(
+            &storage::data_dir().join("download-history.json"),
+            &self.downloads.history,
+        ) {
+            self.notify(format!("Could not save download history: {e}"));
+        }
+        if success && self.prefs.downloads.notify_complete {
+            crate::window_frame::completion_notice(&message);
+        }
+    }
+    pub(super) fn downloads_view(&mut self, ui: &mut Ui, c: &Canvas) {
+        let theme = self.theme.clone();
+        if c.button(
+            ui,
+            "download-settings",
+            button_slot([c.width - 246., 38., 220., 34.]),
+            if self.downloads.settings {
+                "Back to downloads"
+            } else {
+                "Download settings"
+            },
+            Some(if self.downloads.settings {
+                Icon::Back
+            } else {
+                Icon::Gear
+            }),
+            false,
+        ) {
+            self.downloads.settings = !self.downloads.settings;
+        }
+        c.line(ui, [266., 104.], [c.width - 26., 104.], theme.border);
+        let rect = c.rect([266., 119., c.width - 292., (c.height - 171.).max(200.)]);
+        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+            ui.spacing_mut().item_spacing = vec2(12., 10.);
+            ui.style_mut().override_font_id = Some(FontId::proportional(16.));
+            let scroll = &mut ui.spacing_mut().scroll;
+            scroll.floating = false;
+            scroll.bar_width = 6.;
+            scroll.floating_width = 6.;
+            ScrollArea::vertical()
+                .id_salt("downloads-content")
+                .show(ui, |ui| {
+                    ui.set_width((rect.width() - 12.).max(250.));
+                    if self.downloads.settings {
+                        self.download_settings(ui, &theme);
+                    } else {
+                        self.download_overview(ui, &theme);
+                    }
+                });
+        });
+    }
+    fn download_overview(&mut self, ui: &mut Ui, t: &Theme) {
+        let recent_count = self.downloads.history.iter().filter(|a| a.success).count();
+        ui.horizontal(|ui| {
+            for (recent, label) in [
+                (false, "Overview".to_owned()),
+                (true, format!("Recently updated ({recent_count})")),
+            ] {
+                let selected = self.downloads.recent == recent;
+                let response = ui.add(
+                    Button::new(RichText::new(label).size(16.).color(color(if selected {
+                        t.on_accent
+                    } else {
+                        t.text
+                    })))
+                    .fill(color(if selected { t.accent } else { t.background }))
+                    .stroke(Stroke::NONE)
+                    .min_size(vec2(116., 38.)),
+                );
+                if response
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.downloads.recent = recent;
+                }
+            }
+        });
+        ui.add_space(6.);
+        let active = self.transfer.busy() as usize
+            + self.plugin_work.mutating as usize
+            + self.library_transfer_status().is_some() as usize;
+        if ui.available_width() > 900. {
+            let main_width = ui.available_width() - 290.;
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(main_width, 0.),
+                    Layout::top_down(Align::Min),
+                    |ui| self.download_main(ui, t, active),
+                );
+                ui.vertical(|ui| {
+                    ui.set_width(270.);
+                    self.download_side(ui, t, active);
+                });
+            });
+        } else {
+            self.download_main(ui, t, active);
+            self.download_side(ui, t, active);
+        }
+    }
+    fn download_main(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
+        if !self.downloads.recent {
+            Frame::new()
+                .fill(color(t.card))
+                .stroke(Stroke::new(1.5, color(t.accent)))
+                .corner_radius(6.)
+                .inner_margin(22)
+                .show(ui, |ui| {
+                    ui.set_width((ui.available_width() - 2.).max(200.));
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
+                        draw_icon(
+                            ui,
+                            t,
+                            if active == 0 {
+                                Icon::Check
+                            } else {
+                                Icon::Download
+                            },
+                            r,
+                            t.accent,
+                        );
+                        ui.add_space(8.);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(if active == 0 {
+                                    "You're all caught up"
+                                } else {
+                                    "Installation activity"
+                                })
+                                .size(25.)
+                                .strong()
+                                .color(ui.visuals().text_color()),
+                            );
+                            if active == 0 {
+                                ui.label("No downloads in progress.");
+                            }
+                        });
+                    });
+                    if self.transfer.busy() {
+                        ui.label(&self.transfer.state);
+                        let p = self.transfer.progress.lock().unwrap().clone();
+                        if p.total == 0 {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().color(if self.theme.dark {
+                                    Color32::WHITE
+                                } else {
+                                    color(self.theme.text)
+                                }));
+                                ui.label(&p.phase);
+                            });
+                            indeterminate_progress(
+                                ui,
+                                ui.available_width(),
+                                8.,
+                                t.accent,
+                                t.border,
+                            );
+                            ui.label(
+                                RichText::new("Preparing files and calculating download size…")
+                                    .color(color(t.muted)),
+                            );
+                        } else {
+                            ui.label(&p.phase);
+                            ui.add(
+                                ProgressBar::new(
+                                    (p.completed as f32 / p.total as f32).clamp(0., 1.),
+                                )
+                                .show_percentage()
+                                .desired_width(ui.available_width()),
+                            );
+                            ui.label(format!(
+                                "{:.2} / {:.2} GB • {:.2} GB downloaded",
+                                p.completed as f64 / 1e9,
+                                p.total as f64 / 1e9,
+                                p.network as f64 / 1e9
+                            ));
+                        }
+                        if self.transfer.downloading
+                            && self.transfer.maintenance != Some(true)
+                            && ui
+                                .button("Stop transfer")
+                                .clone()
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .clicked()
+                        {
+                            self.transfer.control.stop();
+                        }
+                    }
+                    if let Some(s) = self.library_transfer_status() {
+                        ui.add(egui::Spinner::new().color(if self.theme.dark {
+                            Color32::WHITE
+                        } else {
+                            color(self.theme.text)
+                        }));
+                        ui.label(s);
+                    }
+                    if self.plugin_work.mutating {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().color(if self.theme.dark {
+                                Color32::WHITE
+                            } else {
+                                color(self.theme.text)
+                            }));
+                            ui.label(&self.plugin_work.status);
+                        });
+                        indeterminate_progress(ui, ui.available_width(), 8., t.accent, t.border);
+                    }
+                });
+            if !self.transfer.busy()
+                && self.transfer.plan.is_some()
+                && self.transfer.installed.is_none()
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(&self.transfer.state);
+                    if ui
+                        .button("Resume engine installation")
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.transfer.modal = true;
+                    }
+                    if ui
+                        .button("Dismiss")
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Clear this resume entry. Downloaded files and chunks are kept; install again to the same destination to reuse them.")
+                        .clicked()
+                    {
+                        self.transfer.dismiss_install();
+                    }
+                });
+            }
+            if let Some(path) = self.transfer.installed.clone() {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Open engine folder")
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        if let Err(e) = platform::open_external(&path.to_string_lossy()) {
+                            self.notify(e);
+                        }
+                    }
+                    let prereq = path.join("Engine/Extras/Redist/en-us/UEPrereqSetup_x64.exe");
+                    if prereq.is_file()
+                        && ui
+                            .button("Run prerequisites")
+                            .clone()
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                    {
+                        if let Err(e) = platform::open_external(&prereq.to_string_lossy()) {
+                            self.notify(e);
+                        }
+                    }
+                });
+            }
+            ui.add_space(4.);
+        }
+        panel(ui, t, "Latest activity", None, |ui| {
+            let wide = ui.available_width() > 900.;
+            if !wide {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(26., 26.), Sense::hover());
+                    draw_icon(ui, t, Icon::List, r, t.text);
+                    ui.label(
+                        RichText::new("Latest activity")
+                            .size(22.)
+                            .strong()
+                            .color(ui.visuals().text_color()),
+                    );
+                });
+            }
+            ui.horizontal(|ui| {
+                if wide {
+                    let (r, _) = ui.allocate_exact_size(vec2(26., 26.), Sense::hover());
+                    draw_icon(ui, t, Icon::List, r, t.text);
+                    ui.add_sized(
+                        [200., 34.],
+                        Label::new(
+                            RichText::new("Latest activity")
+                                .size(22.)
+                                .strong()
+                                .color(ui.visuals().text_color()),
+                        ),
+                    );
+                }
+                search_field(
+                    ui,
+                    &mut self.downloads.search,
+                    "Search activity...",
+                    (ui.available_width() - 300.).max(100.),
+                    t,
+                    1.,
+                );
+                if ui
+                    .add_enabled(
+                        !self.downloads.history.is_empty(),
+                        Button::new("Clear history"),
+                    )
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    let empty: Vec<Activity> = vec![];
+                    match storage::write_json(
+                        &storage::data_dir().join("download-history.json"),
+                        &empty,
+                    ) {
+                        Ok(()) => {
+                            self.downloads.history.clear();
+                            self.notify("Download history cleared.");
+                        }
+                        Err(e) => self.notify(format!("Could not clear history: {e}")),
+                    }
+                }
+                if ui
+                    .button("Mark all as seen")
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    for a in &mut self.downloads.history {
+                        a.seen = true;
+                    }
+                    if let Err(e) = storage::write_json(
+                        &storage::data_dir().join("download-history.json"),
+                        &self.downloads.history,
+                    ) {
+                        self.notify(e);
+                    }
+                }
+            });
+            ui.separator();
+            // Reserve the actual action-button width and all four column gaps.
+            // Otherwise history rows expand their frame beyond the activity panel.
+            let action_width = 38.;
+            let width =
+                (ui.available_width() - action_width - 4. * ui.spacing().item_spacing.x).max(180.);
+            ui.horizontal(|ui| {
+                activity_cell(
+                    ui,
+                    [width * 0.38, 24.],
+                    Label::new("Item").halign(Align::LEFT),
+                );
+                activity_cell(
+                    ui,
+                    [width * 0.12, 24.],
+                    Label::new("Engine").halign(Align::LEFT),
+                );
+                activity_cell(
+                    ui,
+                    [width * 0.23, 24.],
+                    Label::new("Completed").halign(Align::LEFT),
+                );
+                activity_cell(
+                    ui,
+                    [width * 0.27, 24.],
+                    Label::new("Status").halign(Align::LEFT),
+                );
+            });
+            let query = self.downloads.search.to_lowercase();
+            let mut count = 0;
+            for a in &self.downloads.history {
+                if !format!("{} {} {}", a.item_label(), a.engine, a.message)
+                    .to_lowercase()
+                    .contains(&query)
+                {
+                    continue;
+                }
+                if self.downloads.recent && !a.success {
+                    continue;
+                }
+                count += 1;
+                ui.horizontal(|ui| {
+                    let name = if a.seen {
+                        a.item_label()
+                    } else {
+                        format!("• {}", a.item_label())
+                    };
+                    activity_cell(
+                        ui,
+                        [width * 0.38, 38.],
+                        Label::new(
+                            RichText::new(name)
+                                .strong()
+                                .color(ui.visuals().text_color()),
+                        )
+                        .truncate()
+                        .halign(Align::LEFT),
+                    )
+                    .on_hover_text(&a.message);
+                    activity_cell(
+                        ui,
+                        [width * 0.12, 38.],
+                        Label::new(&a.engine).truncate().halign(Align::LEFT),
+                    );
+                    let elapsed = epic::now().saturating_sub(a.completed);
+                    let age = if elapsed < 60 {
+                        "Just now".into()
+                    } else if elapsed < 3600 {
+                        format!("{} min ago", elapsed / 60)
+                    } else if elapsed < 86400 {
+                        format!("{} hours ago", elapsed / 3600)
+                    } else {
+                        format!("{} days ago", elapsed / 86400)
+                    };
+                    activity_cell(ui, [width * 0.23, 38.], Label::new(age).halign(Align::LEFT));
+                    activity_cell(
+                        ui,
+                        [width * 0.27, 38.],
+                        Label::new(RichText::new(a.status_label()).color(color(if a.success {
+                            t.success
+                        } else if a.stopped() {
+                            t.warning
+                        } else {
+                            [220, 65, 65]
+                        })))
+                        .truncate()
+                        .halign(Align::LEFT),
+                    );
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(action_width, 38.), Sense::click());
+                    let response = response
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Activity details");
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Button, true, "Activity details")
+                    });
+                    let fg = if response.hovered() {
+                        SIDEBAR_ON_HIGHLIGHT
+                    } else {
+                        t.muted
+                    };
+                    if response.hovered() {
+                        ui.painter().rect_filled(rect, 5., color(SIDEBAR_HIGHLIGHT));
+                    }
+                    let center = rect.center();
+                    let stroke = Stroke::new(1.5, color(fg));
+                    ui.painter().circle_stroke(center, 9., stroke);
+                    ui.painter()
+                        .line_segment([center - vec2(0., 5.), center + vec2(0., 1.)], stroke);
+                    ui.painter()
+                        .circle_filled(center + vec2(0., 5.), 1., color(fg));
+                    Popup::menu(&response).frame(menu_frame(t)).show(|ui| {
+                        ui.label(&a.message);
+                    });
+                });
+                ui.separator();
+            }
+            if count == 0 {
+                ui.label(if !query.is_empty() {
+                    "No activity matches your search."
+                } else if self.downloads.recent {
+                    "No successful operations yet. Stopped and failed operations appear in Overview."
+                } else {
+                    "No activity to show. Completed operations will appear here."
+                });
+            }
+        });
+        if self.scan.receiver.is_some() {
+            panel(ui, t, "Project discovery", None, |ui| {
+                ui.label(&self.scan.summary);
+                ui.label(format!(
+                    "{} folders searched",
+                    self.scan
+                        .progress
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                ));
+                if ui
+                    .button("Stop scan")
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.scan
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+    }
+    fn download_side(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
+        panel(ui, t, "Download queue", None, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{active} active item{}",
+                    if active == 1 { "" } else { "s" }
+                ))
+                .size(24.)
+                .strong()
+                .color(ui.visuals().text_color()),
+            );
+            ui.label(if active == 0 {
+                "Your queue is empty."
+            } else {
+                "Current installations are shown in the activity panel."
+            });
+        });
+        panel(ui, t, "Storage", None, |ui| {
+            let root = Path::new(&self.prefs.install_root);
+            let existing = root.ancestors().find(|p| p.exists()).unwrap_or(root);
+            if let (Ok(free), Ok(total)) =
+                (fs2::available_space(existing), fs2::total_space(existing))
+            {
+                ui.label(
+                    RichText::new(format!("{} GB available", free / 1_000_000_000))
+                        .strong()
+                        .color(ui.visuals().text_color())
+                        .size(23.),
+                );
+                ui.scope(|ui| {
+                    ui.spacing_mut().interact_size.y = 12.;
+                    ui.add(ProgressBar::new(if total > 0 {
+                        1. - free as f32 / total as f32
+                    } else {
+                        0.
+                    }));
+                });
+                ui.label(
+                    RichText::new(&self.prefs.install_root)
+                        .size(13.)
+                        .color(color(t.muted)),
+                );
+            } else {
+                ui.label("Storage information unavailable");
+            }
+            if ui
+                .link("Manage locations →")
+                .clone()
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.downloads.settings = true;
+            }
+        });
+    }
+    fn download_settings(&mut self, ui: &mut Ui, t: &Theme) {
+        let before = self.prefs.downloads.clone();
+        let old_root = self.prefs.install_root.clone();
+        let old_cache = self.prefs.fab_cache.clone();
+        self.install_preferences(ui, t);
+        if ui.available_width() > 900. {
+            ui.columns(2, |cols| {
+                self.speed_preferences(&mut cols[0], t);
+                self.location_preferences(&mut cols[1], t);
+            });
+        } else {
+            self.speed_preferences(ui, t);
+            self.location_preferences(ui, t);
+        }
+        panel(
+            ui,
+            t,
+            "Fab asset cache",
+            Some("Reuse verified downloads for assets and plugins."),
+            |ui| {
+                ui.label("Cache directory");
+                dialog::folder(ui, &mut self.prefs.fab_cache);
+                ui.horizontal(|ui| {
+                    if icon_button(ui, t, "Reset", Icon::Reset) {
+                        self.prefs.fab_cache = storage::Preferences::default().fab_cache;
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Changing the location leaves existing cached files in place.",
+                        )
+                        .size(13.)
+                        .color(color(t.muted)),
+                    );
+                });
+            },
+        );
+        if icon_button(ui, t, "Reset to default settings", Icon::Reset) {
+            self.prefs.downloads = DownloadSettings::default();
+            let defaults = storage::Preferences::default();
+            self.prefs.install_root = defaults.install_root;
+            self.prefs.fab_cache = defaults.fab_cache;
+        }
+        if before != self.prefs.downloads
+            || old_root != self.prefs.install_root
+            || old_cache != self.prefs.fab_cache
+        {
+            self.prefs.projects = self.projects.clone();
+            self.prefs.launch_engine = self.launch_path.clone();
+            self.downloads.save_error = storage::save_preferences(&self.prefs).err();
+            if self.downloads.save_error.is_none() {
+                self.downloads.saved_at = Some(Instant::now());
+            }
+            download_policy::configure(&self.prefs.downloads);
+        }
+        if let Some(e) = &self.downloads.save_error {
+            ui.label(RichText::new(e).color(color(t.warning)));
+        } else {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(20., 20.), Sense::hover());
+                draw_icon(ui, t, Icon::Check, r, t.success);
+                ui.label(
+                    RichText::new(if self.downloads.saved_at.is_some() {
+                        "All changes saved"
+                    } else {
+                        "Changes save automatically"
+                    })
+                    .color(color(t.success)),
+                );
+            });
+        }
+    }
+    fn location_preferences(&mut self, ui: &mut Ui, t: &Theme) {
+        panel(
+            ui,
+            t,
+            "Install location",
+            Some("Choose where new engine installations are stored."),
+            |ui| {
+                ui.label("Default install directory");
+                dialog::folder(ui, &mut self.prefs.install_root);
+                ui.label(RichText::new("Plugins install into the engine you select. Assets install into the project you select.").size(14.).color(color(t.muted)));
+            },
+        );
+    }
+    fn install_preferences(&mut self, ui: &mut Ui, t: &Theme) {
+        panel(
+            ui,
+            t,
+            "Installation preferences",
+            Some("Manage when installations run."),
+            |ui| {
+                toggle(
+                    ui,
+                    t,
+                    &mut self.prefs.downloads.notify_complete,
+                    "Notify when installation completes",
+                    "Show a Windows notification when an installation finishes.",
+                );
+                toggle(
+                    ui,
+                    t,
+                    &mut self.prefs.downloads.allow_editors,
+                    "Allow installs while editors are running",
+                    "Allow other installations while editors are open. Files in an active engine remain protected.",
+                );
+                ui.label(
+                    RichText::new("All engine, plugin and asset updates are started manually.")
+                        .size(14.)
+                        .color(color(t.muted)),
+                );
+            },
+        );
+    }
+    fn speed_preferences(&mut self, ui: &mut Ui, t: &Theme) {
+        panel(
+            ui,
+            t,
+            "Download speed",
+            Some("Control your installation bandwidth."),
+            |ui| {
+                toggle(
+                    ui,
+                    t,
+                    &mut self.prefs.downloads.limit_speed,
+                    "Limit download speed",
+                    "Shared limit across engine, plugin and asset transfers.",
+                );
+                ui.add_enabled_ui(self.prefs.downloads.limit_speed, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            DragValue::new(&mut self.prefs.downloads.megabytes_per_second)
+                                .range(0.1..=10000.)
+                                .speed(0.5),
+                        );
+                        ui.label("MB/s");
+                    });
+                });
+            },
+        );
+    }
+    pub(super) fn desktop_preferences(&mut self, ui: &mut Ui) {
+        let t = self.theme.clone();
+        ui.label(
+            RichText::new("Preferences")
+                .strong()
+                .color(ui.visuals().text_color())
+                .size(23.),
+        );
+        ui.label(
+            "Minimize keeps the launcher in the taskbar. Close (X) hides it in the system tray.",
+        );
+        ui.label(
+            "Use the tray icon to restore the launcher, or right-click it and choose Exit to quit.",
+        );
+        ui.add_space(12.);
+        self.hidden_project_preferences(ui);
+        ui.add_space(12.);
+        let old = self.prefs.run_at_startup;
+        if toggle(
+            ui,
+            &t,
+            &mut self.prefs.run_at_startup,
+            "Run when my computer starts",
+            "Start DoNothing&Win Launcher when you sign in to Windows.",
+        ) {
+            match download_policy::set_startup(self.prefs.run_at_startup) {
+                Ok(()) => self.persist(),
+                Err(e) => {
+                    self.prefs.run_at_startup = old;
+                    self.notify(e);
+                }
+            }
+        }
+    }
+}
+
+// Keep the whole column allocation while laying its label out from the left edge.
+fn activity_cell(ui: &mut Ui, size: [f32; 2], label: Label) -> Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(size[0], size[1]), Sense::hover());
+    let mut cell = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    cell.add(label)
+}

@@ -1,0 +1,2931 @@
+mod categories;
+mod clone_project;
+mod dialog;
+mod downloads;
+mod engine_options;
+mod layout_probe;
+mod library;
+mod plugin_jobs;
+mod plugins_view;
+mod project_cards;
+mod project_visibility;
+mod settings_flow;
+mod transfers;
+mod workspace_cache;
+use eframe::egui::{self, *};
+use engine_workspace::{
+    epic::{self, Epic, Session},
+    model::*,
+    platform,
+    storage::{self, Preferences},
+    theme::{Theme, color},
+};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Workspace,
+    Projects,
+    Library,
+    Engines,
+    Downloads,
+    Settings,
+}
+#[derive(Clone, Copy)]
+enum Icon {
+    User,
+    Cube,
+    Home,
+    Folder,
+    Chip,
+    Download,
+    Book,
+    Gear,
+    Plus,
+    Upload,
+    Search,
+    Grid,
+    List,
+    Down,
+    Dots,
+    Pin,
+    Check,
+    Layers,
+    Storage,
+    Speed,
+    Database,
+    Back,
+    Reset,
+}
+enum Job {
+    Checked(Result<(Snapshot, Option<Session>), String>),
+    SignedIn(Result<Option<Session>, String>),
+}
+pub struct Workspace {
+    page: Page,
+    theme: Theme,
+    prefs: Preferences,
+    engines: Vec<Installation>,
+    projects: Vec<Project>,
+    demo: bool,
+    session: Option<Session>,
+    snapshot: Snapshot,
+    status: String,
+    error: Option<String>,
+    textures: HashMap<String, TextureHandle>,
+    search: String,
+    pinned_only: bool,
+    category_filter: Option<String>,
+    category_manager: bool,
+    category_name: String,
+    filter: String,
+    sort_name: bool,
+    list_view: bool,
+    pending: Option<Receiver<Job>>,
+    next_check: Instant,
+    failures: u32,
+    login: bool,
+    launch_path: Option<String>,
+    engine_options: Option<Installation>,
+    options: engine_options::Options,
+    engine_remove: Option<Installation>,
+    cloning: clone_project::Cloning,
+    new_project: bool,
+    new_name: String,
+    new_path: String,
+    new_engine: usize,
+    selected: Option<usize>,
+    toast: Option<(String, Instant)>,
+    free: Option<u64>,
+    project_scroll: f32,
+    engine_page: usize,
+    layout_probe: Option<layout_probe::LayoutProbe>,
+    transfer: transfers::Transfers,
+    scan: transfers::Scan,
+    engine_space: settings_flow::EngineSpace,
+    plugin_engine: Option<usize>,
+    plugin_work: plugin_jobs::PluginWork,
+    library: library::Library,
+    downloads: downloads::Downloads,
+    plugin_search: String,
+    plugin_updates_only: bool,
+    plugins: Vec<engine_workspace::plugins::Plugin>,
+    plugin_counts: HashMap<String, usize>,
+    workspace_cache: workspace_cache::WorkspaceCache,
+}
+const BUTTON_SCALE: f32 = 0.75;
+const BUTTON_RADIUS: f32 = 5. * BUTTON_SCALE;
+fn button_bounds([x, y, w, h]: [f32; 4]) -> [f32; 4] {
+    [
+        x + w * (1. - BUTTON_SCALE) / 2.,
+        y + h * (1. - BUTTON_SCALE) / 2.,
+        w * BUTTON_SCALE,
+        h * BUTTON_SCALE,
+    ]
+}
+// Map a desired visible button rectangle to the shared compact-button slot.
+fn button_slot([x, y, w, h]: [f32; 4]) -> [f32; 4] {
+    let sw = w / BUTTON_SCALE;
+    let sh = h / BUTTON_SCALE;
+    [x - (sw - w) / 2., y - (sh - h) / 2., sw, sh]
+}
+// Shared compact search control, matching the Projects toolbar.
+fn search_field(
+    ui: &mut Ui,
+    value: &mut String,
+    hint: &str,
+    width: f32,
+    theme: &Theme,
+    scale: f32,
+) -> Response {
+    let height = 32. * scale;
+    let (rect, slot) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, BUTTON_RADIUS, color(theme.card));
+    let has_text = !value.is_empty();
+    let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
+    let input_rect = Rect::from_min_max(
+        rect.min + vec2(34., 3.) * scale,
+        rect.max - vec2(if has_text { 30. } else { 8. }, 3.) * scale,
+    );
+    let mut response = child.put(
+        input_rect,
+        TextEdit::singleline(value)
+            .id(slot.id.with("input"))
+            .hint_text(hint)
+            .font(FontId::proportional(14. * scale))
+            .text_color(color(theme.text))
+            .vertical_align(Align::Center)
+            .margin(Vec2::ZERO)
+            .frame(false),
+    );
+    // Paint the frame behind the text; the interior stays transparent.
+    ui.painter().rect_stroke(
+        rect,
+        BUTTON_RADIUS,
+        Stroke::new(
+            1.,
+            color(if response.has_focus() {
+                theme.accent
+            } else {
+                theme.border
+            }),
+        ),
+        StrokeKind::Inside,
+    );
+    let canvas = Canvas {
+        origin: rect.min,
+        width: width / scale,
+        height: 32.,
+        sx: scale,
+        sy: scale,
+        theme: theme.clone(),
+    };
+    canvas.icon(ui, Icon::Search, 12., 8., 16., theme.muted);
+    if has_text {
+        let clear = ui
+            .interact(
+                Rect::from_min_max(
+                    pos2(rect.right() - 29. * scale, rect.top() + 3. * scale),
+                    rect.max - vec2(3., 3.) * scale,
+                ),
+                slot.id.with("clear"),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Clear search");
+        clear.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Clear search")
+        });
+        ui.painter().text(
+            clear.rect.center() - vec2(0., scale),
+            Align2::CENTER_CENTER,
+            "×",
+            FontId::proportional(20. * scale),
+            color(if clear.hovered() {
+                theme.text
+            } else {
+                theme.muted
+            }),
+        );
+        if clear.clicked() {
+            value.clear();
+            response.mark_changed();
+            response.request_focus();
+        }
+    }
+    response
+}
+fn menu_frame(theme: &Theme) -> Frame {
+    Frame::popup(&Style {
+        visuals: theme.visuals(),
+        ..Default::default()
+    })
+    .inner_margin(Margin::symmetric(0, 4))
+}
+fn style_menu(ui: &mut Ui, theme: &Theme) {
+    ui.spacing_mut().menu_margin = Margin::symmetric(0, 4);
+    ui.spacing_mut().button_padding = vec2(16., 9.);
+    ui.spacing_mut().item_spacing = vec2(0., 0.);
+    ui.spacing_mut().interact_size.y = 38.;
+    ui.visuals_mut().button_frame = true;
+    ui.visuals_mut().override_text_color = None;
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    widgets.inactive.bg_stroke = Stroke::NONE;
+    widgets.inactive.corner_radius = CornerRadius::ZERO;
+    for w in [&mut widgets.hovered, &mut widgets.active] {
+        w.weak_bg_fill = color(theme.accent);
+        w.bg_fill = color(theme.accent);
+        w.fg_stroke.color = Color32::WHITE;
+        w.bg_stroke = Stroke::NONE;
+        w.corner_radius = CornerRadius::ZERO;
+        w.expansion = 0.;
+    }
+}
+impl Workspace {
+    fn launch_button(&mut self, ui: &mut Ui, c: &Canvas, r: [f32; 4]) {
+        let chosen = self
+            .engines
+            .iter()
+            .position(|e| e.path == self.prefs.default_engine)
+            .or_else(|| latest_installation(&self.engines));
+        let r = button_bounds(r);
+        let [x, y, w, h] = r;
+        let split = 42. * BUTTON_SCALE;
+        let launch = ui
+            .interact(
+                c.rect([x, y, w - split, h]),
+                Id::new("header-launch"),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let menu = ui
+            .interact(
+                c.rect([x + w - split, y, split, h]),
+                Id::new("header-launch-menu"),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let t = &self.theme;
+        c.fill(
+            ui,
+            r,
+            if launch.hovered() || menu.hovered() {
+                t.launch_hover
+            } else {
+                t.launch_background
+            },
+            BUTTON_RADIUS,
+        );
+        c.line(
+            ui,
+            [x + w - split, y],
+            [x + w - split, y + h],
+            t.launch_foreground,
+        );
+        let label = chosen
+            .map(|i| {
+                format!(
+                    "Launch UE{}",
+                    EngineVersion::parse(&self.engines[i].version)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| self.engines[i].version.clone())
+                )
+            })
+            .unwrap_or_else(|| "Install engine".into());
+        c.text(
+            ui,
+            x + (w - split) / 2.,
+            y + h / 2.,
+            &label,
+            15.,
+            true,
+            t.launch_foreground,
+            Align2::CENTER_CENTER,
+        );
+        ui.painter().add(Shape::convex_polygon(
+            vec![
+                c.point(x + w - 31. * BUTTON_SCALE, y + h / 2. - 5. * BUTTON_SCALE),
+                c.point(x + w - 11. * BUTTON_SCALE, y + h / 2. - 5. * BUTTON_SCALE),
+                c.point(x + w - 21. * BUTTON_SCALE, y + h / 2. + 6. * BUTTON_SCALE),
+            ],
+            color(t.launch_foreground),
+            Stroke::NONE,
+        ));
+        if launch
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            if let Some(i) = chosen {
+                self.launch_engine(i);
+            } else {
+                self.page = Page::Engines;
+            }
+        }
+        if let Some(i) = chosen {
+            launch.on_hover_text(format!("Open Unreal Editor\n{}", self.engines[i].path));
+        }
+        let previous_launch = self.launch_path.clone();
+        egui::Popup::menu(&menu)
+            .frame(menu_frame(&self.theme))
+            .show(|ui| {
+                style_menu(ui, &self.theme);
+                ui.set_min_width(260.);
+                if ui
+                    .selectable_label(
+                        self.launch_path.is_none(),
+                        "Always use latest installed engine",
+                    )
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.launch_path = None;
+                    self.prefs.default_engine.clear();
+                    self.persist();
+                    ui.close();
+                }
+                ui.separator();
+                for e in &self.engines {
+                    if ui
+                        .selectable_label(
+                            self.launch_path.as_deref() == Some(&e.path),
+                            format!("Unreal Engine {}", e.version),
+                        )
+                        .on_hover_text(&e.path)
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.launch_path = Some(e.path.clone());
+                        self.prefs.default_engine = e.path.clone();
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button("Install engine…")
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.page = Page::Engines;
+                    ui.close();
+                }
+            });
+        if previous_launch != self.launch_path {
+            self.persist();
+        }
+    }
+    pub fn new(cc: &eframe::CreationContext<'_>, demo: bool, light: bool) -> Self {
+        let mut fonts = FontDefinitions::default();
+        for (name, path) in [
+            ("segoe", "C:/Windows/Fonts/segoeui.ttf"),
+            ("semibold", "C:/Windows/Fonts/seguisb.ttf"),
+        ] {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts
+                    .font_data
+                    .insert(name.into(), FontData::from_owned(bytes).into());
+                if name == "segoe" {
+                    fonts
+                        .families
+                        .get_mut(&FontFamily::Proportional)
+                        .unwrap()
+                        .insert(0, name.into());
+                } else {
+                    fonts
+                        .families
+                        .insert(FontFamily::Name(name.into()), vec![name.into()]);
+                }
+            }
+        }
+        if !fonts
+            .families
+            .contains_key(&FontFamily::Name("semibold".into()))
+        {
+            fonts.families.insert(
+                FontFamily::Name("semibold".into()),
+                fonts.families[&FontFamily::Proportional].clone(),
+            );
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.style_mut(|style| {
+            style.spacing.button_padding = vec2(16., 8.);
+            style.spacing.interact_size.y = 34.;
+        });
+        let mut prefs = storage::load_preferences();
+        prefs.run_at_startup = engine_workspace::download_policy::startup_enabled();
+        if light {
+            prefs.theme = "light".into();
+        }
+        let theme = if prefs.theme == "light" {
+            Theme::light()
+        } else {
+            Theme::dark()
+        };
+        cc.egui_ctx.set_visuals(theme.visuals());
+        let engines = platform::display_engines();
+        let session = storage::load_session();
+        let account = session
+            .as_ref()
+            .map(|s| s.account_id.as_str())
+            .unwrap_or("public");
+        let snapshot = storage::load_snapshot(account);
+        let roots = engine_workspace::discovery::project_roots(&prefs.project_roots);
+        engine_workspace::discovery::retain_project_roots(
+            &mut prefs.projects,
+            &roots,
+            &prefs.manual_projects,
+        );
+        let _ = storage::save_preferences(&prefs);
+        let mut app = Self {
+            page: Page::Workspace,
+            theme,
+            prefs: prefs.clone(),
+            engines,
+            projects: prefs.projects.clone(),
+            demo,
+            session,
+            snapshot,
+            status: "Checking engine releases…".into(),
+            error: None,
+            textures: HashMap::new(),
+            search: String::new(),
+            pinned_only: false,
+            category_filter: None,
+            category_manager: false,
+            category_name: String::new(),
+            filter: "All versions".into(),
+            sort_name: false,
+            list_view: false,
+            pending: None,
+            next_check: Instant::now()
+                + if std::env::args().any(|a| a.starts_with("--layout-probe=")) {
+                    Duration::from_secs(86400)
+                } else {
+                    Duration::ZERO
+                },
+            failures: 0,
+            login: std::env::args().any(|a| a == "--sign-in"),
+            launch_path: prefs.launch_engine.clone(),
+            engine_options: None,
+            options: Default::default(),
+            engine_remove: None,
+            cloning: Default::default(),
+            new_project: false,
+            new_name: String::new(),
+            new_path: String::new(),
+            new_engine: 0,
+            selected: None,
+            toast: None,
+            free: platform::free_space(),
+            project_scroll: 0.0,
+            engine_page: 0,
+            layout_probe: layout_probe::LayoutProbe::from_args(),
+            transfer: transfers::Transfers::default(),
+            scan: transfers::Scan::default(),
+            engine_space: settings_flow::EngineSpace::default(),
+            plugin_engine: None,
+            plugin_work: Default::default(),
+            library: Default::default(),
+            downloads: downloads::Downloads::load(),
+            plugin_search: String::new(),
+            plugin_updates_only: false,
+            plugins: Vec::new(),
+            plugin_counts: HashMap::new(),
+            workspace_cache: Default::default(),
+        };
+        app.load_assets(&cc.egui_ctx);
+        if !demo && app.layout_probe.is_none() {
+            app.check(cc.egui_ctx.clone());
+        } else if demo {
+            app.status = "Design preview • sample engines and projects".into();
+        } else {
+            app.status = "Layout verification • cached engine data".into();
+        }
+        if !demo && app.layout_probe.is_none() && !std::env::args().any(|a| a == "--no-scan") {
+            app.start_scan(cc.egui_ctx.clone(), None);
+        }
+        if std::env::args().any(|a| a == "--show-plugins") && !app.engines.is_empty() {
+            app.show_plugins((app.engines.len() - 1).min(1));
+        }
+        app
+    }
+    fn load_assets(&mut self, ctx: &Context) {
+        for (name, bytes, mask) in [
+            (
+                "brand-light",
+                include_bytes!("../assets/brand_light.png").as_slice(),
+                false,
+            ),
+            (
+                "brand",
+                include_bytes!("../assets/brand.png").as_slice(),
+                false,
+            ),
+        ] {
+            let mut im = image::load_from_memory(bytes).unwrap().to_rgba8();
+            if mask {
+                for p in im.pixels_mut() {
+                    let a = p[0].min(p[1]).min(p[2]);
+                    let a = ((a as f32 - 65.0) / 190.0 * 255.0).clamp(0.0, 255.0) as u8;
+                    *p = image::Rgba([255, 255, 255, a]);
+                }
+            }
+            let size = [im.width() as usize, im.height() as usize];
+            self.textures.insert(
+                name.into(),
+                ctx.load_texture(
+                    name,
+                    ColorImage::from_rgba_unmultiplied(size, im.as_raw()),
+                    TextureOptions::LINEAR,
+                ),
+            );
+        }
+        for p in &mut self.projects {
+            if !self.demo {
+                p.artwork = platform::project_thumbnail(Path::new(&p.path));
+            }
+            if let Some(path) = &p.artwork {
+                if self.textures.contains_key(path) {
+                    continue;
+                }
+                if let Ok(im) = image::open(path) {
+                    let im = im.thumbnail(820, 360).to_rgba8();
+                    self.textures.insert(
+                        path.clone(),
+                        ctx.load_texture(
+                            path,
+                            ColorImage::from_rgba_unmultiplied(
+                                [im.width() as usize, im.height() as usize],
+                                im.as_raw(),
+                            ),
+                            TextureOptions::LINEAR,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    fn notify(&mut self, s: impl Into<String>) {
+        self.toast = Some((s.into(), Instant::now()));
+    }
+    fn persist(&mut self) {
+        if self.demo {
+            return;
+        }
+        self.prefs.launch_engine = self.launch_path.clone();
+        self.prefs.projects = self.projects.clone();
+        if let Err(e) = storage::save_preferences(&self.prefs) {
+            self.error = Some(e);
+        }
+    }
+    fn check(&mut self, ctx: Context) {
+        if self.pending.is_some() || self.transfer.preparing() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        // Reload in case the last refresh rotated the token before a later request failed.
+        let session = if self.session.is_some() {
+            storage::load_session()
+        } else {
+            None
+        };
+        self.pending = Some(rx);
+        self.status = "Checking engine releases…".into();
+        std::thread::spawn(move || {
+            let result = Epic::new().and_then(|e| e.check(session.as_ref()));
+            let _ = tx.send(Job::Checked(result));
+            ctx.request_repaint();
+        });
+    }
+    fn sign_in(&mut self, ctx: Context) {
+        if self.pending.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.login = false;
+        self.error = None;
+        self.status = "Finish signing in in the Epic window…".into();
+        self.pending = Some(rx);
+        std::thread::spawn(move || {
+            let result = engine_workspace::login::connect();
+            let _ = tx.send(Job::SignedIn(result));
+            ctx.request_repaint();
+        });
+    }
+    fn poll(&mut self, ctx: &Context) {
+        let job = self.pending.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(job) = job {
+            self.pending = None;
+            match job {
+                Job::SignedIn(Ok(Some(session))) => {
+                    self.snapshot = storage::load_snapshot(&session.account_id);
+                    self.prefs.display_name = session.display_name.clone();
+                    self.session = Some(session);
+                    self.login = false;
+                    self.error = None;
+                    self.persist();
+                    self.check(ctx.clone());
+                }
+                Job::SignedIn(Ok(None)) => {
+                    self.status = "Sign-in cancelled".into();
+                }
+                Job::SignedIn(Err(e)) => {
+                    self.error = Some(e);
+                }
+                Job::Checked(Ok((mut snapshot, session))) => {
+                    let old_seen = self.snapshot.seen.clone();
+                    snapshot.merge_history(&self.snapshot);
+                    let changed = snapshot
+                        .notices
+                        .iter()
+                        .rev()
+                        .find(|n| {
+                            !old_seen.contains(&format!("Windows:Live:{}:{}", n.app, n.current))
+                        })
+                        .cloned();
+                    self.snapshot = snapshot;
+                    if let Some(change) = changed {
+                        self.notify(format!(
+                            "{}: {:?} available — {}",
+                            change.app, change.kind, change.current
+                        ));
+                        ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
+                    }
+                    if let Some(s) = session {
+                        self.prefs.display_name = s.display_name.clone();
+                        self.session = Some(s);
+                    }
+                    self.failures = 0;
+                    self.error = None;
+                    self.status = if self.snapshot.verified() {
+                        format!(
+                            "{} engine builds checked • hotfix tracking active",
+                            self.snapshot.releases.len()
+                        )
+                    } else if self.session.is_none() {
+                        "Engine catalog checked • sign in to check hotfixes".into()
+                    } else {
+                        format!(
+                            "Check incomplete • {} builds unavailable",
+                            self.snapshot.missing_builds.len()
+                        )
+                    };
+                    let account = self
+                        .session
+                        .as_ref()
+                        .map(|s| s.account_id.as_str())
+                        .unwrap_or("public");
+                    if let Err(e) = storage::save_snapshot(account, &self.snapshot) {
+                        self.error = Some(e)
+                    }
+                    self.next_check = Instant::now()
+                        + Duration::from_secs(
+                            self.prefs.check_minutes.clamp(5, 1440) * 60 + epic::now() % 31,
+                        );
+                }
+                Job::Checked(Err(e)) => {
+                    self.failures = (self.failures + 1).min(5);
+                    self.status = "Release check failed • previous results retained".into();
+                    self.error = Some(e);
+                    self.next_check =
+                        Instant::now() + Duration::from_secs(900 * 2u64.pow(self.failures - 1));
+                }
+            }
+        }
+        if !self.demo
+            && self.pending.is_none()
+            && !self.transfer.preparing()
+            && Instant::now() >= self.next_check
+        {
+            self.check(ctx.clone());
+        }
+    }
+    fn import(&mut self, ctx: &Context) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Unreal project", &["uproject"])
+            .pick_file()
+        {
+            match platform::import_project(&path) {
+                Ok(p) => {
+                    if self.projects.iter().any(|x| x.path == p.path) {
+                        self.notify("This project is already in your workspace.");
+                    } else {
+                        if self.demo {
+                            self.demo = false;
+                            self.projects.clear();
+                            self.engines = platform::display_engines();
+                        }
+                        self.prefs.manual_projects.push(p.path.clone());
+                        self.projects.push(p);
+                        self.load_assets(ctx);
+                        self.persist();
+                    }
+                }
+                Err(e) => self.notify(e),
+            }
+        }
+    }
+    fn open_project(&mut self, index: usize) {
+        if self.transfer.maintenance.is_some() && self.transfer.busy() {
+            self.notify("Wait for engine maintenance to finish before opening a project.");
+            return;
+        }
+        if self.demo {
+            self.notify("Design preview. Import a real .uproject to launch it.");
+            return;
+        }
+        let p = &self.projects[index];
+        let engine = project_engine(p, &self.engines).map(|i| &self.engines[i]);
+        match engine {
+            Some(e) => match platform::launch(e, Some(p)) {
+                Ok(()) => {
+                    self.projects[index].last_opened = epic::now();
+                    self.persist();
+                    self.notify("Opening project in Unreal Editor…");
+                }
+                Err(e) => self.notify(e),
+            },
+            None => self.notify(
+                "The project's engine is not installed. Add its engine folder in Settings.",
+            ),
+        }
+    }
+    fn launch_engine(&mut self, index: usize) {
+        if self.transfer.maintenance.is_some() && self.transfer.busy() {
+            self.notify("Wait for engine maintenance to finish before launching.");
+            return;
+        }
+        if self.demo {
+            self.notify("Design preview. Switch to your workspace in Settings.");
+            return;
+        }
+        match platform::launch(&self.engines[index], None) {
+            Ok(()) => self.notify("Starting Unreal Editor…"),
+            Err(e) => self.notify(e),
+        }
+    }
+    fn add_engine(&mut self) {
+        if let Some(root) = rfd::FileDialog::new()
+            .set_title("Select an Unreal Engine installation folder")
+            .pick_folder()
+        {
+            if let Some(e) = platform::inspect_engine(&root, "") {
+                if self.demo {
+                    self.demo = false;
+                    self.engines.clear();
+                    self.projects = self.prefs.projects.clone();
+                }
+                if !self.engines.iter().any(|x| x.path == e.path) {
+                    if !self.prefs.engine_paths.contains(&e.path) {
+                        self.prefs.engine_paths.push(e.path.clone());
+                    }
+                    self.engines.push(e);
+                }
+                self.persist();
+                self.notify("Engine folder added to your workspace.");
+            } else {
+                self.notify("No Unreal Editor and Build.version found in this folder.");
+            }
+        }
+    }
+    fn layout(&mut self, ui: &mut Ui, ctx: &Context) {
+        let size = ui.max_rect().size();
+        let c = Canvas {
+            origin: ui.max_rect().min,
+            sx: 1.,
+            sy: 1.,
+            width: size.x,
+            height: size.y,
+            theme: self.theme.clone(),
+        };
+        c.fill(ui, [0., 0., c.width, c.height], self.theme.background, 0.);
+        let side = 240.;
+        c.fill(ui, [0., 0., side, c.height], self.theme.sidebar, 0.);
+        c.line(ui, [side, 0.], [side, c.height], self.theme.border);
+        let brand = &self.textures[if self.prefs.theme == "light" {
+            "brand-light"
+        } else {
+            "brand"
+        }];
+        let size = brand.size_vec2();
+        let scale = (208. / size.x).min(76. / size.y);
+        let width = size.x * scale;
+        let height = size.y * scale;
+        c.image(
+            ui,
+            brand,
+            [(side - width) / 2., 54. - height / 2., width, height],
+            [255, 255, 255],
+        );
+        for (page, label, icon, y) in [
+            (Page::Workspace, "Workspace", Icon::Home, 111.),
+            (Page::Projects, "Projects", Icon::Folder, 169.),
+            (Page::Library, "Library", Icon::Cube, 227.),
+            (Page::Engines, "Engine versions", Icon::Chip, 285.),
+            (Page::Downloads, "Downloads", Icon::Download, 343.),
+        ] {
+            let active = self.page == page;
+            if active {
+                c.fill(ui, [10., y, side - 20., 48.], SIDEBAR_HIGHLIGHT, 7.);
+            }
+            let r = ui
+                .interact(
+                    c.rect([10., y, side - 20., 48.]),
+                    Id::new(label),
+                    Sense::click(),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand);
+            if r.hovered() && !active {
+                c.fill(ui, [10., y, side - 20., 48.], SIDEBAR_HIGHLIGHT, 7.);
+            }
+            c.icon(
+                ui,
+                icon,
+                34.,
+                y + 13.,
+                24.,
+                if active || r.hovered() {
+                    SIDEBAR_ON_HIGHLIGHT
+                } else {
+                    self.theme.muted
+                },
+            );
+            c.text(
+                ui,
+                77.,
+                y + 24.,
+                label,
+                16.,
+                false,
+                if active || r.hovered() {
+                    SIDEBAR_ON_HIGHLIGHT
+                } else {
+                    self.theme.muted
+                },
+                Align2::LEFT_CENTER,
+            );
+            if matches!(page, Page::Library | Page::Engines) && self.has_plugin_updates() {
+                let badge_color = if active || r.hovered() {
+                    SIDEBAR_ON_HIGHLIGHT
+                } else {
+                    self.theme.warning
+                };
+                let center = c.point(213., y + 24.);
+                ui.painter().circle_stroke(
+                    center,
+                    8. * c.scale(),
+                    Stroke::new(1.5, color(badge_color)),
+                );
+                c.text(
+                    ui,
+                    213.,
+                    y + 24.,
+                    "!",
+                    13.,
+                    true,
+                    badge_color,
+                    Align2::CENTER_CENTER,
+                );
+                ui.interact(
+                    c.rect([201., y + 12., 24., 24.]),
+                    Id::new(("plugin-update-badge", label)),
+                    Sense::hover(),
+                )
+                .on_hover_text("Plugin updates available for your installed engines");
+            }
+            if page == Page::Downloads
+                && (self.transfer.busy()
+                    || self.plugin_work.mutating
+                    || self.library_transfer_status().is_some())
+            {
+                let rect = c.rect([200., y + 14., 20., 20.]);
+                let mut indicator = ui.new_child(UiBuilder::new().max_rect(rect));
+                indicator.put(
+                    rect,
+                    egui::Spinner::new()
+                        .size(20.)
+                        .color(if active || r.hovered() {
+                            Color32::BLACK
+                        } else if self.theme.dark {
+                            Color32::WHITE
+                        } else {
+                            color(self.theme.text)
+                        }),
+                );
+                ui.ctx().request_repaint();
+            }
+            if r.clone()
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.plugin_engine = None;
+                self.page = page;
+                self.project_scroll = 0.;
+            }
+        }
+        c.line(
+            ui,
+            [16., c.height - 205.],
+            [224., c.height - 205.],
+            self.theme.border,
+        );
+        if c.nav(ui, "Documentation", Icon::Book, c.height - 193., false) {
+            let _ = platform::open_external(
+                "https://dev.epicgames.com/documentation/en-us/unreal-engine",
+            );
+        }
+        if c.nav(
+            ui,
+            "Settings",
+            Icon::Gear,
+            c.height - 139.,
+            self.page == Page::Settings,
+        ) {
+            self.plugin_engine = None;
+            self.page = Page::Settings;
+        }
+        c.line(
+            ui,
+            [16., c.height - 76.],
+            [224., c.height - 76.],
+            self.theme.border,
+        );
+        let account_response = ui
+            .interact(
+                c.rect([18., c.height - 67., 209., 55.]),
+                Id::new("account"),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        c.icon(
+            ui,
+            Icon::User,
+            36.,
+            c.height - 53.,
+            24.,
+            if account_response.hovered() {
+                [255, 255, 255]
+            } else {
+                self.theme.muted
+            },
+        );
+        c.text(
+            ui,
+            83.,
+            c.height - 41.,
+            if self.demo {
+                "Revoxis"
+            } else if let Some(s) = &self.session {
+                &s.display_name
+            } else {
+                "Sign in to Epic"
+            },
+            15.,
+            false,
+            if account_response.hovered() {
+                [255, 255, 255]
+            } else {
+                self.theme.muted
+            },
+            Align2::LEFT_CENTER,
+        );
+        c.icon(
+            ui,
+            Icon::Down,
+            207.,
+            c.height - 46.,
+            10.,
+            if account_response.hovered() {
+                [255, 255, 255]
+            } else {
+                self.theme.muted
+            },
+        );
+        Popup::menu(&account_response)
+            .frame(menu_frame(&self.theme))
+            .show(|ui| {
+                style_menu(ui, &self.theme);
+                ui.set_min_width(170.);
+                if self.session.is_some() {
+                    if ui
+                        .add_enabled(
+                            self.pending.is_none() && !self.transfer.preparing(),
+                            Button::new("Sign Out"),
+                        )
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.sign_out_account();
+                        ui.close();
+                    }
+                } else if ui
+                    .button("Sign in to Epic")
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.plugin_engine = None;
+                    self.page = Page::Settings;
+                    self.login = true;
+                    ui.close();
+                }
+            });
+        // Native window controls. The unused top strip acts as a drag region.
+        let drag = ui.interact(
+            c.rect([245., 0., c.width - 346., 24.]),
+            Id::new("title-drag"),
+            Sense::drag(),
+        );
+        if drag.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if c.window_button(ui, c.width - 87., "−") {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+        if c.window_button(ui, c.width - 54., "□") {
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
+        if c.window_button(ui, c.width - 21., "×") {
+            self.persist();
+            if !crate::window_frame::hide_to_tray() {
+                self.notify("Could not create the tray icon. The launcher is still open.");
+            }
+        }
+        let (title, subtitle) = match self.page {
+            Page::Workspace => ("Workspace", "Everything you need to build."),
+            Page::Projects => ("Projects", "Your work. Ready when you are."),
+            Page::Library => ("Library", "Your assets, projects and plugins from Fab."),
+            Page::Engines => (
+                "Engine versions",
+                "Releases, hotfixes and your installed engines.",
+            ),
+            Page::Downloads => {
+                if self.downloads.settings {
+                    (
+                        "Download settings",
+                        "Control how Unreal Engine content is installed.",
+                    )
+                } else {
+                    (
+                        "Downloads",
+                        "Manage engine, plugin and asset installations.",
+                    )
+                }
+            }
+            Page::Settings => ("Settings", "Make this workspace yours."),
+        };
+        c.text(
+            ui,
+            271.,
+            40.,
+            title,
+            34.,
+            true,
+            self.theme.text,
+            Align2::LEFT_CENTER,
+        );
+        c.text(
+            ui,
+            271.,
+            73.,
+            subtitle,
+            18.,
+            false,
+            self.theme.muted,
+            Align2::LEFT_CENTER,
+        );
+        if matches!(self.page, Page::Workspace | Page::Projects) {
+            if c.button(
+                ui,
+                "import",
+                button_slot([c.width - 373., 38., 160., 31.]),
+                "Import project",
+                Some(Icon::Upload),
+                false,
+            ) {
+                self.import(ctx);
+            }
+            self.launch_button(ui, &c, button_slot([c.width - 203., 38., 177., 31.]));
+        }
+        if matches!(self.page, Page::Projects | Page::Engines) {
+            let y = if self.page == Page::Projects && c.width < 1320. {
+                148.
+            } else {
+                104.
+            };
+            c.line(ui, [271., y], [c.width - 26., y], self.theme.border);
+        }
+        match self.page {
+            Page::Workspace => {
+                self.engine_section(ui, &c, ctx);
+                self.project_section(ui, &c, ctx, if c.height < 800. { 296. } else { 370. });
+            }
+            Page::Projects => {
+                if c.button(
+                    ui,
+                    "scanroot",
+                    button_slot([
+                        if c.width >= 1320. {
+                            c.width - 535.
+                        } else {
+                            c.width - 176.
+                        },
+                        if c.width >= 1320. { 38. } else { 103. },
+                        150.,
+                        31.,
+                    ]),
+                    "Scan a folder",
+                    Some(Icon::Folder),
+                    false,
+                ) {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.add_project_root(p, ctx);
+                    }
+                }
+                self.project_section(ui, &c, ctx, if c.width >= 1320. { 110. } else { 154. });
+            }
+            Page::Library => self.library_page(ui, &c),
+            Page::Engines => self.release_page(ui, &c, ctx),
+            Page::Downloads => self.downloads_page(ui, &c),
+            Page::Settings => self.settings_page(ui, &c, ctx),
+        }
+        let status_color = if self.error.is_some() {
+            self.theme.warning
+        } else if self.snapshot.verified() && !self.demo {
+            self.theme.success
+        } else {
+            self.theme.subtle
+        };
+        let activity = if self.transfer.busy() {
+            let p = self.transfer.progress.lock().unwrap().clone();
+            Some((
+                self.transfer.state.clone(),
+                p.phase,
+                if p.total > 0 {
+                    Some((p.completed as f32 / p.total as f32).clamp(0., 1.))
+                } else {
+                    None
+                },
+            ))
+        } else if let Some(status) = self.library_transfer_status() {
+            Some(("Library installation".into(), status.into(), None))
+        } else if self.plugin_work.mutating {
+            Some((
+                "Plugin operation".into(),
+                self.plugin_work.status.clone(),
+                None,
+            ))
+        } else {
+            None
+        };
+        if let Some((title, detail, progress)) = activity {
+            let rect = c.rect([271., c.height - 47., (c.width - 540.).max(220.), 42.]);
+            ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                ui.set_width(rect.width());
+                ui.spacing_mut().item_spacing.y = 3.;
+                let text = match progress {
+                    Some(p) => format!("{title} — {detail} · {:.0}%", p * 100.),
+                    None => format!("{title} — {detail}"),
+                };
+                ui.add(
+                    Label::new(
+                        RichText::new(text)
+                            .size(13. * c.scale())
+                            .color(color(self.theme.text)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&detail);
+                if let Some(value) = progress {
+                    ui.add(
+                        ProgressBar::new(value)
+                            .desired_width(rect.width())
+                            .desired_height(5.),
+                    );
+                } else {
+                    indeterminate_progress(
+                        ui,
+                        rect.width(),
+                        5.,
+                        self.theme.accent,
+                        self.theme.border,
+                    );
+                }
+            });
+            if ui
+                .interact(rect, Id::new("footer-transfer-progress"), Sense::click())
+                .on_hover_text("Open Downloads")
+                .clone()
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.page = Page::Downloads;
+                self.plugin_engine = None;
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            if self.page != Page::Library {
+                c.circle(ui, 280., c.height - 26., 6., status_color);
+            }
+            let status = if self.page == Page::Downloads {
+                "No active downloads".into()
+            } else if self.page == Page::Library {
+                self.library.footer.clone()
+            } else {
+                self.status.clone()
+            };
+            c.text(
+                ui,
+                297.,
+                c.height - 26.,
+                &status,
+                14.,
+                false,
+                self.theme.muted,
+                Align2::LEFT_CENTER,
+            );
+        }
+        let storage = if self.demo {
+            "Storage 248 GB available".into()
+        } else {
+            self.free
+                .map(|n| format!("Storage {} GB available", n / 1_073_741_824))
+                .unwrap_or_else(|| "Storage unavailable".into())
+        };
+        c.text(
+            ui,
+            c.width - 31.,
+            c.height - 26.,
+            &storage,
+            14.,
+            false,
+            self.theme.muted,
+            Align2::RIGHT_CENTER,
+        );
+        if let Some((msg, time)) = &self.toast {
+            if time.elapsed() < Duration::from_secs(6) {
+                let width = ((c.width - 340.) * c.sx).min(1000.);
+                let galley = ui.painter().layout(
+                    msg.clone(),
+                    FontId::proportional(15. * c.scale()),
+                    color(self.theme.launch_foreground),
+                    width - 32.,
+                );
+                let size = vec2(width, galley.size().y + 28.);
+                let center = c.point((271. + c.width - 26.) / 2., c.height - 82.);
+                let rect = Rect::from_center_size(center, size);
+                ui.painter()
+                    .rect_filled(rect, 7., color(self.theme.launch_background));
+                ui.painter().galley(
+                    rect.min + vec2(16., 14.),
+                    galley,
+                    color(self.theme.launch_foreground),
+                );
+            }
+        }
+    }
+    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, _ctx: &Context) {
+        let short = c.height < 800.;
+        let local = Canvas {
+            origin: c.origin - vec2(0., if short { 50. } else { 0. }),
+            width: c.width,
+            height: c.height,
+            sx: 1.,
+            sy: 1.,
+            theme: c.theme.clone(),
+        };
+        let c = &local;
+        let divider = if short { 344. } else { 356. };
+        c.line(
+            ui,
+            [271., divider],
+            [c.width - 26., divider],
+            self.theme.border,
+        );
+        c.icon(ui, Icon::Chip, 271., 132., 24., self.theme.muted);
+        self.engine_storage_badge(ui, c);
+        c.text(
+            ui,
+            309.,
+            144.,
+            "Engine versions",
+            21.,
+            true,
+            self.theme.text,
+            Align2::LEFT_CENTER,
+        );
+        if c.button(
+            ui,
+            "install",
+            button_slot([c.width - 156., 126., 130., 31.]),
+            "Install engine",
+            Some(Icon::Plus),
+            false,
+        ) {
+            self.prefs.pending_engines.push(String::new());
+            self.engine_page = (self.engines.len() + self.prefs.pending_engines.len() - 1)
+                / card_columns(c.width - 297., 301., 12.);
+            self.persist();
+        }
+        if self.engines.is_empty() && self.prefs.pending_engines.is_empty() {
+            c.text(
+                ui,
+                271.,
+                214.,
+                "No installed engines found",
+                21.,
+                true,
+                self.theme.text,
+                Align2::LEFT_CENTER,
+            );
+            c.text(
+                ui,
+                271.,
+                249.,
+                "Locate an engine installation, or view available releases.",
+                16.,
+                false,
+                self.theme.muted,
+                Align2::LEFT_CENTER,
+            );
+            if c.button(
+                ui,
+                "addexisting",
+                [271., 263., 300., 40.],
+                "Locate an installed engine",
+                Some(Icon::Folder),
+                false,
+            ) {
+                self.add_engine();
+            }
+        }
+        let columns = card_columns(c.width - 297., 301., 12.);
+        let pages = (self.engines.len() + self.prefs.pending_engines.len())
+            .div_ceil(columns)
+            .max(1);
+        self.engine_page = self.engine_page.min(pages - 1);
+        if pages > 1
+            && c.button(
+                ui,
+                "more-engines",
+                [c.width - 390., 126., 220., 39.],
+                &format!("More engines  {}/{}", self.engine_page + 1, pages),
+                None,
+                false,
+            )
+        {
+            self.engine_page = (self.engine_page + 1) % pages;
+        }
+        for slot in 0..columns {
+            let i = self.engine_page * columns + slot;
+            if i >= self.engines.len() {
+                let draft = i - self.engines.len();
+                if draft >= self.prefs.pending_engines.len() {
+                    break;
+                }
+                self.pending_engine_card(
+                    ui,
+                    c,
+                    draft,
+                    [271. + slot as f32 * 313., 170., 301., 162.],
+                );
+                continue;
+            }
+            self.engine_card(
+                ui,
+                c,
+                i,
+                [271. + slot as f32 * 313., 170., 301., 162.],
+                true,
+            );
+        }
+    }
+    fn project_toolbar(&mut self, ui: &mut Ui, c: &Canvas, right: f32, top: f32, compact: bool) {
+        let search_w = if compact { 180. } else { 258. };
+        let filter_w = if compact { 110. } else { 130. };
+        let sort_w = if compact { 135. } else { 152. };
+        let list = right - 32.;
+        let grid = list - 40.;
+        let sort = grid - 8. - sort_w;
+        let filter = sort - 8. - filter_w;
+        let search = filter - 8. - search_w;
+        let refresh_rect = [search - 40., top, 32., 32.];
+        let manage_w = if compact { 32. } else { 152. };
+        if c.button(
+            ui,
+            ("manage-project-categories", compact),
+            button_slot([refresh_rect[0] - manage_w - 8., top, manage_w, 32.]),
+            if compact { "" } else { "Manage categories" },
+            if compact { Some(Icon::Folder) } else { None },
+            false,
+        ) {
+            self.category_manager = true;
+        }
+        ui.interact(
+            c.rect([refresh_rect[0] - manage_w - 8., top, manage_w, 32.]),
+            Id::new(("manage-categories-tip", compact)),
+            Sense::hover(),
+        )
+        .on_hover_text("Manage project categories");
+        if self.scan.receiver.is_some() {
+            ui.put(
+                c.rect(refresh_rect),
+                egui::Spinner::new()
+                    .size(32. * c.scale())
+                    .color(color(self.theme.accent)),
+            )
+            .on_hover_text("Refreshing configured project folders…");
+        } else {
+            if c.icon_button(
+                ui,
+                ("refresh-projects", compact),
+                button_slot(refresh_rect),
+                Icon::Reset,
+                false,
+            ) {
+                self.project_scroll = 0.;
+                self.start_scan(ui.ctx().clone(), None);
+            }
+            ui.interact(
+                c.rect(refresh_rect),
+                Id::new(("refresh-projects-tip", compact)),
+                Sense::hover(),
+            )
+            .on_hover_text("Refresh projects from configured folders and remove missing entries");
+        }
+        c.boxed(
+            ui,
+            [search, top, search_w, 32.],
+            self.theme.card,
+            self.theme.border,
+            BUTTON_RADIUS,
+            1.,
+        );
+        c.icon(
+            ui,
+            Icon::Search,
+            search + 12.,
+            top + 8.,
+            16.,
+            self.theme.muted,
+        );
+        ui.put(
+            c.rect([
+                search + 36.,
+                top + 3.,
+                search_w - if self.search.is_empty() { 47. } else { 68. },
+                26.,
+            ]),
+            TextEdit::singleline(&mut self.search)
+                .id_salt(("project-search", compact))
+                .hint_text("Search projects...")
+                .font(FontId::proportional(14. * c.scale()))
+                .frame(false),
+        );
+        if !self.search.is_empty() {
+            let clear = ui
+                .interact(
+                    c.rect([search + search_w - 30., top + 3., 26., 26.]),
+                    Id::new(("clear-project-search", compact)),
+                    Sense::click(),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand);
+            c.text(
+                ui,
+                search + search_w - 17.,
+                top + 16.,
+                "×",
+                20.,
+                false,
+                if clear.hovered() {
+                    self.theme.text
+                } else {
+                    self.theme.muted
+                },
+                Align2::CENTER_CENTER,
+            );
+            if clear
+                .clone()
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.search.clear();
+                self.project_scroll = 0.;
+            }
+        }
+        let rect = [filter, top, filter_w, 32.];
+        let response = ui
+            .interact(
+                c.rect(rect),
+                Id::new(("project-version-filter", compact)),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        c.boxed(
+            ui,
+            rect,
+            if response.hovered() {
+                SIDEBAR_HIGHLIGHT
+            } else {
+                self.theme.card
+            },
+            self.theme.border,
+            BUTTON_RADIUS,
+            1.,
+        );
+        c.text(
+            ui,
+            filter + 11.,
+            top + 16.,
+            &self.filter,
+            14.,
+            false,
+            if response.hovered() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.text
+            },
+            Align2::LEFT_CENTER,
+        );
+        c.icon(
+            ui,
+            Icon::Down,
+            filter + filter_w - 19.,
+            top + 12.,
+            9.,
+            if response.hovered() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.muted
+            },
+        );
+        Popup::menu(&response)
+            .frame(menu_frame(&self.theme))
+            .show(|ui| {
+                style_menu(ui, &self.theme);
+                if ui
+                    .selectable_value(&mut self.filter, "All versions".into(), "All versions")
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.project_scroll = 0.;
+                    ui.close();
+                }
+                let mut versions: Vec<_> = self
+                    .projects
+                    .iter()
+                    .filter(|p| self.project_visible(&p.path))
+                    .map(|p| p.engine.clone())
+                    .collect();
+                versions.sort();
+                versions.dedup();
+                for version in versions {
+                    if ui
+                        .selectable_value(&mut self.filter, version.clone(), version)
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.project_scroll = 0.;
+                        ui.close();
+                    }
+                }
+            });
+        if c.button(
+            ui,
+            ("project-sort", compact),
+            button_slot([sort, top, sort_w, 32.]),
+            if self.sort_name {
+                "Name  ↓"
+            } else {
+                "Recently opened"
+            },
+            None,
+            false,
+        ) {
+            self.sort_name = !self.sort_name;
+        }
+        if c.icon_button(
+            ui,
+            ("project-grid", compact),
+            button_slot([grid, top, 32., 32.]),
+            Icon::Grid,
+            !self.list_view,
+        ) {
+            self.list_view = false;
+        }
+        if c.icon_button(
+            ui,
+            ("project-list", compact),
+            button_slot([list, top, 32., 32.]),
+            Icon::List,
+            self.list_view,
+        ) {
+            self.list_view = true;
+        }
+    }
+    fn project_section(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context, y: f32) {
+        let wrap = c.width < 1320.;
+        let extra = if wrap { 44. } else { 0. };
+        let bottom = c.height - 50.;
+        let columns = card_columns(c.width - 315., 240.8, 14.);
+        c.text(
+            ui,
+            271.,
+            y + 38.,
+            &format!(
+                "Projects ({})",
+                self.projects
+                    .iter()
+                    .filter(|p| self.project_visible(&p.path))
+                    .count()
+            ),
+            23.,
+            true,
+            self.theme.text,
+            Align2::LEFT_CENTER,
+        );
+        self.project_toolbar(ui, c, c.width - 26., y + 22. + extra, wrap);
+        self.category_tabs(ui, c, y + 62. + extra);
+        let mut indices: Vec<_> = (0..self.projects.len())
+            .filter(|i| {
+                let p = &self.projects[*i];
+                self.project_visible(&p.path)
+                    && (!self.pinned_only || p.pinned)
+                    && self.category_filter.as_ref().is_none_or(|category| {
+                        self.prefs
+                            .project_category_assignments
+                            .get(&p.path)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                            == category
+                    })
+                    && (self.filter == "All versions" || p.engine == self.filter)
+                    && p.name.to_lowercase().contains(&self.search.to_lowercase())
+            })
+            .collect();
+        if self.sort_name {
+            indices.sort_by_key(|i| self.projects[*i].name.to_lowercase());
+        } else if !self.demo {
+            indices.sort_by_key(|i| std::cmp::Reverse(self.projects[*i].last_opened));
+        }
+        let content = c.rect([
+            271.,
+            y + 98. + extra,
+            c.width - 312.,
+            (bottom - y - 98. - extra).max(1.),
+        ]);
+        if indices.is_empty() {
+            c.text(
+                ui,
+                (271. + c.width - 26.) / 2.,
+                y + 240.,
+                if self.projects.is_empty() {
+                    "Your next project starts here"
+                } else {
+                    "No matching projects"
+                },
+                27.,
+                true,
+                self.theme.text,
+                Align2::CENTER_CENTER,
+            );
+            c.text(
+                ui,
+                (271. + c.width - 26.) / 2.,
+                y + 282.,
+                "Import an existing .uproject or create a blank Unreal project.",
+                17.,
+                false,
+                self.theme.muted,
+                Align2::CENTER_CENTER,
+            );
+            return;
+        }
+        let row_h = if self.list_view { 86. } else { 202. };
+        let rows = if self.list_view {
+            indices.len()
+        } else {
+            indices.len().div_ceil(columns)
+        };
+        let max_scroll = (rows as f32 * row_h - (bottom - y - 98. - extra).max(1.)).max(0.);
+        if ui.rect_contains_pointer(content) {
+            self.project_scroll = (self.project_scroll
+                - ui.input(|i| i.smooth_scroll_delta.y) / c.sy)
+                .clamp(0., max_scroll);
+        }
+        self.project_scroll = self.project_scroll.min(max_scroll);
+        if max_scroll > 0. {
+            let track = c.rect([
+                c.width - 36.,
+                y + 98. + extra,
+                10.,
+                (bottom - y - 98. - extra).max(1.),
+            ]);
+            let visible = (bottom - y - 98. - extra).max(1.);
+            let thumb_height = (track.height() * visible / (rows as f32 * row_h))
+                .max(28. * c.sy)
+                .min(track.height());
+            let travel = (track.height() - thumb_height).max(1.);
+            let thumb = Rect::from_min_size(
+                pos2(
+                    track.min.x,
+                    track.min.y + travel * self.project_scroll / max_scroll,
+                ),
+                vec2(track.width(), thumb_height),
+            );
+            let track_response =
+                ui.interact(track, Id::new("project-scroll-track"), Sense::click());
+            let thumb_response = ui.interact(
+                thumb,
+                Id::new("project-scroll-thumb"),
+                Sense::click_and_drag(),
+            );
+            if thumb_response.dragged() {
+                self.project_scroll = (self.project_scroll
+                    + thumb_response.drag_delta().y / travel * max_scroll)
+                    .clamp(0., max_scroll);
+            } else if track_response
+                .clone()
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                if let Some(p) = track_response.interact_pointer_pos() {
+                    self.project_scroll = ((p.y - track.min.y - thumb_height / 2.) / travel
+                        * max_scroll)
+                        .clamp(0., max_scroll);
+                }
+            }
+            ui.painter().rect_filled(track, 5., color(self.theme.card));
+            let thumb = Rect::from_min_size(
+                pos2(
+                    track.min.x,
+                    track.min.y + travel * self.project_scroll / max_scroll,
+                ),
+                vec2(track.width(), thumb_height),
+            );
+            ui.painter().rect_filled(
+                thumb.shrink2(vec2(2. * c.sx, 0.)),
+                4.,
+                color(if thumb_response.hovered() || thumb_response.dragged() {
+                    self.theme.text
+                } else {
+                    self.theme.muted
+                }),
+            );
+        }
+        let mut child = ui.new_child(UiBuilder::new().max_rect(content));
+        child.set_clip_rect(content.intersect(ui.clip_rect()));
+        for (position, index) in indices.into_iter().enumerate() {
+            let p = self.projects[index].clone();
+            let (x, cy) = if self.list_view {
+                (
+                    271.,
+                    y + 100. + extra + position as f32 * row_h - self.project_scroll,
+                )
+            } else {
+                (
+                    271. + (position % columns) as f32 * 254.8,
+                    y + 100. + extra + (position / columns) as f32 * row_h - self.project_scroll,
+                )
+            };
+            if cy + row_h < y + 98. + extra || cy > bottom {
+                continue;
+            }
+            if self.list_view {
+                c.boxed(
+                    &child,
+                    [x, cy, c.width - 314., 74.],
+                    self.theme.card,
+                    self.theme.border,
+                    5.,
+                    1.,
+                );
+                let row = child
+                    .interact(
+                        c.rect([x, cy, c.width - 314., 74.]),
+                        Id::new(("project-list", index)),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                if row
+                    .clone()
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                    || row.secondary_clicked()
+                {
+                    self.selected = Some(index);
+                }
+                if row.double_clicked() {
+                    self.open_project(index);
+                }
+                Popup::context_menu(&row)
+                    .frame(menu_frame(&self.theme))
+                    .show(|ui| self.project_options(ui, index));
+                let image = c.rect([x + 9., cy + 9., 56., 56.]);
+                if let Some(tex) = p.artwork.as_ref().and_then(|a| self.textures.get(a)) {
+                    let size = tex.size_vec2();
+                    let (uw, uh) = if size.x > size.y {
+                        (size.y / size.x, 1.)
+                    } else {
+                        (1., size.x / size.y)
+                    };
+                    let uv = Rect::from_min_max(
+                        pos2((1. - uw) / 2., (1. - uh) / 2.),
+                        pos2((1. + uw) / 2., (1. + uh) / 2.),
+                    );
+                    child.painter().image(tex.id(), image, uv, Color32::WHITE);
+                } else {
+                    c.fill(
+                        &child,
+                        [x + 9., cy + 9., 56., 56.],
+                        self.theme.selection,
+                        4.,
+                    );
+                    c.icon(
+                        &child,
+                        Icon::Folder,
+                        x + 21.,
+                        cy + 21.,
+                        32.,
+                        self.theme.muted,
+                    );
+                }
+                let button_x = c.width - 43. - 14. - 128.;
+                let version_x = button_x - 18.;
+                let title_clip = c.rect([x + 80., cy, (version_x - 90. - x - 80.).max(0.), 74.]);
+                child
+                    .painter()
+                    .with_clip_rect(title_clip.intersect(child.clip_rect()))
+                    .text(
+                        c.point(x + 80., cy + 37.),
+                        Align2::LEFT_CENTER,
+                        &p.name,
+                        FontId::new(17. * c.scale(), FontFamily::Name("semibold".into())),
+                        color(self.theme.text),
+                    );
+                let version = EngineVersion::parse(&p.engine)
+                    .map(|v| v.branch())
+                    .unwrap_or_else(|| "Custom".into());
+                c.text(
+                    &child,
+                    version_x,
+                    cy + 37.,
+                    &version,
+                    16.,
+                    false,
+                    self.theme.muted,
+                    Align2::RIGHT_CENTER,
+                );
+                if c.button(
+                    &mut child,
+                    ("open-project-row", index),
+                    button_slot([button_x, cy + 21., 128., 32.]),
+                    "Open Project",
+                    None,
+                    true,
+                ) {
+                    self.open_project(index);
+                }
+                continue;
+            }
+            self.project_card(&mut child, c, index, [x, cy, 240.8, 188.]);
+        }
+        let _ = ctx;
+    }
+    fn release_page(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
+        let actions_y = if c.width < 1140. { 170. } else { 126. };
+        c.text(
+            ui,
+            271.,
+            143.,
+            "Available engine releases",
+            22.,
+            true,
+            self.theme.text,
+            Align2::LEFT_CENTER,
+        );
+        if c.button(
+            ui,
+            "check",
+            button_slot([c.width - 50. - 154., actions_y, 154., 32.]),
+            if self.pending.is_some() {
+                "Checking…"
+            } else {
+                "Check for updates"
+            },
+            None,
+            true,
+        ) {
+            self.check(ctx.clone());
+        }
+        let message = if let Some(e) = &self.error {
+            e.clone()
+        } else if self.snapshot.verified() {
+            format!(
+                "Verified against Epic • {} catalog branches • {} account-visible builds",
+                self.snapshot.catalog_count,
+                self.snapshot.releases.len()
+            )
+        } else {
+            "Sign in with Epic to verify hotfixes and account-visible builds.".into()
+        };
+        c.text(
+            ui,
+            271.,
+            if c.width < 1140. { 230. } else { 190. },
+            &message,
+            15.,
+            false,
+            if self.error.is_some() {
+                self.theme.warning
+            } else {
+                self.theme.muted
+            },
+            Align2::LEFT_CENTER,
+        );
+        if c.button(
+            ui,
+            "locate-engine",
+            button_slot([c.width - 50. - 154. - 12. - 220., actions_y, 220., 32.]),
+            "Locate installed engine",
+            Some(Icon::Folder),
+            false,
+        ) {
+            self.add_engine();
+        }
+        c.text(
+            ui,
+            281.,
+            283.,
+            "VERSION",
+            12.,
+            true,
+            self.theme.subtle,
+            Align2::LEFT_CENTER,
+        );
+        c.text(
+            ui,
+            480.,
+            283.,
+            "BUILD / HOTFIX",
+            12.,
+            true,
+            self.theme.subtle,
+            Align2::LEFT_CENTER,
+        );
+        c.text(
+            ui,
+            c.width - 340.,
+            283.,
+            "STATUS",
+            12.,
+            true,
+            self.theme.subtle,
+            Align2::LEFT_CENTER,
+        );
+        let area = c.rect([271., 307., c.width - 318., (c.height - 384.).max(100.)]);
+        ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{ScrollArea::vertical().id_salt("release-scroll").show(ui,|ui|{
+            for r in self.snapshot.releases.clone(){
+                let (rect,_)=ui.allocate_exact_size(vec2(area.width()-15.,65.*c.sy),Sense::hover());let p=ui.painter().clone();p.rect_filled(rect,4.,color(self.theme.card));
+                let font=FontId::proportional(15.*c.scale());let v=r.version.as_ref().map(|v|v.to_string()).unwrap_or_else(||r.app.trim_start_matches("UE_").to_owned());
+                p.text(rect.left_center()+vec2(10.*c.sx,0.),Align2::LEFT_CENTER,&v,FontId::new(19.*c.scale(),FontFamily::Name("semibold".into())),color(self.theme.text));
+                let build = r.build.as_deref().unwrap_or("Sign in to resolve hotfix version");
+                let build_rect = Rect::from_min_max(pos2(c.point(480., 0.).x, rect.top()), pos2(c.point(c.width - 356., 0.).x, rect.bottom()));
+                let mut build_ui = ui.new_child(UiBuilder::new().max_rect(build_rect).layout(Layout::left_to_right(Align::Center)));
+                build_ui.add(Label::new(RichText::new(build).font(font.clone()).color(color(self.theme.muted))).truncate()).on_hover_text(build);
+                let installed=self.engines.iter().find(|e|EngineVersion::parse(&e.version).zip(EngineVersion::parse(&r.app)).is_some_and(|(a,b)|a.major==b.major&&a.minor==b.minor));
+                let label=match installed{Some(e)=>if r.version.as_ref()>EngineVersion::parse(&e.version).as_ref(){"Update available"}else{"Installed"},None=>if r.build.is_some(){"Available"}else{"Catalog only"}};
+                p.text(pos2(c.point(c.width - 340., 0.).x, rect.center().y),Align2::LEFT_CENTER,label,font,color(if label=="Update available"{self.theme.warning}else if label=="Installed"{self.theme.success}else{self.theme.muted}));
+                let b=Rect::from_min_size(rect.right_top()-vec2(142.*c.sx,-13.*c.sy),vec2(130.*c.sx,36.*c.sy));if ui.put(b,egui::Button::new("Install engine")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.choose_install(r);}
+                ui.add_space(5.*c.sy);
+            }
+            if self.snapshot.releases.is_empty(){ui.label("No successful release check yet. Connect your Epic account to get started.");}
+        });});
+    }
+    fn downloads_page(&mut self, ui: &mut Ui, c: &Canvas) {
+        self.downloads_view(ui, c);
+    }
+    fn settings_page(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
+        self.settings_flow(ui, c, ctx);
+    }
+    fn sign_out_account(&mut self) {
+        match storage::sign_out() {
+            Ok(()) => {
+                self.session = None;
+                self.snapshot = Snapshot::default();
+                self.prefs.display_name = "Developer".into();
+                self.persist();
+                self.status = "Signed out • hotfix checks unavailable".into();
+                self.next_check = Instant::now() + Duration::from_secs(900);
+            }
+            Err(e) => self.notify(e),
+        }
+    }
+    fn dialogs(&mut self, ctx: &Context) {
+        self.clone_dialog(ctx);
+        self.plugin_confirmation(ctx);
+        if let Some(engine) = self.engine_remove.clone() {
+            let mut open = true;
+            let mut confirmed = false;
+            dialog::show(
+                ctx,
+                &self.theme.clone(),
+                "remove-engine",
+                &format!("Remove Unreal Engine {}", engine.version),
+                "Review the installation before removing it.",
+                &mut open,
+                |ui| {
+                    ui.label("This permanently deletes the engine folder, including installed plugins and custom files.");
+                    dialog::info(ui, &self.theme, "Installation folder", &engine.path);
+                    ui.label("Projects outside this folder are kept. Projects using this engine will show a missing-engine warning.");
+                    confirmed = dialog::footer(
+                        ui,
+                        &self.theme,
+                        "Remove engine",
+                        !self.transfer.busy(),
+                        true,
+                    );
+                },
+            );
+            if confirmed {
+                self.engine_remove = None;
+                self.start_maintenance(engine, true, ctx.clone());
+            } else if !open {
+                self.engine_remove = None;
+            }
+        }
+        self.engine_options_dialog(ctx);
+        if self.login && self.pending.is_none() {
+            self.sign_in(ctx.clone());
+        }
+        if self.new_project {
+            let mut open = true;
+            let mut created = None;
+            dialog::show(
+                ctx,
+                &self.theme.clone(),
+                "new-project",
+                "New project",
+                "Choose a name and location for your project.",
+                &mut open,
+                |ui| {
+                    ui.label("Project name");
+                    ui.add_sized(
+                        [ui.available_width(), 40.],
+                        TextEdit::singleline(&mut self.new_name),
+                    );
+                    ui.label("Parent folder");
+                    dialog::folder(ui, &mut self.new_path);
+                    ui.label("Engine version");
+                    ComboBox::from_id_salt("new-engine")
+                        .width(ui.available_width())
+                        .selected_text(
+                            self.engines
+                                .get(self.new_engine)
+                                .map(|e| e.version.as_str())
+                                .unwrap_or("No installed engine"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, e) in self.engines.iter().enumerate() {
+                                ui.selectable_value(&mut self.new_engine, i, &e.version);
+                            }
+                        });
+                    if self.demo {
+                        ui.label("Switch to your real workspace in Settings to create projects.");
+                    }
+                    let preview = Path::new(&self.new_path)
+                        .join(&self.new_name)
+                        .join(format!("{}.uproject", self.new_name));
+                    dialog::info(
+                        ui,
+                        &self.theme,
+                        "New project file",
+                        &preview.to_string_lossy(),
+                    );
+                    if dialog::footer(
+                        ui,
+                        &self.theme,
+                        "Create project",
+                        !self.demo && !self.engines.is_empty() && !self.new_path.is_empty(),
+                        false,
+                    ) {
+                        match platform::create_project(
+                            Path::new(&self.new_path),
+                            &self.new_name,
+                            &self.engines[self.new_engine],
+                        ) {
+                            Ok(p) => created = Some(p),
+                            Err(e) => self.error = Some(e),
+                        }
+                    }
+                    if let Some(e) = &self.error {
+                        ui.colored_label(color(self.theme.warning), e);
+                    }
+                },
+            );
+            if let Some(p) = created {
+                self.prefs.manual_projects.push(p.path.clone());
+                self.projects.push(p);
+                self.persist();
+                self.new_project = false;
+                self.new_name.clear();
+                self.notify("Blank project created.");
+            } else if !open {
+                self.new_project = false;
+            }
+        }
+    }
+}
+impl eframe::App for Workspace {
+    fn on_exit(&mut self) {
+        self.persist();
+    }
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        ctx.input(|i| {
+            let viewport = i.viewport();
+            if viewport.minimized != Some(true) {
+                self.prefs.window_maximized = viewport.maximized.unwrap_or(false);
+                if !self.prefs.window_maximized {
+                    if let Some(rect) = viewport.inner_rect {
+                        let size = [rect.width(), rect.height()];
+                        if size[0] >= 1000. && size[1] >= 680. {
+                            self.prefs.window_size = Some(size);
+                        }
+                    }
+                }
+            }
+        });
+        engine_workspace::download_policy::configure(&self.prefs.downloads);
+        self.run_layout_probe(ctx);
+        resize_window_edges(ctx);
+        self.poll(ctx);
+        self.poll_transfers(ctx);
+        self.poll_plugins(ctx);
+        self.poll_library(ctx);
+        self.poll_workspace_cache(ctx);
+        egui::CentralPanel::default()
+            .frame(Frame::NONE)
+            .show(ctx, |ui| {
+                self.layout(ui, ctx);
+            });
+        self.plugin_dialog(ctx);
+        self.category_dialog(ctx);
+        self.dialogs(ctx);
+        self.install_dialog(ctx);
+        if crate::window_frame::take_replace_request() {
+            if self.transfer.busy()
+                || self.library_transfer_status().is_some()
+                || self.plugin_work.mutating
+            {
+                self.notify("An operation is running. Finish it before switching launcher builds.");
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        if self.pending.is_some() || self.transfer.busy() || self.scan.receiver.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(Duration::from_secs(5));
+        }
+    }
+}
+
+const SIDEBAR_HIGHLIGHT: [u8; 3] = [234, 189, 93];
+const SIDEBAR_ON_HIGHLIGHT: [u8; 3] = [0, 0, 0];
+
+struct Canvas {
+    origin: Pos2,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    theme: Theme,
+}
+impl Canvas {
+    fn scale(&self) -> f32 {
+        self.sx.min(self.sy)
+    }
+    fn point(&self, x: f32, y: f32) -> Pos2 {
+        self.origin + vec2(x * self.sx, y * self.sy)
+    }
+    fn rect(&self, r: [f32; 4]) -> Rect {
+        Rect::from_min_size(self.point(r[0], r[1]), vec2(r[2] * self.sx, r[3] * self.sy))
+    }
+    fn fill(&self, ui: &Ui, r: [f32; 4], col: [u8; 3], radius: f32) {
+        ui.painter()
+            .rect_filled(self.rect(r), radius * self.scale(), color(col));
+    }
+    fn boxed(&self, ui: &Ui, r: [f32; 4], fill: [u8; 3], border: [u8; 3], radius: f32, width: f32) {
+        ui.painter().rect(
+            self.rect(r),
+            radius * self.scale(),
+            color(fill),
+            Stroke::new(width * self.scale(), color(border)),
+            StrokeKind::Inside,
+        );
+    }
+    fn panel(&self, ui: &Ui, r: [f32; 4]) {
+        self.boxed(ui, r, self.theme.panel, self.theme.border, 7., 1.);
+    }
+    fn line(&self, ui: &Ui, a: [f32; 2], b: [f32; 2], col: [u8; 3]) {
+        ui.painter().line_segment(
+            [self.point(a[0], a[1]), self.point(b[0], b[1])],
+            Stroke::new(self.scale(), color(col)),
+        );
+    }
+    fn circle(&self, ui: &Ui, x: f32, y: f32, r: f32, col: [u8; 3]) {
+        ui.painter()
+            .circle_filled(self.point(x, y), r * self.scale(), color(col));
+    }
+    fn text(
+        &self,
+        ui: &Ui,
+        x: f32,
+        y: f32,
+        text: &str,
+        size: f32,
+        bold: bool,
+        col: [u8; 3],
+        align: Align2,
+    ) {
+        ui.painter().text(
+            self.point(x, y),
+            align,
+            text,
+            FontId::new(
+                size * self.scale(),
+                if bold {
+                    FontFamily::Name("semibold".into())
+                } else {
+                    FontFamily::Proportional
+                },
+            ),
+            color(col),
+        );
+    }
+    fn image(&self, ui: &Ui, tex: &TextureHandle, r: [f32; 4], tint: [u8; 3]) {
+        ui.painter().image(
+            tex.id(),
+            self.rect(r),
+            Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+            color(tint),
+        );
+    }
+    fn button(
+        &self,
+        ui: &mut Ui,
+        id: impl std::hash::Hash,
+        r: [f32; 4],
+        label: &str,
+        icon: Option<Icon>,
+        primary: bool,
+    ) -> bool {
+        let mut r = button_bounds(r);
+        let font = FontId::new(
+            if icon.is_some() { 15. } else { 14. } * self.scale(),
+            if primary {
+                FontFamily::Name("semibold".into())
+            } else {
+                FontFamily::Proportional
+            },
+        );
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(label.to_owned(), font, color(self.theme.text))
+            .size()
+            .x
+            / self.sx;
+        let needed = text_width
+            + if icon.is_some() {
+                18. * BUTTON_SCALE + 5.
+            } else {
+                0.
+            }
+            + 28.;
+        let extra = (needed - r[2]).max(0.);
+        r[0] -= extra / 2.;
+        r[2] += extra;
+        let response = ui.interact(self.rect(r), Id::new(id), Sense::click());
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+        let bg = if primary {
+            if response.hovered() {
+                self.theme.accent_hover
+            } else {
+                self.theme.accent
+            }
+        } else if response.hovered() || response.is_pointer_button_down_on() {
+            SIDEBAR_HIGHLIGHT
+        } else if label == "Launch" {
+            self.theme.button
+        } else {
+            self.theme.card
+        };
+        self.boxed(
+            ui,
+            r,
+            bg,
+            if primary {
+                self.theme.accent
+            } else {
+                self.theme.border
+            },
+            BUTTON_RADIUS,
+            if response.hovered() || response.is_pointer_button_down_on() {
+                0.
+            } else {
+                1.
+            },
+        );
+        let fg = if primary {
+            self.theme.on_accent
+        } else if response.hovered() || response.is_pointer_button_down_on() {
+            SIDEBAR_ON_HIGHLIGHT
+        } else {
+            self.theme.text
+        };
+        if let Some(icon) = icon {
+            let font = FontId::new(
+                15. * self.scale(),
+                if primary {
+                    FontFamily::Name("semibold".into())
+                } else {
+                    FontFamily::Proportional
+                },
+            );
+            let text_width = ui
+                .painter()
+                .layout_no_wrap(label.to_owned(), font, color(fg))
+                .size()
+                .x
+                / self.sx;
+            let icon_size = 18. * BUTTON_SCALE;
+            let gap = 5.;
+            let left = r[0] + (r[2] - text_width - icon_size - gap) / 2.;
+            self.icon(
+                ui,
+                icon,
+                left,
+                r[1] + r[3] / 2. - icon_size / 2.,
+                icon_size,
+                fg,
+            );
+            self.text(
+                ui,
+                left + icon_size + gap,
+                r[1] + r[3] / 2. - 1.5,
+                label,
+                15.,
+                primary,
+                fg,
+                Align2::LEFT_CENTER,
+            );
+        } else {
+            self.text(
+                ui,
+                r[0] + r[2] / 2.,
+                r[1] + r[3] / 2. - 1.5,
+                label,
+                14.,
+                primary,
+                fg,
+                Align2::CENTER_CENTER,
+            );
+        }
+        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    }
+    fn icon_button(
+        &self,
+        ui: &mut Ui,
+        id: impl std::hash::Hash,
+        r: [f32; 4],
+        icon: Icon,
+        primary: bool,
+    ) -> bool {
+        let r = button_bounds(r);
+        let res = ui.interact(self.rect(r), Id::new(id), Sense::click());
+        self.boxed(
+            ui,
+            r,
+            if primary {
+                self.theme.accent
+            } else if res.hovered() || res.is_pointer_button_down_on() {
+                SIDEBAR_HIGHLIGHT
+            } else {
+                self.theme.card
+            },
+            self.theme.border,
+            BUTTON_RADIUS,
+            if res.hovered() || res.is_pointer_button_down_on() {
+                0.
+            } else {
+                1.
+            },
+        );
+        self.icon(
+            ui,
+            icon,
+            r[0] + r[2] / 2. - 9. * BUTTON_SCALE,
+            r[1] + r[3] / 2. - 9. * BUTTON_SCALE,
+            18. * BUTTON_SCALE,
+            if primary {
+                self.theme.on_accent
+            } else if res.hovered() || res.is_pointer_button_down_on() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.muted
+            },
+        );
+        res.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    }
+    fn pill(&self, ui: &mut Ui, id: &str, r: [f32; 4], text: &str, active: bool) -> bool {
+        let r = button_bounds(r);
+        let res = ui.interact(self.rect(r), Id::new(id), Sense::click());
+        self.boxed(
+            ui,
+            r,
+            if active {
+                self.theme.accent
+            } else {
+                self.theme.card
+            },
+            if active {
+                self.theme.accent_hover
+            } else {
+                self.theme.border
+            },
+            18. * BUTTON_SCALE,
+            1.,
+        );
+        self.text(
+            ui,
+            r[0] + r[2] / 2.,
+            r[1] + r[3] / 2.,
+            text,
+            13.,
+            active,
+            if active {
+                self.theme.on_accent
+            } else {
+                self.theme.muted
+            },
+            Align2::CENTER_CENTER,
+        );
+        res.clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+    }
+    fn nav(&self, ui: &mut Ui, label: &str, icon: Icon, y: f32, active: bool) -> bool {
+        let res = ui
+            .interact(
+                self.rect([10., y, 220., 48.]),
+                Id::new(label),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if active || res.hovered() {
+            self.fill(ui, [10., y, 220., 48.], SIDEBAR_HIGHLIGHT, 6.);
+        }
+        self.icon(
+            ui,
+            icon,
+            34.,
+            y + 13.,
+            24.,
+            if active || res.hovered() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.muted
+            },
+        );
+        self.text(
+            ui,
+            77.,
+            y + 24.,
+            label,
+            16.,
+            false,
+            if active || res.hovered() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.muted
+            },
+            Align2::LEFT_CENTER,
+        );
+        res.clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+    }
+    fn window_button(&self, ui: &mut Ui, x: f32, text: &str) -> bool {
+        let res = ui
+            .interact(
+                self.rect([x - 15., 0., 30., 30.]),
+                Id::new(text),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if res.hovered() {
+            self.fill(ui, [x - 15., 0., 30., 30.], SIDEBAR_HIGHLIGHT, 2.);
+        }
+        self.text(
+            ui,
+            x,
+            15.,
+            text,
+            16.,
+            false,
+            if res.hovered() {
+                SIDEBAR_ON_HIGHLIGHT
+            } else {
+                self.theme.subtle
+            },
+            Align2::CENTER_CENTER,
+        );
+        res.clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+    }
+    fn icon(&self, ui: &Ui, icon: Icon, x: f32, y: f32, size: f32, col: [u8; 3]) {
+        let p = ui.painter();
+        let s = Stroke::new(1.7 * self.scale(), color(col));
+        let point = |a: f32, b: f32| self.point(x + a * size / 24., y + b * size / 24.);
+        let line = |a: [f32; 2], b: [f32; 2]| {
+            p.line_segment([point(a[0], a[1]), point(b[0], b[1])], s);
+        };
+        match icon {
+            Icon::User => {
+                p.circle_stroke(point(12., 7.), size * self.scale() / 6., s);
+                p.add(Shape::line(
+                    vec![
+                        point(4., 22.),
+                        point(4., 19.),
+                        point(5., 16.),
+                        point(8., 14.),
+                        point(16., 14.),
+                        point(19., 16.),
+                        point(20., 19.),
+                        point(20., 22.),
+                    ],
+                    s,
+                ));
+            }
+            Icon::Check => {
+                p.circle_stroke(point(12., 12.), size * self.scale() * 0.46, s);
+                line([6., 12.], [10., 16.]);
+                line([10., 16.], [18., 8.]);
+            }
+            Icon::Back => {
+                line([20., 12.], [4., 12.]);
+                line([4., 12.], [10., 6.]);
+                line([4., 12.], [10., 18.]);
+            }
+            Icon::Reset => {
+                p.add(Shape::line(
+                    (0..=24)
+                        .map(|i| {
+                            let a = -2.3 + i as f32 * 5.3 / 24.;
+                            point(12. + 8. * a.cos(), 12. + 8. * a.sin())
+                        })
+                        .collect(),
+                    s,
+                ));
+                line([3., 3.], [3., 10.]);
+                line([3., 10.], [10., 10.]);
+            }
+            Icon::Layers => {
+                for y in [7., 12., 17.] {
+                    line([3., y], [12., y + 4.]);
+                    line([12., y + 4.], [21., y]);
+                    if y == 7. {
+                        line([3., y], [12., y - 4.]);
+                        line([12., y - 4.], [21., y]);
+                    }
+                }
+            }
+            Icon::Storage => {
+                p.add(Shape::closed_line(
+                    vec![
+                        point(5., 4.),
+                        point(19., 4.),
+                        point(22., 19.),
+                        point(2., 19.),
+                    ],
+                    s,
+                ));
+                line([3., 14.], [21., 14.]);
+                for x in [7., 11., 17.] {
+                    p.circle_filled(point(x, 17.), self.scale(), s.color);
+                }
+            }
+            Icon::Database => {
+                for y in [5., 12., 19.] {
+                    p.add(Shape::ellipse_stroke(
+                        point(12., y),
+                        vec2(size * self.sx * 0.38, size * self.sy * 0.13),
+                        s,
+                    ));
+                }
+                line([3., 5.], [3., 19.]);
+                line([21., 5.], [21., 19.]);
+            }
+            Icon::Speed => {
+                p.add(Shape::line(
+                    (0..=24)
+                        .map(|i| {
+                            let a = std::f32::consts::PI + i as f32 * std::f32::consts::PI / 24.;
+                            point(12. + 10. * a.cos(), 16. + 10. * a.sin())
+                        })
+                        .collect(),
+                    s,
+                ));
+                line([12., 16.], [17., 8.]);
+                for (a, b) in [
+                    ([4., 14.], [6., 14.]),
+                    ([7., 8.], [8., 10.]),
+                    ([12., 6.], [12., 8.]),
+                    ([19., 14.], [21., 14.]),
+                ] {
+                    line(a, b);
+                }
+            }
+            Icon::Folder => {
+                p.add(Shape::closed_line(
+                    vec![
+                        point(2., 5.),
+                        point(9., 5.),
+                        point(12., 8.),
+                        point(22., 8.),
+                        point(22., 22.),
+                        point(2., 22.),
+                    ],
+                    s,
+                ));
+            }
+            Icon::Home => {
+                p.add(Shape::convex_polygon(
+                    vec![
+                        point(1., 11.),
+                        point(12., 1.),
+                        point(23., 11.),
+                        point(20., 11.),
+                        point(20., 23.),
+                        point(14., 23.),
+                        point(14., 15.),
+                        point(9., 15.),
+                        point(9., 23.),
+                        point(4., 23.),
+                        point(4., 11.),
+                    ],
+                    color(col),
+                    Stroke::NONE,
+                ));
+            }
+            Icon::Cube => {
+                for (a, b) in [
+                    ([2., 6.], [12., 1.]),
+                    ([12., 1.], [22., 6.]),
+                    ([22., 6.], [22., 18.]),
+                    ([22., 18.], [12., 23.]),
+                    ([12., 23.], [2., 18.]),
+                    ([2., 18.], [2., 6.]),
+                    ([2., 6.], [12., 11.]),
+                    ([12., 11.], [22., 6.]),
+                    ([12., 11.], [12., 23.]),
+                ] {
+                    line(a, b);
+                }
+            }
+            Icon::Chip => {
+                p.rect_stroke(
+                    Rect::from_min_max(point(5., 5.), point(19., 19.)),
+                    1.,
+                    s,
+                    StrokeKind::Inside,
+                );
+                for k in [7., 12., 17.] {
+                    line([k, 1.], [k, 4.]);
+                    line([k, 20.], [k, 23.]);
+                    line([1., k], [4., k]);
+                    line([20., k], [23., k]);
+                }
+            }
+            Icon::Plus => {
+                line([12., 2.], [12., 22.]);
+                line([2., 12.], [22., 12.]);
+            }
+            Icon::Download | Icon::Upload => {
+                line([2., 17.], [2., 23.]);
+                line([2., 23.], [22., 23.]);
+                line([22., 23.], [22., 17.]);
+                line([12., 2.], [12., 17.]);
+                if matches!(icon, Icon::Download) {
+                    line([5., 11.], [12., 18.]);
+                    line([12., 18.], [19., 11.]);
+                } else {
+                    line([5., 9.], [12., 2.]);
+                    line([12., 2.], [19., 9.]);
+                }
+            }
+            Icon::Search => {
+                p.circle_stroke(point(10., 10.), 7. * size / 24. * self.scale(), s);
+                line([15., 15.], [23., 23.]);
+            }
+            Icon::Down => {
+                line([6., 9.], [12., 15.]);
+                line([12., 15.], [18., 9.]);
+            }
+            Icon::Dots => {
+                for k in [4., 12., 20.] {
+                    p.circle_filled(point(12., k), 1.7 * self.scale(), color(col));
+                }
+            }
+            Icon::Grid => {
+                for (a, b) in [(2., 2.), (14., 2.), (2., 14.), (14., 14.)] {
+                    p.rect_filled(
+                        Rect::from_min_max(point(a, b), point(a + 8., b + 8.)),
+                        0.,
+                        color(col),
+                    );
+                }
+            }
+            Icon::List => {
+                for k in [5., 12., 19.] {
+                    line([2., k], [22., k]);
+                }
+            }
+            Icon::Book => {
+                p.add(Shape::closed_line(
+                    vec![
+                        point(12., 4.),
+                        point(5., 2.),
+                        point(2., 3.),
+                        point(2., 21.),
+                        point(6., 20.),
+                        point(12., 22.),
+                        point(18., 20.),
+                        point(22., 21.),
+                        point(22., 3.),
+                        point(19., 2.),
+                    ],
+                    s,
+                ));
+                line([12., 4.], [12., 22.]);
+            }
+            Icon::Gear => {
+                p.circle_stroke(point(12., 12.), 7. * size / 24. * self.scale(), s);
+                p.circle_stroke(point(12., 12.), 3. * size / 24. * self.scale(), s);
+                for k in 0..8 {
+                    let a = k as f32 * std::f32::consts::TAU / 8.;
+                    line(
+                        [12. + a.cos() * 8., 12. + a.sin() * 8.],
+                        [12. + a.cos() * 11., 12. + a.sin() * 11.],
+                    );
+                }
+            }
+            Icon::Pin => {
+                line([8., 2.], [17., 2.]);
+                line([9., 2.], [8., 10.]);
+                line([16., 2.], [17., 10.]);
+                line([8., 10.], [5., 15.]);
+                line([5., 15.], [20., 15.]);
+                line([20., 15.], [17., 10.]);
+                line([12., 15.], [12., 23.]);
+            }
+        }
+    }
+}
+
+// Card geometry stays in logical pixels; window size changes only the column count.
+fn card_columns(available: f32, width: f32, gap: f32) -> usize {
+    ((available + gap) / (width + gap)).floor().max(1.) as usize
+}
+
+#[cfg(test)]
+mod responsive_tests {
+    use super::card_columns;
+    #[test]
+    fn cards_reflow_at_exact_width_boundaries() {
+        assert_eq!(card_columns(301., 301., 12.), 1);
+        assert_eq!(card_columns(613., 301., 12.), 1);
+        assert_eq!(card_columns(614., 301., 12.), 2);
+        assert_eq!(card_columns(1280., 301., 12.), 4);
+        assert_eq!(card_columns(1906., 301., 12.), 6);
+        assert_eq!(card_columns(1262., 240.8, 14.), 5);
+        for viewport in [1000., 1200., 1586., 1920., 2560.] {
+            let available = viewport - 306.;
+            let columns = card_columns(available, 301., 12.);
+            assert!(columns as f32 * 313. - 12. <= available);
+            assert!((columns + 1) as f32 * 313. - 12. > available);
+        }
+    }
+}
+
+// Borderless windows need explicit native resize hit targets.
+fn resize_window_edges(ctx: &Context) {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let rect = ctx.content_rect();
+    let Some(point) = ctx.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    if let Some((direction, cursor)) = resize_edge(rect, point) {
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(direction));
+        }
+    }
+}
+pub(crate) fn resize_edge(
+    rect: Rect,
+    point: Pos2,
+) -> Option<(egui::viewport::ResizeDirection, CursorIcon)> {
+    use egui::viewport::ResizeDirection::*;
+    if !rect.contains(point) {
+        return None;
+    }
+    let left = point.x < rect.left() + 6.;
+    let right = point.x > rect.right() - 6.;
+    let top = point.y < rect.top() + 6.;
+    let bottom = point.y > rect.bottom() - 6.;
+    let near_left = point.x < rect.left() + 16.;
+    let near_right = point.x > rect.right() - 16.;
+    let near_top = point.y < rect.top() + 16.;
+    let near_bottom = point.y > rect.bottom() - 16.;
+    Some(if (left && near_top) || (top && near_left) {
+        (NorthWest, CursorIcon::ResizeNwSe)
+    } else if (right && near_top) || (top && near_right) {
+        (NorthEast, CursorIcon::ResizeNeSw)
+    } else if (left && near_bottom) || (bottom && near_left) {
+        (SouthWest, CursorIcon::ResizeNeSw)
+    } else if (right && near_bottom) || (bottom && near_right) {
+        (SouthEast, CursorIcon::ResizeNwSe)
+    } else if left {
+        (West, CursorIcon::ResizeHorizontal)
+    } else if right {
+        (East, CursorIcon::ResizeHorizontal)
+    } else if top {
+        (North, CursorIcon::ResizeVertical)
+    } else if bottom {
+        (South, CursorIcon::ResizeVertical)
+    } else {
+        return None;
+    })
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use egui::viewport::ResizeDirection::*;
+    #[test]
+    fn all_edges_and_corners_have_native_resize_targets() {
+        let r = Rect::from_min_size(Pos2::ZERO, vec2(1000., 680.));
+        for (x, y, d) in [
+            (2., 2., NorthWest),
+            (998., 2., NorthEast),
+            (2., 678., SouthWest),
+            (998., 678., SouthEast),
+            (2., 340., West),
+            (998., 340., East),
+            (500., 2., North),
+            (500., 678., South),
+        ] {
+            assert_eq!(resize_edge(r, pos2(x, y)).map(|v| v.0), Some(d));
+        }
+        assert!(resize_edge(r, pos2(500., 340.)).is_none());
+        assert!(resize_edge(r, pos2(979., 17.)).is_none()); // close button
+    }
+}
+
+// A moving segment communicates activity without inventing a percentage.
+fn indeterminate_progress(ui: &mut Ui, width: f32, height: f32, accent: [u8; 3], track: [u8; 3]) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width.max(1.), height), Sense::hover());
+    ui.painter().rect_filled(rect, height / 2., color(track));
+    let fraction = ((ui.input(|i| i.time) * 2.).sin() as f32 + 1.) / 2.;
+    let segment_width = rect.width() * 0.24;
+    let segment = Rect::from_min_size(
+        pos2(
+            rect.left() + (rect.width() - segment_width) * fraction,
+            rect.top(),
+        ),
+        vec2(segment_width, height),
+    );
+    ui.painter()
+        .rect_filled(segment, height / 2., color(accent));
+    ui.ctx().request_repaint_after(Duration::from_millis(16));
+}

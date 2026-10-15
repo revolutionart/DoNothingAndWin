@@ -1,0 +1,7 @@
+DoNothing&Win Launcher - for Unreal Engine developers
+
+Setup installs the launcher only. It will not delete your Unreal Engine projects or engine installations. Uninstalling the launcher also leaves those projects, engines, and your local launcher settings in place.
+
+Launch after setup is enabled by default. On the next page you can optionally start the launcher with Windows and choose whether it starts minimized.
+
+Finish active downloads and exit the launcher before installing an update. Setup will not force it to close.
