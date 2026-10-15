@@ -2,6 +2,13 @@
 
 ## 1.1.0 — 2026-10-15
 
+### Launcher updates
+
+- Check for a new stable launcher release in the background at startup and once a day while open, with a manual check in Settings.
+- Show an update notice in the sidebar and links to release notes and the installer or portable ZIP appropriate to the running build.
+- Checks use public GitHub release metadata without account credentials. Downloads and installation remain manual, so checks do not interrupt transfers or restart the app.
+- Version 1.0.0 users need to download this release manually to receive future update notifications.
+
 ### Library
 
 - Added engine-version filtering and **Latest update** sorting, now the default. Listing dates load in the background; items without a known date appear last.

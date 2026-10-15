@@ -1211,6 +1211,7 @@ dependencies = [
  "raw-window-handle",
  "reqwest",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
  "sha1",

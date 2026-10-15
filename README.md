@@ -65,6 +65,7 @@ Download the **[1.1.0 Windows installer](https://github.com/revolutionart/DoNoth
 - Minimize keeps both versions in the taskbar. In the installed version, Close (X) hides the launcher in the system tray; right-click the tray icon and choose Exit to quit. In the portable version, Close (X) exits the application and no tray icon is created. Downloads settings include an option to start minimized with Windows.
 - Setup and uninstall do not delete your Unreal projects or engine installations. Uninstall removes launcher files and its startup entry; local launcher settings are retained.
 - Setup refuses to replace a running launcher. Finish your transfers and exit before installing an update. It never force-closes a download.
+- From 1.1.0 onward, the launcher checks for stable app updates at startup and daily while open. An available-update notice opens **Settings → Launcher updates**, where you can also check manually, read release notes, and download the correct installer or portable ZIP. Updates are installed manually. Version 1.0.0 users need to download 1.1.0 manually first.
 
 This release is unsigned; Windows may display an unknown-publisher/SmartScreen prompt. Download only from this repository's releases and compare the provided SHA-256 checksums if needed.
 

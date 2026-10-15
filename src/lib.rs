@@ -1,4 +1,5 @@
 pub mod epic;
+pub mod launcher_update;
 pub mod model;
 pub mod platform;
 pub mod storage;

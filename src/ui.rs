@@ -3,6 +3,7 @@ mod clone_project;
 mod dialog;
 mod downloads;
 mod engine_options;
+mod launcher_updates;
 mod layout_probe;
 mod library;
 mod plugin_jobs;
@@ -120,6 +121,7 @@ pub struct Workspace {
     plugins: Vec<engine_workspace::plugins::Plugin>,
     plugin_counts: HashMap<String, usize>,
     workspace_cache: workspace_cache::WorkspaceCache,
+    launcher_updates: launcher_updates::LauncherUpdates,
 }
 const BUTTON_SCALE: f32 = 0.75;
 const BUTTON_RADIUS: f32 = 5. * BUTTON_SCALE;
@@ -511,6 +513,7 @@ impl Workspace {
             plugins: Vec::new(),
             plugin_counts: HashMap::new(),
             workspace_cache: Default::default(),
+            launcher_updates: Default::default(),
         };
         app.load_assets(&cc.egui_ctx);
         if !demo && app.layout_probe.is_none() {
@@ -950,6 +953,19 @@ impl Workspace {
             [224., c.height - 205.],
             self.theme.border,
         );
+        if self.launcher_updates.available.is_some()
+            && c.button(
+                ui,
+                "launcher-update-available",
+                [16., c.height - 251., 208., 36.],
+                "Launcher update available",
+                None,
+                false,
+            )
+        {
+            self.plugin_engine = None;
+            self.page = Page::Settings;
+        }
         if c.nav(ui, "Documentation", Icon::Book, c.height - 193., false) {
             let _ = platform::open_external(
                 "https://dev.epicgames.com/documentation/en-us/unreal-engine",
@@ -2187,6 +2203,7 @@ impl eframe::App for Workspace {
             resize_window_edges(ctx);
         }
         self.poll(ctx);
+        self.poll_launcher_updates(ctx);
         self.poll_transfers(ctx);
         self.poll_plugins(ctx);
         self.poll_library(ctx);

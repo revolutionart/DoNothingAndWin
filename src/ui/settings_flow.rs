@@ -171,7 +171,7 @@ impl Workspace {
                 });
                 });
                 settings_section(ui,&theme,|ui|{
-                ui.heading("Release checks");ui.label("Check for available releases while the launcher is open. Updates are always installed manually.");
+                ui.heading("Engine release checks");ui.label("Check for available engine releases while the launcher is open. Updates are always installed manually.");
                 ui.horizontal_wrapped(|ui|{
                     ui.label("Check every");if ui.add(DragValue::new(&mut self.prefs.check_minutes).range(5..=1440).suffix(" minutes")).changed(){self.persist();}
                     if ui.button("Check now").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.check(ctx.clone());}
@@ -186,7 +186,7 @@ impl Workspace {
                 settings_section(ui,&theme,|ui|{
                 self.desktop_preferences(ui);
                 });
-                ui.label(concat!("DoNothing&Win Launcher ",env!("CARGO_PKG_VERSION")));
+                settings_section(ui,&theme,|ui|{self.launcher_update_settings(ui,ctx);});
                 ui.label(RichText::new("Independent developer tool. Not affiliated with or endorsed by Epic Games.").color(color(theme.muted)));
                 if let Some(e)=&self.error{ui.label(RichText::new(e).color(color(theme.warning)));}
             });
