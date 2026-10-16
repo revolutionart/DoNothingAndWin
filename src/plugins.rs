@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+mod check_cache;
+mod parallel_checks;
+pub(crate) mod receipt;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex, OnceLock},
@@ -83,7 +86,15 @@ fn visit(root: &Path, dir: &Path, depth: usize, bundled: &HashSet<String>, out: 
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let entries: Vec<_> = entries.flatten().collect();
+    // Plugin discovery stops at a plugin root. Its Content, Source, Binaries and
+    // Intermediate trees cannot contain another independently installed plugin.
+    let plugin_root = depth > 0
+        && entries.iter().any(|entry| {
+            entry.path().extension().is_some_and(|x| x == "uplugin")
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+        });
+    for entry in entries {
         let path = entry.path();
         let Ok(kind) = entry.file_type() else {
             continue;
@@ -102,7 +113,9 @@ fn visit(root: &Path, dir: &Path, depth: usize, bundled: &HashSet<String>, out: 
             }
         }
         if kind.is_dir() {
-            visit(root, &path, depth + 1, bundled, out);
+            if !plugin_root {
+                visit(root, &path, depth + 1, bundled, out);
+            }
         } else if path.extension().is_some_and(|x| x == "uplugin") {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
@@ -155,6 +168,55 @@ fn visit(root: &Path, dir: &Path, depth: usize, bundled: &HashSet<String>, out: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_searches_categories_but_stops_at_plugin_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("Engine/Plugins/Marketplace/Category/Real");
+        let payload = plugin.join("Intermediate/PackagedCopy");
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(
+            plugin.join("Real.uplugin"),
+            br#"{"FriendlyName":"Real","VersionName":"1.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            payload.join("Copy.uplugin"),
+            br#"{"FriendlyName":"Build output"}"#,
+        )
+        .unwrap();
+        let rows = installed(dir.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Real");
+    }
+    #[test]
+    #[ignore = "Read-only live update probe; requires DNW_TEST_PLUGIN_DESCRIPTOR, DNW_TEST_PLUGIN_ENGINE and a connected Epic account"]
+    fn live_descriptor_update_probe() {
+        let descriptor = std::path::PathBuf::from(
+            std::env::var("DNW_TEST_PLUGIN_DESCRIPTOR").expect("Supply a test descriptor"),
+        );
+        let version = std::env::var("DNW_TEST_PLUGIN_ENGINE").expect("Supply an engine version");
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Engine/Plugins/Marketplace/TestPlugin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::copy(&descriptor, folder.join(descriptor.file_name().unwrap())).unwrap();
+        let engine = crate::model::Installation {
+            version,
+            path: temp.path().to_string_lossy().into_owned(),
+            association: "isolated-read-only-probe".into(),
+        };
+        let session = crate::storage::load_session().expect("Connect Epic first");
+        let rows = check(&engine, &session).unwrap();
+        assert_eq!(rows.len(), 1);
+        for row in rows {
+            println!(
+                "{} | installed {} | available {} | {}",
+                row.plugin.name,
+                row.plugin.version,
+                row.available_version.as_deref().unwrap_or("unknown"),
+                row.status
+            );
+        }
+    }
     #[test]
     fn discovers_epic_fab_and_bridge_without_including_builtin_plugins() {
         let d = tempfile::tempdir().unwrap();
@@ -242,10 +304,12 @@ mod tests {
 }
 use crate::{
     buildpatch::{self, Manifest},
-    epic::{Epic, Session},
+    epic::Session,
     installer::{self, Control},
-    model::{EngineVersion, Installation, Release},
+    model::{EngineVersion, Installation},
 };
+#[cfg(test)]
+use crate::{epic::Epic, model::Release};
 use std::{collections::HashMap, fs};
 #[derive(Clone)]
 pub struct Update {
@@ -259,22 +323,122 @@ pub struct Update {
 pub struct Checked {
     pub plugin: Plugin,
     pub update: Option<Update>,
+    pub available_version: Option<String>,
     pub status: String,
 }
 impl Checked {
+    pub fn has_update(&self) -> bool {
+        self.update.is_some()
+            || self
+                .status
+                .starts_with("Epic integration update available;")
+    }
+    pub fn status_detail(&self) -> &str {
+        match self.status_label() {
+            "Up to date" => {
+                "The installed version matches the latest compatible version. No update is available."
+            }
+            "Not available through Fab" => {
+                "This plugin is not available from your connected Fab library. Check the publisher for updates."
+            }
+            _ => &self.status,
+        }
+    }
     pub fn status_label(&self) -> &'static str {
         if self.update.is_some() {
             return "Update available";
         }
         match self.status.as_str() {
+            s if s.starts_with("Package identity could not be verified") => "Identity unverified",
+            s if s.starts_with("Could not match this plugin to the signed-in account") => {
+                "Not available through Fab"
+            }
+            s if s.starts_with("Matching Fab listing has no Windows build") => {
+                "No compatible build"
+            }
             "Up to date" => "Up to date",
+            "Publisher version matches; original package build is not recorded" => "Up to date",
             "Installed version is newer" => "Installed newer",
-            "Managed by its publisher" => "Not linked to Fab",
+            "Epic integration update available; update FabLauncher through Epic Games Launcher's Fab integration settings" => {
+                "Update through Epic"
+            }
+            "Managed by its publisher" => "Not available through Fab",
             "No verified Fab match" => "No verified Fab match",
             "No entitled compatible build" => "No compatible build",
             "Version labels differ; cannot determine which is newer" => "Version unclear",
             _ => "Check failed",
         }
+    }
+}
+
+pub fn check_summary(rows: &[Checked]) -> String {
+    let updates = rows.iter().filter(|r| r.has_update()).count();
+    let current = rows
+        .iter()
+        .filter(|r| matches!(r.status_label(), "Up to date" | "Installed newer"))
+        .count();
+    let unavailable = rows
+        .iter()
+        .filter(|r| r.status_label() == "Not available through Fab")
+        .count();
+    let unresolved = rows.len() - updates - current - unavailable;
+    let mut parts = vec![
+        format!(
+            "{updates} {}",
+            if updates == 1 { "update" } else { "updates" }
+        ),
+        format!("{current} up to date"),
+    ];
+    if unavailable > 0 {
+        parts.push(format!("{unavailable} not available through Fab"));
+    }
+    if unresolved > 0 {
+        parts.push(format!(
+            "{unresolved} {} unresolved",
+            if unresolved == 1 { "check" } else { "checks" }
+        ));
+    }
+    parts.join(" · ")
+}
+
+#[cfg(test)]
+mod status_presentation_tests {
+    use super::*;
+    fn row(status: &str) -> Checked {
+        Checked {
+            plugin: Plugin {
+                name: "Test".into(),
+                version: "1.0".into(),
+                descriptor: PathBuf::new(),
+                catalog_id: None,
+                number: 1,
+            },
+            update: None,
+            available_version: Some("1.0".into()),
+            status: status.into(),
+        }
+    }
+    #[test]
+    fn equal_versions_share_current_status_and_unavailable_is_not_a_failed_check() {
+        let matched = row("Publisher version matches; original package build is not recorded");
+        assert_eq!(matched.status_label(), "Up to date");
+        let rows = vec![matched.clone(), matched.clone(), matched, row("Up to date")];
+        assert_eq!(check_summary(&rows), "0 updates · 4 up to date");
+        let unavailable = row(
+            "Could not match this plugin to the signed-in account's Fab library; check the publisher for updates",
+        );
+        assert_eq!(unavailable.status_label(), "Not available through Fab");
+        assert!(
+            unavailable
+                .status_detail()
+                .contains("connected Fab library")
+        );
+        let failed = row("Fab request failed");
+        assert_eq!(failed.status_label(), "Check failed");
+        assert_eq!(
+            check_summary(&[unavailable, failed]),
+            "0 updates · 0 up to date · 1 not available through Fab · 1 check unresolved"
+        );
     }
 }
 
@@ -335,7 +499,7 @@ fn legacy_app_hint(asset: &serde_json::Value, plugin: &Plugin) -> bool {
     };
     let app = asset["appName"].as_str().unwrap_or("").to_ascii_lowercase();
     let stem = stem.to_ascii_lowercase();
-    // Discovery hint only; candidate() verifies the downloaded descriptor ID.
+    // Discovery hint only; candidate_package verifies the downloaded descriptor ID.
     app == stem || app.starts_with(&format!("{stem}_"))
 }
 fn unlinked_app_hint(asset: &serde_json::Value, plugin: &Plugin) -> bool {
@@ -359,8 +523,110 @@ fn unlinked_app_hint(asset: &serde_json::Value, plugin: &Plugin) -> bool {
     let name = compact(&plugin.name);
     // Epic app names can abbreviate a long descriptor name before a build ID.
     // These are discovery hints only; downloaded package metadata must agree.
-    (stem.len() >= 10 && app.starts_with(&stem[..10]))
-        || (name.len() >= 5 && app.starts_with(&name))
+    (stem.len() >= 8 && app.starts_with(&stem[..8])) || (name.len() >= 5 && app.starts_with(&name))
+}
+
+fn owned_item_hint(item: &crate::fab::Item, plugin: &Plugin) -> bool {
+    let words = |s: &str| {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    let name = words(&plugin.name);
+    let title = words(&item.title);
+    (!name.is_empty() && name.iter().all(|word| title.contains(word)))
+        || item
+            .project_versions
+            .iter()
+            .any(|v| unlinked_app_hint(&serde_json::json!({"appName": v.artifact_id}), plugin))
+}
+
+// The modern owned Fab library includes namespaces absent from Epic's legacy
+// namespace=ue catalog. Names only discover candidates; package descriptors
+// still have to prove identity before version comparisons or installation.
+fn check_owned_plugin(
+    plugin: &Plugin,
+    engine: &Installation,
+    items: &[crate::fab::Item],
+    mut fetch: impl FnMut(&crate::fab::Item, &crate::fab::Version, bool) -> Result<Update, String>,
+) -> Checked {
+    let recorded = receipt::read(plugin).filter(|r| {
+        items.iter().any(|i| {
+            i.plugin()
+                && i.project_versions
+                    .iter()
+                    .any(|v| v.artifact_id == r.artifact)
+        })
+    });
+    let exact = plugin.catalog_id.as_ref().is_some_and(|id| {
+        items
+            .iter()
+            .any(|i| i.plugin() && i.asset_id.eq_ignore_ascii_case(id))
+    });
+    let candidates: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            i.plugin()
+                && if let Some(receipt) = &recorded {
+                    i.project_versions
+                        .iter()
+                        .any(|v| v.artifact_id == receipt.artifact)
+                } else if exact {
+                    plugin
+                        .catalog_id
+                        .as_ref()
+                        .is_some_and(|id| i.asset_id.eq_ignore_ascii_case(id))
+                } else {
+                    owned_item_hint(i, plugin)
+                }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Checked { plugin: plugin.clone(), update: None, available_version: None, status: "Could not match this plugin to the signed-in account's Fab library; check the publisher for updates".into() };
+    }
+    let mut assets = Vec::new();
+    for item in &candidates {
+        for version in &item.project_versions {
+            if (version.target_platforms.is_empty()
+                || version.target_platforms.iter().any(|p| p == "Windows"))
+                && version
+                    .engine_versions
+                    .iter()
+                    .any(|v| compatible(v, &engine.version))
+            {
+                assets.push(serde_json::json!({"catalogItemId":item.asset_id,"namespace":item.asset_namespace,"appName":version.artifact_id,"buildVersion":engine.version}));
+            }
+        }
+    }
+    let mut checked = check_plugin_candidates(
+        plugin,
+        engine,
+        &assets,
+        |asset, _| {
+            let item = candidates
+                .iter()
+                .find(|i| {
+                    Some(i.asset_id.as_str()) == asset["catalogItemId"].as_str()
+                        && Some(i.asset_namespace.as_str()) == asset["namespace"].as_str()
+                })
+                .ok_or("Fab item missing")?;
+            let version = item
+                .project_versions
+                .iter()
+                .find(|v| Some(v.artifact_id.as_str()) == asset["appName"].as_str())
+                .ok_or("Fab artifact missing")?;
+            fetch(item, version, !exact && recorded.is_none())
+        },
+        true,
+    );
+    if assets.is_empty() {
+        checked.status = format!(
+            "Matching Fab listing has no Windows build for Unreal Engine {}",
+            engine.version
+        );
+    }
+    checked
 }
 
 fn verify_unlinked_identity(plugin: &Plugin, remote: &serde_json::Value) -> Result<(), String> {
@@ -370,6 +636,12 @@ fn verify_unlinked_identity(plugin: &Plugin, remote: &serde_json::Value) -> Resu
     }
     let local: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid installed plugin descriptor")?;
+    // An identical full descriptor can confirm a current package even for
+    // content-only tools without modules or a publisher URL. It cannot authorize
+    // an update with changed versions or other metadata.
+    if local == *remote {
+        return Ok(());
+    }
     fn publisher(value: &serde_json::Value) -> Option<String> {
         let mut url = reqwest::Url::parse(value["CreatedByURL"].as_str()?.trim()).ok()?;
         if url.scheme() != "https"
@@ -424,9 +696,7 @@ fn verify_unlinked_identity(plugin: &Plugin, remote: &serde_json::Value) -> Resu
         || !local_modules.contains(stem)
         || !local_modules.is_subset(&remote_modules)
     {
-        return Err(
-            "Package identity could not be verified for a plugin without a Marketplace URL".into(),
-        );
+        return Err("Package identity could not be verified: the descriptor has no Marketplace URL and its publisher, name, or module identity is missing or differs. Automatic updates are unavailable; check the publisher.".into());
     }
     Ok(())
 }
@@ -481,8 +751,27 @@ fn stream_payload_progress(
     output: &mut impl std::io::Write,
     progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
+    stream_payload_io(m, bases, file, cache, output, &mut |p| {
+        progress(p.prepared, p.downloaded)
+    })
+}
+#[derive(Clone, Copy, Debug, Default)]
+struct PayloadIo {
+    prepared: u64,
+    downloaded: u64,
+    read: u64,
+    written: u64,
+}
+fn stream_payload_io(
+    m: &Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    output: &mut impl std::io::Write,
+    progress: &mut impl FnMut(PayloadIo),
+) -> Result<(), String> {
     let mut written = 0u64;
-    let mut downloaded = 0u64;
+    let mut io = PayloadIo::default();
     let client = installer::client()?;
     use sha1::{Digest, Sha1};
     let mut hash = Sha1::new();
@@ -493,17 +782,28 @@ fn stream_payload_progress(
             {
                 cache.clear();
             }
-            let bytes = if let Some(bytes) = crate::download_policy::cached_chunk(chunk) {
+            let bytes = if let Some(bytes) =
+                crate::download_policy::cached_chunk_progress(chunk, &mut |n| {
+                    io.read += n;
+                    progress(io);
+                }) {
                 bytes
             } else {
-                let bytes =
-                    installer::chunk_data(&client, chunk, bases, m.feature, &Control::default())?;
-                downloaded += if chunk.size > 0 {
-                    chunk.size
-                } else {
-                    bytes.len() as u64
-                };
-                crate::download_policy::cache_chunk(chunk, &bytes);
+                let bytes = installer::chunk_data_progress(
+                    &client,
+                    chunk,
+                    bases,
+                    m.feature,
+                    &Control::default(),
+                    &mut |n| {
+                        io.downloaded += n;
+                        progress(io);
+                    },
+                )?;
+                crate::download_policy::cache_chunk_progress(chunk, &bytes, &mut |n| {
+                    io.written += n;
+                    progress(io);
+                });
                 bytes
             };
             cache.insert(p.guid.clone(), bytes);
@@ -520,7 +820,9 @@ fn stream_payload_progress(
             .map_err(|e| format!("Writing {}: {e}", file.name))?;
         hash.update(part);
         written += part.len() as u64;
-        progress(written, downloaded);
+        io.prepared = written;
+        io.written += part.len() as u64;
+        progress(io);
     }
     let actual: [u8; 20] = hash.finalize().into();
     if actual != file.sha {
@@ -528,6 +830,7 @@ fn stream_payload_progress(
     }
     Ok(())
 }
+#[cfg(test)]
 pub(crate) fn payload_to_file(
     m: &Manifest,
     bases: &[reqwest::Url],
@@ -545,13 +848,25 @@ pub(crate) fn payload_to_file_progress(
     path: &Path,
     progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
+    payload_to_file_io(m, bases, file, cache, path, &mut |p| {
+        progress(p.prepared, p.downloaded)
+    })
+}
+fn payload_to_file_io(
+    m: &Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    path: &Path,
+    progress: &mut impl FnMut(PayloadIo),
+) -> Result<(), String> {
     installer::no_links(path)?;
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|e| format!("Creating {}: {e}", path.display()))?;
-    let result = stream_payload_progress(m, bases, file, cache, &mut output, progress)
+    let result = stream_payload_io(m, bases, file, cache, &mut output, progress)
         .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
     drop(output);
     if result.is_err() {
@@ -559,6 +874,7 @@ pub(crate) fn payload_to_file_progress(
     }
     result
 }
+#[cfg(test)]
 fn load_package(
     session: &Session,
     asset: &serde_json::Value,
@@ -599,16 +915,6 @@ fn load_package(
     }
     Ok((manifest, bases))
 }
-fn candidate(
-    session: &Session,
-    asset: &serde_json::Value,
-    plugin: &Plugin,
-    engine: &Installation,
-    legacy: bool,
-) -> Result<Update, String> {
-    let (manifest, bases) = load_package(session, asset)?;
-    candidate_package(manifest, bases, plugin, engine, legacy, None)
-}
 fn candidate_package(
     manifest: Manifest,
     bases: Vec<reqwest::Url>,
@@ -639,7 +945,7 @@ fn candidate_package(
     if let Some(id) = fab_id {
         verify_fab_identity(&v, id)?;
     }
-    if legacy {
+    if legacy && !receipt::read(plugin).is_some_and(|r| r.artifact == manifest.app) {
         if plugin.catalog_id.is_some() {
             verify_legacy_identity(plugin, &v)?;
         } else {
@@ -660,7 +966,40 @@ fn candidate_package(
     })
 }
 fn fab_descriptor_id(value: &serde_json::Value) -> Option<String> {
-    crate::fab_listing::listing_url_id(value["MarketplaceURL"].as_str()?)
+    let ids = descriptor_fab_ids(value);
+    (ids.len() == 1).then(|| ids.into_iter().next().unwrap())
+}
+fn descriptor_fab_ids(value: &serde_json::Value) -> HashSet<String> {
+    ["FabURL", "MarketplaceURL"]
+        .into_iter()
+        .filter_map(|field| {
+            let raw = value[field].as_str()?;
+            if let Some(id) = crate::fab_listing::listing_url_id(raw) {
+                return Some(id);
+            }
+            let url = reqwest::Url::parse(raw).ok()?;
+            if url.scheme() != "com.epicgames.launcher"
+                || url.host_str() != Some("ue")
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.port().is_some()
+            {
+                return None;
+            }
+            let path = url.path().trim_end_matches('/');
+            let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+            if parts.len() != 3
+                || !parts[0].eq_ignore_ascii_case("fab")
+                || !parts[1].eq_ignore_ascii_case("product")
+            {
+                return None;
+            }
+            crate::fab_listing::listing_url_id(&format!(
+                "https://www.fab.com/listings/{}",
+                parts[2]
+            ))
+        })
+        .collect()
 }
 pub fn fab_listing_id(plugin: &Plugin) -> Option<String> {
     let bytes = fs::read(&plugin.descriptor).ok()?;
@@ -698,6 +1037,7 @@ fn check_fab_plugin(
         return Checked {
             plugin: plugin.clone(),
             update: None,
+            available_version: None,
             status: if matches.is_empty() {
                 "No owned Fab listing matches this plugin"
             } else {
@@ -734,60 +1074,282 @@ fn check_fab_plugin(
     checked.plugin = plugin.clone();
     checked
 }
+// Epic's shipped DefaultPortalRegions.ini selects this separate integration feed.
+// FabLauncher is an export bridge, not an entitled marketplace code-plugin item.
+const FAB_INTEGRATION_FEED: &str = "https://cdn.quixel.com/fab/manifest/prod/plugins_v1.json";
+#[cfg(test)]
+mod integration_feed_tests {
+    use super::*;
+    #[test]
+    fn epic_integration_uses_its_exact_engine_feed_and_never_marketplace_installer() {
+        let plugin = Plugin {
+            name: "FabLauncher".into(),
+            version: "0.5.0".into(),
+            descriptor: PathBuf::from("FabLauncher.uplugin"),
+            catalog_id: None,
+            number: 1,
+        };
+        let mut engine = Installation {
+            version: "5.7.4".into(),
+            path: String::new(),
+            association: String::new(),
+        };
+        let feed = serde_json::json!({"plugins": {
+            "UE_5.7": {"windows": {"version":"0.5.0", "supportedVersions":["UE_5.7"]}},
+            "UE_5.8": {"windows": {"version":"0.6.0", "supportedVersions":["UE_5.8"]}}
+        }});
+        let current = check_fab_integration(&plugin, &engine, Ok(&feed));
+        assert_eq!(current.available_version.as_deref(), Some("0.5.0"));
+        assert_eq!(current.status_label(), "Up to date");
+        assert!(!current.has_update());
+        engine.version = "5.8.3".into();
+        let newer = check_fab_integration(&plugin, &engine, Ok(&feed));
+        assert_eq!(newer.available_version.as_deref(), Some("0.6.0"));
+        assert_eq!(newer.status_label(), "Update through Epic");
+        assert!(newer.has_update());
+        assert!(
+            newer.update.is_none(),
+            "ZIP integrations must not enter BuildPatch installation"
+        );
+        engine.version = "5.9".into();
+        let missing = check_fab_integration(&plugin, &engine, Ok(&feed));
+        assert_eq!(missing.status_label(), "Check failed");
+        assert!(missing.available_version.is_none());
+        assert_eq!(
+            check_summary(&[current, newer, missing]),
+            "1 update · 1 up to date · 1 check unresolved"
+        );
+        let failed = check_fab_integration(&plugin, &engine, Err("Network unavailable".into()));
+        assert_eq!(failed.status, "Network unavailable");
+    }
+}
+fn is_fab_integration(plugin: &Plugin) -> bool {
+    if plugin.descriptor.file_name().and_then(|v| v.to_str()) != Some("FabLauncher.uplugin") {
+        return false;
+    }
+    let Some(v) = crate::storage::read_json::<serde_json::Value>(&plugin.descriptor) else {
+        return false;
+    };
+    v["CreatedBy"]
+        .as_str()
+        .is_some_and(|s| matches!(s, "Epic Games" | "Epic Games, Inc."))
+        && v["Modules"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|m| m["Name"] == "FabLauncher"))
+}
+fn check_fab_integration(
+    plugin: &Plugin,
+    engine: &Installation,
+    feed: Result<&serde_json::Value, String>,
+) -> Checked {
+    let mut row = Checked {
+        plugin: plugin.clone(),
+        update: None,
+        available_version: None,
+        status: String::new(),
+    };
+    let result = (|| {
+        let feed = feed?;
+        let branch = EngineVersion::parse(&engine.version)
+            .ok_or("Unknown engine version")?
+            .branch();
+        let key = format!("UE_{branch}");
+        let target = &feed["plugins"][&key]["windows"];
+        if !target["supportedVersions"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|v| v.as_str() == Some(&key)))
+        {
+            return Err(format!(
+                "Epic's integration feed has no Windows FabLauncher build for {key}"
+            ));
+        }
+        let available = target["version"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or("Epic's integration feed has no version")?;
+        row.available_version = Some(available.into());
+        Ok(match compare_versions(0, available, 0, &plugin.version) {
+            Some(std::cmp::Ordering::Equal) => "Up to date",
+            Some(std::cmp::Ordering::Less) => "Installed version is newer",
+            Some(std::cmp::Ordering::Greater) => "Epic integration update available; update FabLauncher through Epic Games Launcher's Fab integration settings",
+            None => "Version labels differ; cannot determine which is newer",
+        }.to_owned())
+    })();
+    row.status = result.unwrap_or_else(|e| e);
+    row
+}
 pub fn check(engine: &Installation, session: &Session) -> Result<Vec<Checked>, String> {
-    let plugins = installed(Path::new(&engine.path));
-    let links: Vec<_> = plugins.iter().map(fab_listing_id).collect();
-    let fab_items = if links.iter().any(Option::is_some) {
-        Some(crate::fab::library(session, |_| {}))
+    let items = crate::fab::library(session, |_| {});
+    check_with_library(engine, session, &items)
+}
+/// Reopening a dialog reuses recent successful comparisons. Explicit checks bypass them.
+pub fn check_cached(
+    engine: &Installation,
+    session: &Session,
+    force: bool,
+) -> Result<Vec<Checked>, String> {
+    check_cached_with_progress(engine, session, force, |_| {})
+}
+pub fn check_cached_with_progress(
+    engine: &Installation,
+    session: &Session,
+    force: bool,
+    mut ready: impl FnMut(&Checked),
+) -> Result<Vec<Checked>, String> {
+    let local = installed(Path::new(&engine.path));
+    let mut rows = Vec::new();
+    let mut pending = Vec::new();
+    for plugin in local {
+        if let Some(row) = check_cache::get(&session.account_id, engine, &plugin, force) {
+            ready(&row);
+            rows.push(row);
+        } else {
+            pending.push(plugin);
+        }
+    }
+    if !pending.is_empty() {
+        let items = crate::fab::library_cached(session, force);
+        rows.extend(check_selected(
+            engine, session, &items, pending, &mut ready,
+        )?);
+    }
+    rows.sort_by_key(|r| r.plugin.name.to_lowercase());
+    Ok(rows)
+}
+/// A multi-engine scan reuses one owned-library response instead of fetching it per engine.
+pub fn check_with_library(
+    engine: &Installation,
+    session: &Session,
+    fab_items: &Result<Vec<crate::fab::Item>, String>,
+) -> Result<Vec<Checked>, String> {
+    check_with_library_progress(engine, session, fab_items, |_| {})
+}
+pub fn check_with_library_progress(
+    engine: &Installation,
+    session: &Session,
+    fab_items: &Result<Vec<crate::fab::Item>, String>,
+    ready: impl FnMut(&Checked),
+) -> Result<Vec<Checked>, String> {
+    check_selected(
+        engine,
+        session,
+        fab_items,
+        installed(Path::new(&engine.path)),
+        ready,
+    )
+}
+fn check_selected(
+    engine: &Installation,
+    session: &Session,
+    fab_items: &Result<Vec<crate::fab::Item>, String>,
+    plugins: Vec<Plugin>,
+    ready: impl FnMut(&Checked),
+) -> Result<Vec<Checked>, String> {
+    Ok(parallel_checks::run(
+        plugins,
+        |plugin| {
+            let fingerprint = check_cache::fingerprint(&plugin);
+            let row = check_one(engine, session, fab_items, plugin);
+            check_cache::remember(&session.account_id, engine, &row, fingerprint);
+            row
+        },
+        ready,
+    ))
+}
+fn check_one(
+    engine: &Installation,
+    session: &Session,
+    fab_items: &Result<Vec<crate::fab::Item>, String>,
+    plugin: Plugin,
+) -> Checked {
+    let link = fab_listing_id(&plugin);
+    if crate::storage::read_json::<serde_json::Value>(&plugin.descriptor)
+        .is_some_and(|v| descriptor_fab_ids(&v).len() > 1)
+    {
+        return Checked {
+            plugin,
+            update: None,
+            available_version: None,
+            status:
+                "Conflicting Fab listing IDs in the plugin descriptor; automatic update unavailable"
+                    .into(),
+        };
+    }
+    if is_fab_integration(&plugin) {
+        let feed = (|| {
+            let raw = installer::fetch(
+                &installer::client()?,
+                reqwest::Url::parse(FAB_INTEGRATION_FEED).unwrap(),
+                1024 * 1024,
+            )?;
+            serde_json::from_slice::<serde_json::Value>(&raw)
+                .map_err(|_| "Invalid Epic integration feed".to_owned())
+        })();
+        return check_fab_integration(&plugin, engine, feed.as_ref().map_err(Clone::clone));
+    }
+    if let Ok(items) = &fab_items {
+        if receipt::read(&plugin).is_some_and(|r| {
+            items.iter().any(|i| {
+                i.plugin()
+                    && i.project_versions
+                        .iter()
+                        .any(|v| v.artifact_id == r.artifact)
+            })
+        }) {
+            return check_owned_plugin(&plugin, engine, items, |item, version, fallback| {
+                let (manifest, bases) = crate::fab::package(session, item, version)?;
+                candidate_package(manifest, bases, &plugin, engine, fallback, None)
+            });
+        }
+    }
+    if let Some(id) = link {
+        match &fab_items {
+            Ok(items) => check_fab_plugin(&plugin, engine, &id, items, |item, version| {
+                let (manifest, bases) = crate::fab::package(session, item, version)?;
+                candidate_package(manifest, bases, &plugin, engine, false, Some(&id))
+            }),
+            Err(error) => Checked {
+                plugin,
+                update: None,
+                available_version: None,
+                status: error.clone(),
+            },
+        }
     } else {
-        None
-    };
-    let assets = if links.iter().any(Option::is_none) {
-        Epic::new().and_then(|epic| epic.owned_assets(session))
-    } else {
-        Ok(Vec::new())
-    };
-    Ok(plugins
-        .into_iter()
-        .zip(links)
-        .map(|(plugin, link)| {
-            if let Some(id) = link {
-                match fab_items.as_ref().unwrap() {
-                    Ok(items) => check_fab_plugin(&plugin, engine, &id, items, |item, version| {
-                        let (manifest, bases) = crate::fab::package(session, item, version)?;
-                        candidate_package(manifest, bases, &plugin, engine, false, Some(&id))
-                    }),
-                    Err(error) => Checked {
-                        plugin,
-                        update: None,
-                        status: error.clone(),
-                    },
-                }
-            } else {
-                match &assets {
-                    Ok(assets) => check_plugin(&plugin, engine, assets, |asset, legacy| {
-                        candidate(session, asset, &plugin, engine, legacy)
-                    }),
-                    Err(error) => Checked {
-                        plugin,
-                        update: None,
-                        status: error.clone(),
-                    },
-                }
-            }
-        })
-        .collect())
+        match &fab_items {
+            Ok(items) => check_owned_plugin(&plugin, engine, items, |item, version, fallback| {
+                let (manifest, bases) = crate::fab::package(session, item, version)?;
+                candidate_package(manifest, bases, &plugin, engine, fallback, None)
+            }),
+            Err(error) => Checked {
+                plugin,
+                update: None,
+                available_version: None,
+                status: error.clone(),
+            },
+        }
+    }
 }
 
 fn check_plugin(
     plugin: &Plugin,
     engine: &Installation,
     assets: &[serde_json::Value],
+    fetch: impl FnMut(&serde_json::Value, bool) -> Result<Update, String>,
+) -> Checked {
+    check_plugin_candidates(plugin, engine, assets, fetch, false)
+}
+fn check_plugin_candidates(
+    plugin: &Plugin,
+    engine: &Installation,
+    assets: &[serde_json::Value],
     mut fetch: impl FnMut(&serde_json::Value, bool) -> Result<Update, String>,
+    owned_candidates: bool,
 ) -> Checked {
     let mut item = Checked {
         plugin: plugin.clone(),
         update: None,
+        available_version: None,
         status: "Managed by its publisher".into(),
     };
     // An existing catalog identity takes precedence, even if it has no build
@@ -807,7 +1369,9 @@ fn check_plugin(
     let mut ambiguous_versions = false;
     for asset in assets.iter().filter(|a| {
         compatible(a["buildVersion"].as_str().unwrap_or(""), &engine.version)
-            && if plugin.catalog_id.is_none() {
+            && if owned_candidates {
+                true
+            } else if plugin.catalog_id.is_none() {
                 unlinked_app_hint(a, plugin)
             } else if legacy {
                 legacy_app_hint(a, plugin)
@@ -850,6 +1414,7 @@ fn check_plugin(
         return item;
     }
     if let Some(update) = best {
+        item.available_version = Some(update.version.clone());
         item.status = if ambiguous_versions {
             "Version labels differ; cannot determine which is newer"
         } else {
@@ -862,6 +1427,18 @@ fn check_plugin(
                 Some(std::cmp::Ordering::Greater) => {
                     item.update = Some(update);
                     "Update available"
+                }
+                Some(std::cmp::Ordering::Equal)
+                    if receipt::changed_build(plugin, &update.manifest) =>
+                {
+                    item.update = Some(update);
+                    "Update available"
+                }
+                Some(std::cmp::Ordering::Equal)
+                    if !receipt::read(plugin)
+                        .is_some_and(|r| r.artifact == update.manifest.app) =>
+                {
+                    "Publisher version matches; original package build is not recorded"
                 }
                 Some(std::cmp::Ordering::Equal) => "Up to date",
                 Some(std::cmp::Ordering::Less) => "Installed version is newer",
@@ -952,22 +1529,58 @@ pub fn remove_plugin(engine: &Installation, plugin: &Plugin) -> Result<String, S
         .map_err(|e|format!("Plugin removal failed: {e}. Some files may already have been removed; reinstall the plugin if needed."))?;
     Ok(format!("Removed {} from this engine.", plugin.name))
 }
+/// Progress describes file preparation separately from the final folder replacement.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateProgress {
+    pub phase: &'static str,
+    pub file: String,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub prepared: u64,
+    pub total: u64,
+    pub downloaded: u64,
+    pub read: u64,
+    pub written: u64,
+    /// Compressed size of unique package chunks, including chunks already cached.
+    pub package_bytes: Option<u64>,
+}
+impl UpdateProgress {
+    pub fn fraction(&self) -> Option<f32> {
+        (self.phase == "Preparing and verifying files" && self.total > 0)
+            .then(|| (self.prepared as f32 / self.total as f32).clamp(0., 1.))
+    }
+}
 pub fn update_plugin(
     engine: &Installation,
     plugin: &Plugin,
     update: &Update,
 ) -> Result<String, String> {
+    update_plugin_with_progress(engine, plugin, update, |_| {})
+}
+pub fn update_plugin_with_progress(
+    engine: &Installation,
+    plugin: &Plugin,
+    update: &Update,
+    mut report: impl FnMut(UpdateProgress),
+) -> Result<String, String> {
+    report(UpdateProgress {
+        phase: "Checking installed plugin",
+        ..Default::default()
+    });
     crate::download_policy::check_install_allowed()?;
     let root = plugin_root(engine, plugin)?;
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
     let _lock = crate::maintenance::lock(&eng)?;
     crate::maintenance::ensure_closed(&eng)?;
-    if compare_versions(
+    let version_order = compare_versions(
         update.number,
         &update.version,
         plugin.number,
         &plugin.version,
-    ) != Some(std::cmp::Ordering::Greater)
+    );
+    if version_order != Some(std::cmp::Ordering::Greater)
+        && !(version_order == Some(std::cmp::Ordering::Equal)
+            && receipt::changed_build(plugin, &update.manifest))
     {
         return Err("This is not a newer plugin version".into());
     }
@@ -989,27 +1602,93 @@ pub fn update_plugin(
         return Err("Empty plugin package".into());
     }
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
+    let mut chunk_ids = HashSet::new();
+    let package_bytes = files
+        .iter()
+        .flat_map(|(f, _)| &f.parts)
+        .filter(|p| chunk_ids.insert(&p.guid))
+        .try_fold(0u64, |sum, p| {
+            let size = update.manifest.chunks.get(&p.guid)?.size;
+            (size > 0).then_some(sum + size)
+        });
     if fs2::available_space(&eng).map_err(|e| e.to_string())? < bytes + 64 * 1024 * 1024 {
         return Err("Not enough space for plugin update".into());
     }
     let stage = backup_path(engine, &root)?.with_extension("staging");
     fs::create_dir(&stage).map_err(|e| e.to_string())?;
-    let mut cache = HashMap::new();
-    for (f, relative) in files {
-        let dest = stage.join(relative);
-        installer::no_links(&dest)?;
-        fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-        payload_to_file(&update.manifest, &update.bases, f, &mut cache, &dest)?;
-    }
-    activate(
+    let mut state = UpdateProgress {
+        phase: "Preparing and verifying files",
+        files_total: files.len(),
+        total: bytes,
+        package_bytes,
+        ..Default::default()
+    };
+    prepare_update_files(
+        &update.manifest,
+        &update.bases,
+        &files,
+        &stage,
+        &mut HashMap::new(),
+        &mut state,
+        &mut report,
+    )?;
+    state.phase = "Recording verified package";
+    state.file.clear();
+    report(state.clone());
+    receipt::write(&stage, &update.manifest, &update.prefix)?;
+    activate_with_progress(
         engine,
         plugin,
         &root,
         &stage,
         update.number,
         &update.version,
+        &mut |phase| {
+            state.phase = phase;
+            report(state.clone());
+        },
     )
 }
+fn prepare_update_files(
+    manifest: &Manifest,
+    bases: &[reqwest::Url],
+    files: &[(&buildpatch::File, PathBuf)],
+    stage: &Path,
+    cache: &mut HashMap<String, Vec<u8>>,
+    state: &mut UpdateProgress,
+    report: &mut impl FnMut(UpdateProgress),
+) -> Result<(), String> {
+    let mut last = std::time::Instant::now();
+    report(state.clone());
+    for (i, (file, relative)) in files.iter().enumerate() {
+        let dest = stage.join(relative);
+        installer::no_links(&dest)?;
+        fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+        state.file = relative.to_string_lossy().into_owned();
+        let prepared = state.prepared;
+        let downloaded = state.downloaded;
+        let read = state.read;
+        let written = state.written;
+        payload_to_file_io(manifest, bases, file, cache, &dest, &mut |io| {
+            state.prepared = prepared + io.prepared;
+            state.downloaded = downloaded + io.downloaded;
+            state.read = read + io.read;
+            state.written = written + io.written;
+            if last.elapsed().as_millis() >= 150 {
+                report(state.clone());
+                last = std::time::Instant::now();
+            }
+        })?;
+        state.files_done = i + 1;
+        if last.elapsed().as_millis() >= 150 || i + 1 == files.len() {
+            report(state.clone());
+            last = std::time::Instant::now();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn activate(
     engine: &Installation,
     plugin: &Plugin,
@@ -1018,6 +1697,18 @@ fn activate(
     number: i64,
     version: &str,
 ) -> Result<String, String> {
+    activate_with_progress(engine, plugin, root, stage, number, version, &mut |_| {})
+}
+fn activate_with_progress(
+    engine: &Installation,
+    plugin: &Plugin,
+    root: &Path,
+    stage: &Path,
+    number: i64,
+    version: &str,
+    report: &mut impl FnMut(&'static str),
+) -> Result<String, String> {
+    report("Validating prepared plugin");
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
     let desc = stage.join(plugin.descriptor.file_name().ok_or("Missing descriptor")?);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(desc).map_err(|e| e.to_string())?)
@@ -1031,6 +1722,7 @@ fn activate(
     plugin_root(engine, plugin)?;
     crate::maintenance::ensure_closed(&eng)?;
     let backup = backup_path(engine, &root)?;
+    report("Replacing installed plugin");
     fs::rename(&root, &backup).map_err(|e| e.to_string())?;
     if let Err(e) = fs::rename(&stage, &root) {
         let rollback = fs::rename(&backup, &root);
@@ -1040,6 +1732,7 @@ fn activate(
             backup.display()
         ));
     }
+    report("Cleaning up previous plugin files");
     if let Err(error) = delete_scoped_tree(&backup, &eng.join(".engine-workspace-plugin-backups")) {
         return Ok(format!(
             "Updated {} to {}. Temporary rollback cleanup failed: {error}. Remaining files: {}",
@@ -1330,6 +2023,74 @@ mod streaming_tests {
         (m, file, HashMap::from([(guid, data)]))
     }
     #[test]
+    fn update_progress_counts_cached_bytes_across_files_and_keeps_install_phase_separate() {
+        let (manifest, file, mut cache) = fixture(3);
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![
+            (&file, PathBuf::from("one.bin")),
+            (&file, PathBuf::from("two.bin")),
+        ];
+        let mut state = UpdateProgress {
+            phase: "Preparing and verifying files",
+            files_total: 2,
+            total: 2 * file.size(),
+            ..Default::default()
+        };
+        let mut events = vec![];
+        prepare_update_files(
+            &manifest,
+            &[],
+            &files,
+            dir.path(),
+            &mut cache,
+            &mut state,
+            &mut |p| events.push(p),
+        )
+        .unwrap();
+        assert_eq!(state.prepared, 6 * 1024 * 1024);
+        assert_eq!(state.downloaded, 0);
+        assert_eq!(state.read, 0); // This fixture supplies chunks already in memory.
+        assert_eq!(state.written, 6 * 1024 * 1024);
+        assert_eq!(state.files_done, 2);
+        assert_eq!(state.fraction(), Some(1.));
+        assert_eq!(events.first().unwrap().prepared, 0);
+        assert_eq!(events.last().unwrap().files_done, 2);
+        assert!(events.windows(2).all(|p| p[0].prepared <= p[1].prepared));
+        state.phase = "Replacing installed plugin";
+        assert_eq!(state.fraction(), None);
+        assert_eq!(
+            fs::metadata(dir.path().join("two.bin")).unwrap().len(),
+            file.size()
+        );
+    }
+    #[test]
+    fn update_progress_does_not_count_corrupt_files_as_verified() {
+        let (manifest, mut file, mut cache) = fixture(1);
+        file.sha = [0; 20];
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![(&file, PathBuf::from("bad.bin"))];
+        let mut state = UpdateProgress {
+            phase: "Preparing and verifying files",
+            files_total: 1,
+            total: file.size(),
+            ..Default::default()
+        };
+        assert!(
+            prepare_update_files(
+                &manifest,
+                &[],
+                &files,
+                dir.path(),
+                &mut cache,
+                &mut state,
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        assert_eq!(state.files_done, 0);
+        assert!(!dir.path().join("bad.bin").exists());
+    }
+    #[test]
     fn writes_and_verifies_file_larger_than_one_gib() {
         let (m, f, mut cache) = fixture(1025);
         let dir = tempfile::tempdir().unwrap();
@@ -1538,7 +2299,10 @@ mod catalog_identity_tests {
         ];
         for (installed, status) in [
             (1, "Update available"),
-            (3, "Up to date"),
+            (
+                3,
+                "Publisher version matches; original package build is not recorded",
+            ),
             (4, "Installed version is newer"),
         ] {
             p.number = installed;
@@ -1724,6 +2488,44 @@ mod unlinked_pcgex_tests {
         assert_eq!(fs::read(&plugin.descriptor).unwrap(), before);
     }
     #[test]
+    fn modern_fab_library_resolves_short_artifact_names_without_legacy_catalog() {
+        let (_dir, engine, plugin, remote) = fixture();
+        let item: crate::fab::Item = serde_json::from_value(json!({
+            "assetId":"modern-id", "assetNamespace":"publisher-namespace", "title":"PCG Extended Toolkit",
+            "distributionMethod":"CODE_PLUGIN", "projectVersions":[
+                {"artifactId":"PCGExten123456789abcV4", "engineVersions":["UE_5.6"], "targetPlatforms":["Windows"]},
+                {"artifactId":"PCGExten123456789abcV5", "engineVersions":["UE_5.7"], "targetPlatforms":["Windows"]}
+            ]
+        })).unwrap();
+        let before = fs::read(&plugin.descriptor).unwrap();
+        let checked = check_owned_plugin(&plugin, &engine, &[item.clone()], |i, v, fallback| {
+            assert_eq!(i.asset_namespace, "publisher-namespace");
+            assert!(v.artifact_id.ends_with("V4"));
+            assert!(fallback);
+            confirmed(&plugin, &remote)
+        });
+        assert_eq!(checked.update.unwrap().version, "0.76.1");
+        let mut newer = plugin.clone();
+        newer.version = "0.79.1".into();
+        let checked = check_owned_plugin(&newer, &engine, &[item.clone()], |_, _, _| {
+            confirmed(&newer, &remote)
+        });
+        assert_eq!(checked.status, "Installed version is newer");
+        let mut other = item.clone();
+        other.asset_id = "another-product".into();
+        let checked = check_owned_plugin(&plugin, &engine, &[item.clone(), other], |_, _, _| {
+            confirmed(&plugin, &remote)
+        });
+        assert!(checked.update.is_none());
+        assert!(checked.status.starts_with("Multiple catalog"));
+        let checked = check_owned_plugin(&plugin, &engine, &[item], |_, _, _| {
+            Err("Unverified publisher".into())
+        });
+        assert_eq!(checked.status, "Unverified publisher");
+        assert!(checked.update.is_none());
+        assert_eq!(fs::read(&plugin.descriptor).unwrap(), before);
+    }
+    #[test]
     fn no_url_fallback_rejects_other_publishers_missing_metadata_and_module_mismatch() {
         let (_dir, _engine, plugin, remote) = fixture();
         assert!(verify_unlinked_identity(&plugin, &remote).is_ok());
@@ -1741,6 +2543,16 @@ mod unlinked_pcgex_tests {
             );
         }
         assert!(verify_unlinked_identity(&plugin, &json!({})).is_err());
+    }
+    #[test]
+    fn identical_content_only_descriptor_confirms_current_but_cannot_authorize_updates() {
+        let (_dir, _engine, plugin, _) = fixture();
+        let local = json!({"FriendlyName":"Content Tool", "CreatedBy":"Publisher", "Version":1, "VersionName":"1.0", "CanContainContent":true});
+        fs::write(&plugin.descriptor, serde_json::to_vec(&local).unwrap()).unwrap();
+        assert!(verify_unlinked_identity(&plugin, &local).is_ok());
+        let mut newer = local;
+        newer["VersionName"] = "2.0".into();
+        assert!(verify_unlinked_identity(&plugin, &newer).is_err());
     }
     #[test]
     fn no_url_fallback_is_engine_scoped_and_ambiguous_products_are_rejected() {
@@ -1767,6 +2579,25 @@ mod unlinked_pcgex_tests {
 mod fab_listing_update_tests {
     use super::*;
     const ID: &str = "cc258205-8fcf-41e5-9b48-6ec44e46d7eb";
+    #[test]
+    fn pcgex_faburl_launcher_links_resolve_without_marketplace_url() {
+        // Public PCGEx v0.79.1-preview.1 descriptor, metadata fields only.
+        let pcgex_id = "a5061972-6875-4052-a7fd-7c33f6531ec3";
+        let descriptor = serde_json::json!({"Version":1,"VersionName":"0.79.1","FriendlyName":"PCGEx","FabURL":format!("com.epicgames.launcher://ue/Fab/product/{pcgex_id}"),"EngineVersion":"5.8.0"});
+        assert_eq!(fab_descriptor_id(&descriptor).as_deref(), Some(pcgex_id));
+        assert!(verify_fab_identity(&descriptor, pcgex_id).is_ok());
+        for bad in [
+            format!("https://example.com/listings/{pcgex_id}"),
+            format!("com.epicgames.launcher://other/Fab/product/{pcgex_id}"),
+            format!("com.epicgames.launcher://ue/Fab/product/{pcgex_id}/extra"),
+        ] {
+            assert!(fab_descriptor_id(&serde_json::json!({"FabURL":bad})).is_none());
+        }
+        let mut conflicting = descriptor;
+        conflicting["MarketplaceURL"] = format!("https://www.fab.com/listings/{ID}").into();
+        assert!(fab_descriptor_id(&conflicting).is_none());
+        assert!(verify_fab_identity(&conflicting, pcgex_id).is_err());
+    }
     fn fixture() -> (Plugin, Installation, crate::fab::Item) {
         let plugin = Plugin {
             name: "Ascent Combat Framework Ultimate".into(),
@@ -1814,7 +2645,11 @@ mod fab_listing_update_tests {
     #[test]
     fn fab_updates_never_downgrade_and_current_version_is_up_to_date() {
         for (number, name, status) in [
-            (45, "4.5", "Up to date"),
+            (
+                45,
+                "4.5",
+                "Publisher version matches; original package build is not recorded",
+            ),
             (46, "4.6", "Installed version is newer"),
         ] {
             let (mut plugin, engine, item) = fixture();

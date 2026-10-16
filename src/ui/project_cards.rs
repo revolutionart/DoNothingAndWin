@@ -24,20 +24,24 @@ impl Workspace {
         let image = c.rect([x + 2., y + 2., w - 4., photo - 2.]);
         if let Some(tex) = p.artwork.as_ref().and_then(|a| self.textures.get(a)) {
             let source = tex.size_vec2();
-            let aspect = image.width() / image.height();
-            let sa = source.x / source.y;
-            let (uw, uh) = if sa > aspect {
-                (aspect / sa, 1.)
-            } else {
-                (1., sa / aspect)
-            };
-            let uv = Rect::from_min_max(
-                pos2((1. - uw) / 2., (1. - uh) / 2.),
-                pos2((1. + uw) / 2., (1. + uh) / 2.),
+            let scale = (image.width() / source.x).min(image.height() / source.y);
+            let size = source * scale;
+            // Keep the full artwork visible, top-aligned within the square.
+            let fitted =
+                Rect::from_min_size(pos2(image.center().x - size.x / 2., image.top()), size);
+            paint_thumbnail(
+                ui,
+                tex,
+                fitted,
+                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                thumbnail_top_corners(4. * c.scale()),
             );
-            ui.painter().image(tex.id(), image, uv, Color32::WHITE);
         } else {
-            c.fill(ui, [x + 2., y + 2., w - 4., photo - 2.], t.selection, 3.);
+            ui.painter().rect_filled(
+                image,
+                thumbnail_top_corners(4. * c.scale()),
+                color(t.selection),
+            );
             c.icon(
                 ui,
                 Icon::Folder,
@@ -152,7 +156,12 @@ impl Workspace {
                 self.persist();
             }
         }
-        let menu_rect = button_bounds([x + w - 43., y + photo + 11., 32., 38.]);
+        let menu_rect = [
+            x + w - 42.,
+            y + photo + 14.,
+            COMPACT_BUTTON_HEIGHT,
+            COMPACT_BUTTON_HEIGHT,
+        ];
         let menu = ui
             .interact(
                 c.rect(menu_rect),
@@ -175,9 +184,9 @@ impl Workspace {
         c.icon(
             ui,
             Icon::Dots,
-            menu_rect[0] + 7. * BUTTON_SCALE,
-            menu_rect[1] + 10. * BUTTON_SCALE,
-            18. * BUTTON_SCALE,
+            menu_rect[0] + 8.,
+            menu_rect[1] + 8.,
+            16.,
             if menu.hovered() {
                 SIDEBAR_ON_HIGHLIGHT
             } else {
@@ -203,7 +212,7 @@ impl Workspace {
         if ui
             .add_enabled(
                 !self.demo && self.workspace_cache.projects.get(&p.path) == Some(&true),
-                Button::new("Create desktop shortcut"),
+                buttons::secondary_button("Create desktop shortcut"),
             )
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
@@ -219,7 +228,7 @@ impl Workspace {
         if ui
             .add_enabled(
                 !self.demo && !self.cloning.busy(),
-                Button::new("Clone project"),
+                buttons::secondary_button("Clone project"),
             )
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
@@ -229,7 +238,11 @@ impl Workspace {
             ui.close();
         }
         if ui
-            .button(if p.pinned { "Unpin" } else { "Pin project" })
+            .add(buttons::secondary_button(if p.pinned {
+                "Unpin"
+            } else {
+                "Pin project"
+            }))
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()
@@ -239,7 +252,7 @@ impl Workspace {
             ui.close();
         }
         if ui
-            .add_enabled(!self.demo, Button::new("Show in Folder"))
+            .add_enabled(!self.demo, buttons::secondary_button("Show in Folder"))
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()

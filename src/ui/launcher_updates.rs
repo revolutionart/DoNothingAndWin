@@ -74,7 +74,10 @@ impl Workspace {
         ui.label("Checks GitHub at startup and once a day while open. Downloads and installation are started by you.");
         let checking = self.launcher_updates.receiver.is_some();
         if ui
-            .add_enabled(!checking, Button::new("Check for launcher updates"))
+            .add_enabled(
+                !checking,
+                buttons::secondary_button("Check for launcher updates"),
+            )
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()
         {
@@ -88,18 +91,18 @@ impl Workspace {
             let mut open = None;
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .button(if cfg!(feature = "portable") {
+                    .add(buttons::secondary_button(if cfg!(feature = "portable") {
                         "Download portable ZIP"
                     } else {
                         "Download installer"
-                    })
+                    }))
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
                 {
                     open = Some(update.download_url.clone());
                 }
                 if ui
-                    .button("Release notes")
+                    .add(buttons::secondary_button("Release notes"))
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
                 {

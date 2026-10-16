@@ -28,7 +28,13 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     for p in plugins::check(&engine, &session)? {
-        println!("{} | {} | {}", p.plugin.name, p.plugin.version, p.status);
+        println!(
+            "{} | installed {} | available {} | {}",
+            p.plugin.name,
+            p.plugin.version,
+            p.available_version.as_deref().unwrap_or("-"),
+            p.status
+        );
     }
     Ok(())
 }

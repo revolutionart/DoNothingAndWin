@@ -31,6 +31,7 @@ pub(super) struct Transfers {
     pub preparing: bool,
     pub installed: Option<PathBuf>,
     pub maintenance: Option<bool>,
+    pub activity: super::plugin_activity::Activity,
 }
 impl Transfers {
     pub fn busy(&self) -> bool {
@@ -63,9 +64,58 @@ pub(super) enum ScanEvent {
     Finished(discovery::Report),
 }
 
+pub(super) fn release_is_installed(release: &Release, engines: &[Installation]) -> bool {
+    let version = release
+        .version
+        .clone()
+        .or_else(|| release.build.as_deref().and_then(EngineVersion::parse));
+    engines.iter().any(|engine| {
+        let Some(installed) = EngineVersion::parse(&engine.version) else {
+            return false;
+        };
+        if let Some(version) = &version {
+            installed == *version
+        } else {
+            EngineVersion::parse(&release.app).is_some_and(|branch| {
+                installed.major == branch.major && installed.minor == branch.minor
+            })
+        }
+    })
+}
+
 #[cfg(test)]
 mod resume_tests {
     use super::*;
+
+    #[test]
+    fn installed_versions_are_excluded_but_new_hotfixes_remain_available() {
+        let engines = vec![Installation {
+            version: "5.8.3".into(),
+            path: "installed-engine".into(),
+            association: "5.8".into(),
+        }];
+        let mut release = Release {
+            app: "UE_5.8".into(),
+            catalog_id: String::new(),
+            channel: "Live".into(),
+            platform: "Windows".into(),
+            build: None,
+            version: EngineVersion::parse("5.8.3"),
+        };
+        assert!(release_is_installed(&release, &engines));
+        assert!(!release_is_installed(&release, &[]));
+        release.version = EngineVersion::parse("5.8.4");
+        assert!(!release_is_installed(&release, &engines));
+        release.version = EngineVersion::parse("5.7.4");
+        assert!(!release_is_installed(&release, &engines));
+        release.version = None;
+        release.build = Some("5.8.3-58210709+++UE5+Release-5.8-Windows".into());
+        assert!(release_is_installed(&release, &engines));
+        release.build = None;
+        assert!(release_is_installed(&release, &engines));
+        release.app = "UE_5.7".into();
+        assert!(!release_is_installed(&release, &engines));
+    }
 
     fn stopped(target: PathBuf) -> Transfers {
         Transfers {
@@ -219,7 +269,12 @@ impl Workspace {
             ctx.request_repaint();
         });
     }
-    pub(super) fn choose_install(&mut self, r: Release) {
+    pub(super) fn choose_install(&mut self, r: Release, ctx: Context) {
+        if release_is_installed(&r, &self.engines) {
+            self.transfer.modal = false;
+            self.notify("This engine version is already installed.");
+            return;
+        }
         if self.transfer.busy() || self.plugin_work.mutating {
             self.page = Page::Downloads;
             return;
@@ -233,9 +288,10 @@ impl Workspace {
         self.transfer.shortcut = true;
         self.transfer.component_options = None;
         self.transfer.state.clear();
+        self.prepare_install(ctx);
     }
     fn prepare_install(&mut self, ctx: Context) {
-        if self.pending.is_some() || self.transfer.busy() {
+        if self.transfer.busy() {
             return;
         }
         let Some(s) = storage::load_session().or_else(|| self.session.clone()) else {
@@ -245,6 +301,11 @@ impl Workspace {
         let Some(r) = self.transfer.release.clone() else {
             return;
         };
+        if release_is_installed(&r, &self.engines) {
+            self.transfer.modal = false;
+            self.notify("This engine version is already installed.");
+            return;
+        }
         let parent = PathBuf::from(&self.transfer.parent);
         let (tx, rx) = mpsc::channel();
         self.transfer.receiver = Some(rx);
@@ -263,12 +324,30 @@ impl Workspace {
         let Some(plan) = self.transfer.plan.clone() else {
             return;
         };
+        // Recheck local installations before starting a previously prepared plan.
+        if !self.demo {
+            self.engines = platform::display_engines();
+        }
+        if self
+            .transfer
+            .release
+            .as_ref()
+            .is_some_and(|r| release_is_installed(r, &self.engines))
+        {
+            self.transfer.modal = false;
+            self.notify("This engine version is already installed.");
+            return;
+        }
         let control = Control::default();
         let progress = Arc::new(Mutex::new(Progress::default()));
         let (tx, rx) = mpsc::channel();
         self.transfer.receiver = Some(rx);
         self.transfer.control = control.clone();
         self.transfer.progress = progress.clone();
+        self.transfer.activity = Default::default();
+        self.transfer
+            .activity
+            .sample_totals("engine", [0; 3], Instant::now());
         self.transfer.downloading = true;
         self.transfer.modal = false;
         self.transfer.state = "Preparing download…".into();
@@ -280,6 +359,15 @@ impl Workspace {
         });
     }
     pub(super) fn poll_transfers(&mut self, ctx: &Context) {
+        if self.transfer.downloading && self.transfer.maintenance.is_none() {
+            let p = self.transfer.progress.lock().unwrap().clone();
+            self.transfer.activity.sample_totals(
+                "engine",
+                [p.network, p.read, p.written],
+                Instant::now(),
+            );
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
         let events: Vec<_> = self
             .scan
             .receiver
@@ -470,7 +558,11 @@ impl Workspace {
             .snapshot
             .releases
             .iter()
-            .filter(|r| r.platform == "Windows" && r.version.is_some())
+            .filter(|r| {
+                r.platform == "Windows"
+                    && r.version.is_some()
+                    && !release_is_installed(r, &self.engines)
+            })
             .cloned()
             .collect();
         let current = self.prefs.pending_engines[index].clone();
@@ -481,14 +573,17 @@ impl Workspace {
             .unwrap_or_else(|| "Choose version".into());
         let mut choice = current.clone();
         ui.scope_builder(
-            UiBuilder::new().max_rect(c.rect([x + 20., y + 25., w - 40., 38.])),
+            UiBuilder::new().max_rect(c.rect([x + 20., y + 15., w - 40., 32.])),
             |ui| {
                 ui.visuals_mut().widgets.inactive.bg_fill = color(self.theme.background);
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = color(self.theme.background);
-                ComboBox::from_id_salt(("pending-engine-version", index))
+                AppComboBox::new(&self.theme, ("pending-engine-version", index))
                     .selected_text(title)
                     .width(w - 54.)
                     .show_ui(ui, |ui| {
+                        if releases.is_empty() {
+                            ui.label("No engine versions available to install.");
+                        }
                         for release in &releases {
                             ui.selectable_value(
                                 &mut choice,
@@ -503,11 +598,11 @@ impl Workspace {
             self.prefs.pending_engines[index] = choice;
             self.persist();
         }
-        c.circle(ui, x + 24., y + 100., 6., [235, 150, 25]);
+        c.circle(ui, x + 24., y + 69., 6., [235, 150, 25]);
         c.text(
             ui,
             x + 40.,
-            y + 100.,
+            y + 69.,
             "Not installed",
             14.,
             false,
@@ -516,13 +611,13 @@ impl Workspace {
         );
         let menu = ui
             .interact(
-                c.rect([x + w - 42., y + h - 43., 28., 32.]),
+                c.rect([x + w - 42., y + h - 46., 28., 32.]),
                 Id::new(("pending-engine-menu", index)),
                 Sense::click(),
             )
             .on_hover_cursor(CursorIcon::PointingHand);
         for offset in [-5., 0., 5.] {
-            c.circle(ui, x + w - 28., y + h - 27. + offset, 1.7, self.theme.muted);
+            c.circle(ui, x + w - 28., y + h - 30. + offset, 1.7, self.theme.muted);
         }
         let mut remove = false;
         let active_install = self.transfer.busy() && self.transfer.is_install_for(&current);
@@ -531,7 +626,7 @@ impl Workspace {
             .show(|ui| {
                 style_menu(ui, &self.theme);
                 if ui
-                    .add_enabled(!active_install, Button::new("Remove"))
+                    .add_enabled(!active_install, buttons::secondary_button("Remove"))
                     .on_disabled_hover_text(
                         "Stop this engine installation in Downloads before removing it.",
                     )
@@ -556,7 +651,7 @@ impl Workspace {
         if c.button(
             ui,
             ("pending-engine-install", index),
-            button_slot([x + 14., y + h - 43., w - 66., 32.]),
+            button_slot([x + 14., y + h - 46., w - 66., COMPACT_BUTTON_HEIGHT]),
             "Install",
             None,
             true,
@@ -566,13 +661,14 @@ impl Workspace {
                 return;
             }
             if let Some(release) = selected {
-                self.choose_install(release);
-                if self.transfer.modal {
-                    self.prepare_install(ui.ctx().clone());
-                }
+                self.choose_install(release, ui.ctx().clone());
             } else {
                 self.notify(if releases.is_empty() {
-                    "Check for engine releases first."
+                    if self.snapshot.releases.is_empty() {
+                        "Check for engine releases first."
+                    } else {
+                        "No engine versions available to install."
+                    }
                 } else {
                     "Choose an engine version first."
                 });
@@ -623,7 +719,7 @@ impl Workspace {
                 if let Some(plan) = &mut self.transfer.plan {
                     plan.target = target;
                     options = ui
-                        .button("Options")
+                        .add(buttons::secondary_button("Options"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked();
@@ -635,21 +731,24 @@ impl Workspace {
                     ));
                 } else if self.transfer.preparing {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        ui.add(egui::Spinner::new().color(color(self.theme.text)));
                         ui.label("Loading installation options…");
                     });
                 } else {
                     prepare = ui
-                        .button(if self.session.is_some() {
+                        .add(buttons::secondary_button(if self.session.is_some() {
                             "Load installation options"
                         } else {
                             "Sign in to Epic"
-                        })
+                        }))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked();
                 }
-                ui.checkbox(&mut self.transfer.shortcut, "Create desktop shortcut");
+                ui.checkbox(
+                    &mut self.transfer.shortcut,
+                    RichText::new("Create desktop shortcut").color(color(self.theme.text)),
+                );
                 if !self.transfer.state.is_empty() {
                     ui.label(&self.transfer.state);
                 }

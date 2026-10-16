@@ -7,7 +7,7 @@ impl Workspace {
     }
     pub(super) fn project_visibility_menu(&mut self, ui: &mut Ui, path: &str) {
         if ui
-            .button("Hide project")
+            .add(buttons::secondary_button("Hide project"))
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(
                 "Hide from project lists until restored in Settings. Project files are kept.",
@@ -32,7 +32,7 @@ impl Workspace {
         if ui
             .add_enabled(
                 count > 0,
-                Button::new(format!("Restore all hidden projects ({count})")),
+                buttons::secondary_button(format!("Restore all hidden projects ({count})")),
             )
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()
@@ -59,7 +59,7 @@ impl Workspace {
                     ui.horizontal(|ui| {
                         ui.label(name).on_hover_text(&path);
                         if ui
-                            .button("Restore")
+                            .add(buttons::secondary_button("Restore"))
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .clicked()
                         {

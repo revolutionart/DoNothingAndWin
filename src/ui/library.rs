@@ -2,10 +2,24 @@ use super::*;
 use engine_workspace::fab::{self, Item};
 use engine_workspace::fab_listing::{self, DateEvent, Sort};
 use engine_workspace::fab_search::{SearchDocument, SearchQuery};
+const AVAILABLE_UPDATES_FILTER: usize = 4;
+
 enum Event {
+    Cached(Vec<Item>),
+    Page(Vec<Item>),
     Status(String),
     Loaded(Result<Vec<Item>, String>),
     Installed(Result<String, String>),
+}
+enum UpdateEvent {
+    Plugin(String, Instant, engine_workspace::plugins::Checked),
+    Engine(
+        String,
+        Instant,
+        Result<Vec<engine_workspace::plugins::Checked>, String>,
+    ),
+    Projects(std::collections::HashMap<String, Vec<(String, String)>>),
+    Finished,
 }
 #[derive(Default)]
 pub(super) struct Library {
@@ -13,6 +27,7 @@ pub(super) struct Library {
     items: Vec<Item>,
     rx: Option<Receiver<Event>>,
     loading: bool,
+    had_saved_items: bool,
     installing: bool,
     install_item: String,
     install_engine: String,
@@ -27,11 +42,10 @@ pub(super) struct Library {
     date_status: String,
     date_refresh_pending: bool,
     list_view: bool,
-    category: usize,
     sync_error: bool,
     pub footer: String,
     updates: std::collections::HashMap<String, Vec<(String, String)>>,
-    update_rx: Option<Receiver<std::collections::HashMap<String, Vec<(String, String)>>>>,
+    update_rx: Option<Receiver<UpdateEvent>>,
     create_name: String,
     create_folder: String,
     selected: Option<Item>,
@@ -42,20 +56,124 @@ pub(super) struct Library {
     images: Vec<(String, Receiver<Option<ColorImage>>)>,
     image_attempts: std::collections::HashSet<String>,
 }
+impl Library {
+    fn matches_filter(&self, item: &Item, filter: usize) -> bool {
+        if filter == AVAILABLE_UPDATES_FILTER {
+            self.updates
+                .get(&item.key())
+                .is_some_and(|updates| !updates.is_empty())
+        } else {
+            library_kind(item, filter)
+        }
+    }
+    fn replace_items(&mut self, mut items: Vec<Item>) {
+        let previous: std::collections::HashMap<_, _> =
+            self.items.iter().map(|i| (i.key(), i)).collect();
+        for item in &mut items {
+            if let Some(old) = previous.get(&item.key()) {
+                if item.listing_updated_at.is_none() {
+                    item.listing_updated_at = old.listing_updated_at;
+                }
+                if item.listing_search.is_none() {
+                    item.listing_search = old.listing_search.clone();
+                }
+            }
+        }
+        self.items = items;
+    }
+}
 impl Workspace {
     pub(super) fn has_plugin_updates(&self) -> bool {
-        self.engines.iter().any(|engine| {
+        self.engines.iter().any(|e| {
             self.plugin_work
-                .update_engines
-                .get(&engine.path)
-                .copied()
-                .unwrap_or_else(|| {
-                    self.library
-                        .updates
-                        .values()
-                        .any(|entries| entries.iter().any(|(path, _)| path == &engine.path))
-                })
+                .checks
+                .get(&e.path)
+                .is_some_and(|(_, rows)| rows.iter().any(|r| r.has_update()))
         })
+    }
+    pub(super) fn record_completed_plugin_update(
+        &mut self,
+        path: String,
+        completed: Instant,
+        plugin: engine_workspace::plugins::Plugin,
+    ) {
+        reconcile_completed_plugin_update(
+            &mut self.plugin_work,
+            &mut self.library,
+            path,
+            completed,
+            plugin,
+        );
+    }
+    pub(super) fn record_plugin_check_row(
+        &mut self,
+        path: String,
+        started: Instant,
+        row: engine_workspace::plugins::Checked,
+    ) {
+        reconcile_plugin_check_row(
+            &mut self.plugin_work,
+            &mut self.library,
+            path.clone(),
+            started,
+            row,
+        );
+        if self
+            .plugin_engine
+            .is_some_and(|i| self.engines[i].path == path)
+        {
+            if let Some((_, rows)) = self.plugin_work.checks.get(&path) {
+                self.plugin_work.checked = rows.clone();
+            }
+        }
+    }
+    pub(super) fn record_plugin_check(
+        &mut self,
+        path: String,
+        started: Instant,
+        rows: Vec<engine_workspace::plugins::Checked>,
+    ) {
+        reconcile_plugin_check(
+            &mut self.plugin_work,
+            &mut self.library,
+            path,
+            started,
+            rows,
+        );
+    }
+
+    pub(super) fn plugin_update_links(&mut self, ui: &mut Ui) {
+        let updates: Vec<_> = self
+            .engines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let (_, rows) = self.plugin_work.checks.get(&e.path)?;
+                let names: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r.has_update())
+                    .map(|r| r.plugin.name.as_str())
+                    .collect();
+                (!names.is_empty()).then(|| (i, format!("UE {} - {}", e.version, names.join(", "))))
+            })
+            .collect();
+        if updates.is_empty() {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Plugin updates available:").color(color(self.theme.warning)));
+            for (i, label) in updates {
+                if ui
+                    .add(buttons::secondary_button(label))
+                    .on_hover_text("View plugin updates for this engine")
+                    .clicked()
+                {
+                    self.show_plugins(i);
+                    self.plugin_updates_only = true;
+                    self.check_plugins(ui.ctx().clone());
+                }
+            }
+        });
     }
 
     fn queue_library_thumbnail(&mut self, key: String, url: String, ctx: &Context) {
@@ -69,20 +187,29 @@ impl Workspace {
         self.library.images.push((key, rx));
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let image = fab::thumbnail_bytes(&url)
-                .ok()
-                .and_then(|raw| image::load_from_memory(&raw).ok())
-                .map(|image| {
-                    let image = image.thumbnail(480, 300).to_rgba8();
-                    ColorImage::from_rgba_unmultiplied(
-                        [image.width() as usize, image.height() as usize],
-                        image.as_raw(),
-                    )
-                });
+            let image = fab::thumbnail_image(&url).ok().map(|image| {
+                let image = image.thumbnail(480, 300).to_rgba8();
+                ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                )
+            });
             let _ = tx.send(image);
             ctx.request_repaint();
         });
     }
+    pub(super) fn library_footer_status(&self) -> &str {
+        if self.library.loading {
+            &self.library.status
+        } else if self.library.update_rx.is_some() {
+            "Checking installed library content for updates…"
+        } else if self.library.date_rx.is_some() {
+            &self.library.date_status
+        } else {
+            ""
+        }
+    }
+
     pub(super) fn library_transfer_status(&self) -> Option<&str> {
         self.library
             .installing
@@ -97,6 +224,7 @@ impl Workspace {
         };
         self.library.attempted = true;
         self.library.loading = true;
+        self.library.had_saved_items = !self.library.items.is_empty();
         self.library.status = if self.library.items.is_empty() {
             "Loading your Fab library..."
         } else {
@@ -107,8 +235,8 @@ impl Workspace {
         self.library.rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = fab::library(&session, |n| {
-                let _ = tx.send(Event::Status(format!("Loaded {n} library items...")));
+            let result = fab::library_pages(&session, |items| {
+                let _ = tx.send(Event::Page(items.to_vec()));
                 crate::window_frame::progress_repaint(&ctx);
             });
             if let Ok(items) = &result {
@@ -126,7 +254,7 @@ impl Workspace {
             .map(|item| (item.key(), SearchDocument::new(item)))
             .collect();
     }
-    fn refresh_library_dates(&mut self, ctx: &Context) {
+    fn refresh_library_dates(&mut self, ctx: &Context, retry: bool) {
         if self.library.date_rx.is_some() {
             self.library.date_refresh_pending = true;
             return;
@@ -134,13 +262,19 @@ impl Workspace {
         if self.library.items.is_empty() {
             return;
         }
-        let items = self.library.items.clone();
+        let items: Vec<_> = self
+            .library
+            .items
+            .iter()
+            .filter(|item| fab_listing::listing_id(item).is_some())
+            .cloned()
+            .collect();
         let (tx, rx) = mpsc::channel();
         self.library.date_rx = Some(rx);
-        self.library.date_status = "Loading library details…".into();
+        self.library.date_status = "Updating search tags and dates in the background…".into();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            fab_listing::refresh_dates(&items, |event| {
+            fab_listing::refresh_dates(&items, retry, |event| {
                 let _ = tx.send(event);
                 crate::window_frame::progress_repaint(&ctx);
             })
@@ -153,24 +287,40 @@ impl Workspace {
             .map(|s| s.account_id.clone())
             .unwrap_or_default();
         if account != self.library.account {
+            self.plugin_work.checks.clear();
+            let (tx, rx) = mpsc::channel();
+            let cached_account = account.clone();
+            let context = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Event::Cached(fab::load_library_cache(&cached_account)));
+                context.request_repaint();
+            });
             self.library = Library {
-                items: fab::load_library_cache(&account),
+                rx: Some(rx),
                 account,
                 ..Default::default()
             };
             self.textures.retain(|key, _| !key.starts_with("fab:"));
-            let mut cached = self.library.items.clone();
-            cached.sort_by_key(|item| item.title.to_lowercase());
-            for item in cached.iter().take(8) {
-                if let Some(url) = item.thumbnail().filter(|url| fab::thumbnail_is_cached(url)) {
-                    self.queue_library_thumbnail(format!("fab:{}", item.key()), url, ctx);
-                }
-            }
-            self.rebuild_library_search();
-            self.refresh_library_dates(ctx);
         }
         while let Some(event) = self.library.rx.as_ref().and_then(|r| r.try_recv().ok()) {
             match event {
+                Event::Cached(items) => {
+                    self.library.rx = None;
+                    self.library.items = items;
+                    self.rebuild_library_search();
+                    self.refresh_library_dates(ctx, false);
+                }
+                Event::Page(items) => {
+                    self.library.status = format!(
+                        "Syncing Fab library in the background… {} items checked",
+                        items.len()
+                    );
+                    // Keep the complete saved library visible until a background sync finishes.
+                    if !self.library.had_saved_items {
+                        self.library.items = items;
+                        self.rebuild_library_search();
+                    }
+                }
                 Event::Status(s) => self.library.status = s,
                 Event::Loaded(result) => {
                     self.library.loading = false;
@@ -179,61 +329,59 @@ impl Workspace {
                         Ok(items) => {
                             self.library.status =
                                 format!("{} items from your Fab account", items.len());
-                            self.library.items = items;
+                            self.library.replace_items(items);
                             self.rebuild_library_search();
                             self.library.sync_error = false;
-                            self.refresh_library_dates(ctx);
-                            let session = self.session.clone().unwrap();
-                            let engines = self.engines.clone();
-                            let items = self.library.items.clone();
-                            let (tx, rx) = mpsc::channel();
-                            self.library.update_rx = Some(rx);
-                            self.library.updates.clear();
-                            let ctx = ctx.clone();
-                            std::thread::spawn(move || {
-                                let mut updates = std::collections::HashMap::<
-                                    String,
-                                    Vec<(String, String)>,
-                                >::new();
-                                for engine in engines {
-                                    if let Ok(checked) =
-                                        engine_workspace::plugins::check(&engine, &session)
-                                    {
-                                        for entry in
-                                            checked.into_iter().filter(|p| p.update.is_some())
-                                        {
-                                            let listing_id =
-                                                engine_workspace::plugins::fab_listing_id(
-                                                    &entry.plugin,
-                                                );
-                                            if let Some(item) = items.iter().find(|i| {
-                                                entry.plugin.catalog_id.as_deref()
-                                                    == Some(i.asset_id.as_str())
-                                                    || listing_id.as_ref().is_some_and(|id| {
-                                                        fab_listing::listing_id(i).as_ref()
-                                                            == Some(id)
-                                                    })
-                                            }) {
-                                                updates.entry(item.key()).or_default().push((
-                                                    engine.path.clone(),
-                                                    format!(
-                                                        "Unreal Engine {}: {}",
-                                                        engine.version, entry.status
-                                                    ),
-                                                ));
-                                            }
-                                        }
+                            self.refresh_library_dates(ctx, false);
+                            if self.library.update_rx.is_none() {
+                                let session = self.session.clone().unwrap();
+                                let engines = self.engines.clone();
+                                let items = self.library.items.clone();
+                                let (tx, rx) = mpsc::channel();
+                                self.library.update_rx = Some(rx);
+                                let ctx = ctx.clone();
+                                let started = Instant::now();
+                                std::thread::spawn(move || {
+                                    let owned = Ok(items);
+                                    for engine in engines {
+                                        let result =
+                                            engine_workspace::plugins::check_with_library_progress(
+                                                &engine,
+                                                &session,
+                                                &owned,
+                                                |row| {
+                                                    let _ = tx.send(UpdateEvent::Plugin(
+                                                        engine.path.clone(),
+                                                        started,
+                                                        row.clone(),
+                                                    ));
+                                                    ctx.request_repaint();
+                                                },
+                                            );
+                                        let _ = tx.send(UpdateEvent::Engine(
+                                            engine.path,
+                                            started,
+                                            result,
+                                        ));
+                                        ctx.request_repaint();
                                     }
-                                }
-                                for (key, message) in fab::project_updates(&session, &items) {
-                                    updates
-                                        .entry(key)
-                                        .or_default()
-                                        .push((String::new(), message));
-                                }
-                                let _ = tx.send(updates);
-                                ctx.request_repaint();
-                            });
+                                    let mut updates = std::collections::HashMap::<
+                                        String,
+                                        Vec<(String, String)>,
+                                    >::new();
+                                    for (key, message) in
+                                        fab::project_updates(&session, owned.as_ref().unwrap())
+                                    {
+                                        updates
+                                            .entry(key)
+                                            .or_default()
+                                            .push((String::new(), message));
+                                    }
+                                    let _ = tx.send(UpdateEvent::Projects(updates));
+                                    let _ = tx.send(UpdateEvent::Finished);
+                                    ctx.request_repaint();
+                                });
+                            }
                         }
                         Err(e) => {
                             self.library.sync_error = true;
@@ -293,34 +441,43 @@ impl Workspace {
                     }
                 }
                 DateEvent::Progress(done, total) => {
-                    self.library.date_status = format!("Loading library details… {done}/{total}");
+                    self.library.date_status =
+                        format!("Updating search tags and dates in the background… {done}/{total}");
                 }
-                DateEvent::Finished(unavailable) => {
+                DateEvent::Finished(_) => {
                     self.library.date_rx = None;
-                    self.library.date_status = if unavailable > 0 {
-                        format!(
-                            "Full details unavailable for {unavailable} items; search may be incomplete."
-                        )
-                    } else {
-                        String::new()
-                    };
+                    self.library.date_status.clear();
                     if self.library.date_refresh_pending {
                         self.library.date_refresh_pending = false;
-                        self.refresh_library_dates(ctx);
+                        self.refresh_library_dates(ctx, false);
                     }
                 }
             }
         }
-        if let Some(result) = self
+        while let Some(event) = self
             .library
             .update_rx
             .as_ref()
             .and_then(|r| r.try_recv().ok())
         {
-            // A full library check supersedes earlier dialog checks.
-            self.plugin_work.update_engines.clear();
-            self.library.updates = result;
-            self.library.update_rx = None;
+            match event {
+                UpdateEvent::Plugin(path, started, row) => {
+                    self.record_plugin_check_row(path, started, row)
+                }
+                UpdateEvent::Engine(path, started, Ok(rows)) => {
+                    self.record_plugin_check(path, started, rows)
+                }
+                UpdateEvent::Engine(_, _, Err(_)) => {}
+                UpdateEvent::Projects(updates) => {
+                    for entries in self.library.updates.values_mut() {
+                        entries.retain(|(path, _)| !path.is_empty());
+                    }
+                    for (key, entries) in updates {
+                        self.library.updates.entry(key).or_default().extend(entries);
+                    }
+                }
+                UpdateEvent::Finished => self.library.update_rx = None,
+            }
         }
         let mut done = Vec::new();
         for (i, (key, rx)) in self.library.images.iter().enumerate() {
@@ -346,8 +503,8 @@ impl Workspace {
         }
     }
     pub(super) fn real_library_page(&mut self, ui: &mut Ui, c: &Canvas) {
-        let narrow = c.width < 1120.;
-        let header_y = if narrow { 108. } else { 38. };
+        let header = PageHeaderLayout::new(c.width);
+        let header_y = header.actions_y;
         if c.button(
             ui,
             "sync-library",
@@ -364,13 +521,7 @@ impl Workspace {
             link,
             egui::Hyperlink::from_label_and_url("My Fab library ↗", "https://www.fab.com/library"),
         );
-        let top = if narrow { 160. } else { 108. };
-        c.line(
-            ui,
-            [271., top - 6.],
-            [c.width - 26., top - 6.],
-            self.theme.border,
-        );
+        let top = header.filters_y();
         if self.session.is_none() {
             ui.put(
                 c.rect([271., top + 20., 500., 40.]),
@@ -388,41 +539,24 @@ impl Workspace {
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.style_mut().override_font_id = Some(FontId::proportional(16.));
             ui.spacing_mut().button_padding = vec2(14., 8.);
-            ui.spacing_mut().item_spacing = vec2(16., 12.);
-            ui.spacing_mut().interact_size.y = 36.;
-            let branches = fab_listing::engine_branches(&self.library.items);
+            ui.spacing_mut().item_spacing = vec2(16., FILTER_ROW_GAP);
+            ui.spacing_mut().interact_size.y = FILTER_ROW_HEIGHT;
+            let visible_items: Vec<_> = self.library.items.iter().enumerate()
+                .filter_map(|(index, item)| fab_listing::visible_in_library(item).then_some(index)).collect();
+            let branches = fab_listing::engine_branches(visible_items.iter().map(|&index| &self.library.items[index]));
             ui.horizontal_wrapped(|ui| {
                 ui.style_mut().override_font_id = Some(FontId::proportional(14. * c.scale()));
                 ui.spacing_mut().button_padding = vec2(10., 5.) * c.scale();
                 ui.spacing_mut().item_spacing = vec2(8., 8.) * c.scale();
                 ui.spacing_mut().interact_size.y = 32. * c.scale();
-                for (index, name) in [(0, "All"), (1, "Assets"), (3, "Projects"), (2, "Plugins")] {
-                    let count = self
-                        .library
-                        .items
+                for (index, name) in [(0, "All"), (1, "Assets"), (3, "Projects"), (2, "Plugins"), (AVAILABLE_UPDATES_FILTER, "Available Updates")] {
+                    let count = visible_items
                         .iter()
-                        .filter(|i| library_kind(i, index))
+                        .map(|&index| &self.library.items[index])
+                        .filter(|i| self.library.matches_filter(i, index))
                         .count();
                     let selected = self.library.filter == index;
-                    let response = ui
-                        .scope(|ui| {
-                            ui.visuals_mut().widgets.inactive.fg_stroke.color =
-                                color(if selected { theme.accent } else { theme.muted });
-                            ui.add(
-                                Button::new(RichText::new(format!("{name} ({count})")).color(
-                                    color(if selected { theme.accent } else { theme.muted }),
-                                ))
-                                .frame(false)
-                                .min_size(vec2(96., 32.) * c.scale()),
-                            )
-                        })
-                        .inner;
-                    if selected {
-                        ui.painter().line_segment(
-                            [response.rect.left_bottom(), response.rect.right_bottom()],
-                            Stroke::new(2., color(theme.accent)),
-                        );
-                    }
+                    let response = buttons::tab_button(ui, &theme, selected, format!("{name} ({count})"), 0.);
                     if response
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
@@ -431,36 +565,36 @@ impl Workspace {
                         self.library.filter = index;
                     }
                 }
-                if rect.width() < 1360. {
+                let fixed_controls_width = (170. + 140. + 140. + 32. + 32. + 5. * 8.) * c.scale();
+                let search_width = (rect.width() - fixed_controls_width).clamp(140. * c.scale(), 258. * c.scale());
+                let controls_width = search_width + fixed_controls_width;
+                if rect.right() - ui.cursor().left() < controls_width {
                     ui.end_row();
-                } else {
-                    ui.add_space((rect.right() - ui.cursor().left() - 780. * c.scale()).max(0.));
                 }
+                ui.add_space((rect.right() - ui.cursor().left() - controls_width).max(0.));
                 search_field(
                     ui,
                     &mut self.library.search,
                     "Search library...",
-                    258. * c.scale(),
+                    search_width,
                     &theme,
                     c.scale(),
                 ).on_hover_text("Search titles, descriptions, tags, and publishers. Title matches appear first; your chosen sort applies within each group.");
-                ComboBox::from_id_salt("library-category")
-                    .width(130. * c.scale())
+                AppComboBox::new(&self.theme, "library-category")
+                    .width(170. * c.scale())
                     .selected_text(
-                        ["Category", "Asset packs", "Plugins", "Projects"][self.library.category],
+                        ["All categories", "Asset packs", "Plugins", "Projects", "Available Updates"][self.library.filter],
                     )
                     .show_ui(ui, |ui| {
-                        for (i, label) in ["All categories", "Asset packs", "Plugins", "Projects"]
-                            .iter()
-                            .enumerate()
+                        for (i, label) in [(0, "All categories"), (1, "Asset packs"), (3, "Projects"), (2, "Plugins"), (AVAILABLE_UPDATES_FILTER, "Available Updates")]
                         {
-                            ui.selectable_value(&mut self.library.category, i, *label)
+                            ui.selectable_value(&mut self.library.filter, i, label)
                                 .on_hover_cursor(CursorIcon::PointingHand);
                         }
                     })
                     .response
                     .on_hover_cursor(CursorIcon::PointingHand);
-                ComboBox::from_id_salt("library-engine")
+                AppComboBox::new(&self.theme, "library-engine")
                     .width(140. * c.scale())
                     .selected_text(if self.library.engine_filter.is_empty() {"All engines".into()} else {format!("UE {}",self.library.engine_filter)})
                     .show_ui(ui, |ui| {
@@ -470,7 +604,7 @@ impl Workspace {
                         }
                     }).response.on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text("Show content that lists support for this engine version on Windows.");
-                ComboBox::from_id_salt("library-sort")
+                AppComboBox::new(&self.theme, "library-sort")
                     .width(140. * c.scale())
                     .selected_text(self.library.sort.label())
                     .show_ui(ui, |ui| {
@@ -481,12 +615,14 @@ impl Workspace {
                     .on_hover_text("Latest update uses Fab listing update dates, newest first. Dates are cached for up to 6 hours; unavailable dates appear last.");
                 for (list, icon) in [(false, Icon::Grid), (true, Icon::List)] {
                     let (r, response) =
-                        ui.allocate_exact_size(vec2(32., 32.) * c.scale(), Sense::click());
+                        ui.allocate_exact_size(Vec2::splat(COMPACT_BUTTON_HEIGHT) * c.scale(), Sense::click());
                     ui.painter().rect_filled(
                         r,
-                        5.,
+                        BUTTON_RADIUS,
                         color(if self.library.list_view == list {
-                            theme.accent
+                            if response.hovered() || response.is_pointer_button_down_on() {
+                                theme.accent_hover
+                            } else { theme.accent }
                         } else if response.hovered() {
                             SIDEBAR_HIGHLIGHT
                         } else {
@@ -504,9 +640,9 @@ impl Workspace {
                     local.icon(
                         ui,
                         icon,
-                        8.,
-                        8.,
-                        16.,
+                        (32. - VIEW_MODE_ICON_SIZE) / 2.,
+                        (32. - VIEW_MODE_ICON_SIZE) / 2.,
+                        VIEW_MODE_ICON_SIZE,
                         if self.library.list_view == list {
                             theme.on_accent
                         } else if response.hovered() {
@@ -531,44 +667,15 @@ impl Workspace {
                     }
                 }
             });
-            if !self.library.date_status.is_empty() {
-                ui.horizontal(|ui| {
-                    if self.library.date_rx.is_some() { ui.add(egui::Spinner::new().size(16.).color(color(theme.text))); }
-                    ui.label(RichText::new(&self.library.date_status).size(13.).color(color(theme.muted)));
-                });
-            }
-            if self.library.loading
-                || self.library.installing
-                || self.library.update_rx.is_some()
-                || self.library.sync_error
-            {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().color(if self.theme.dark {
-                        Color32::WHITE
-                    } else {
-                        color(self.theme.text)
-                    }));
-                    ui.label(
-                        if self.library.loading
-                            || self.library.installing
-                            || self.library.sync_error
-                        {
-                            self.library.status.as_str()
-                        } else {
-                            "Checking installed content for updates..."
-                        },
-                    );
-                });
-            }
+            self.plugin_update_links(ui);
+            if self.library.sync_error { ui.colored_label(color(theme.warning), &self.library.status); }
             let query = SearchQuery::new(&self.library.search);
-            let mut items: Vec<_> = self
-                .library
-                .items
-                .iter()
+            let mut items: Vec<_> = visible_items
+                .into_iter()
+                .map(|index| &self.library.items[index])
                 .filter(|i| {
                     self.library.search_index.get(&i.key()).and_then(|doc| query.rank(doc)).is_some()
-                        && library_kind(i, self.library.filter)
-                        && library_kind(i, self.library.category)
+                        && self.library.matches_filter(i, self.library.filter)
                         && fab_listing::supports_engine(i, &self.library.engine_filter)
                 })
                 .cloned()
@@ -580,13 +687,14 @@ impl Workspace {
             }
             self.library.footer = format!("{} items", items.len());
             let list = self.library.list_view;
-            let columns = card_columns(ui.available_width() - scrollbar::ALLOCATED_WIDTH, PROJECT_CARD_WIDTH, PROJECT_CARD_GAP);
+            let (columns, card_width) = card_grid_metrics(ui.available_width() - scrollbar::GRID_ALLOCATED_WIDTH, LIBRARY_CARD_WIDTH, PROJECT_CARD_GAP);
+            let thumbnail_height = (card_width - 2.) / LIBRARY_THUMBNAIL_ASPECT;
             if !list { ui.spacing_mut().item_spacing = vec2(PROJECT_CARD_GAP, PROJECT_CARD_GAP); }
             AppScrollArea::vertical(&self.theme)
+                .inner_margin(scrollbar::GRID_MARGIN)
                 .id_salt((
                     "fab-owned-items",
                     self.library.filter,
-                    self.library.category,
                     self.library.search.clone(),
                     self.library.sort,
                     self.library.engine_filter.clone(),
@@ -596,7 +704,7 @@ impl Workspace {
                 .auto_shrink([false, false])
                 .show_rows(
                     ui,
-                    if list { 96. } else { PROJECT_THUMBNAIL_HEIGHT + 84. },
+                    if list { 96. } else { thumbnail_height + 84. },
                     items.len().div_ceil(if list { 1 } else { columns }),
                     |ui, range| {
                         for row in items
@@ -613,18 +721,21 @@ impl Workspace {
                                     let width = if list {
                                         ui.available_width()
                                     } else {
-                                        PROJECT_CARD_WIDTH.min(ui.available_width())
+                                        card_width
                                     };
-                                    let height = if list { 92. } else { PROJECT_THUMBNAIL_HEIGHT + 84. };
+                                    let height = if list { 92. } else { thumbnail_height + 84. };
                                     let (r, _) =
                                         ui.allocate_exact_size(vec2(width, height), Sense::hover());
                                     let mut card_ui = ui.new_child(UiBuilder::new().max_rect(r));
                                     let ui = &mut card_ui;
+                                    let updates = self.library.updates.get(&item.key());
+                                    let has_update = updates.is_some_and(|u| !u.is_empty());
+                                    let update_color = Color32::from_rgb(255, 153, 0);
                                     ui.painter().rect_filled(r, 6., color(theme.card));
                                     ui.painter().rect_stroke(
                                         r,
                                         6.,
-                                        Stroke::new(1., color(theme.border)),
+                                        Stroke::new(1., if has_update { update_color } else { color(theme.border) }),
                                         StrokeKind::Inside,
                                     );
                                     let picture = if list {
@@ -632,9 +743,10 @@ impl Workspace {
                                     } else {
                                         Rect::from_min_size(
                                             r.min + vec2(1., 1.),
-                                            vec2(width - 2., PROJECT_THUMBNAIL_HEIGHT),
+                                            vec2(width - 2., thumbnail_height),
                                         )
                                     };
+                                    let picture_corners = if list { CornerRadius::same(5) } else { thumbnail_top_corners(5.) };
                                     if let Some(tex) = self.textures.get(&key) {
                                         let size = tex.size_vec2();
                                         let ratio = (picture.width() / picture.height())
@@ -650,11 +762,11 @@ impl Workspace {
                                                 pos2(1., (1. + 1. / ratio) / 2.),
                                             )
                                         };
-                                        ui.painter().image(tex.id(), picture, uv, Color32::WHITE);
+                                        paint_thumbnail(ui, tex, picture, uv, picture_corners);
                                     } else {
                                         ui.painter().rect_filled(
                                             picture,
-                                            5.,
+                                            picture_corners,
                                             color(theme.selection),
                                         );
                                     }
@@ -665,7 +777,7 @@ impl Workspace {
                                         )
                                     } else {
                                         Rect::from_min_size(
-                                            r.min + vec2(10., PROJECT_THUMBNAIL_HEIGHT + 9.),
+                                            r.min + vec2(10., thumbnail_height + 9.),
                                             vec2(width - 24., 25.),
                                         )
                                     };
@@ -739,14 +851,12 @@ impl Workspace {
                                         FontId::proportional(14.),
                                         color(theme.text),
                                     );
-                                    let updates = self.library.updates.get(&item.key());
-                                    let has_update = updates.is_some_and(|u| !u.is_empty());
                                     let info = Rect::from_center_size(
                                         pos2(picture.right() - 20., picture.top() + 20.),
                                         vec2(28., 28.),
                                     );
                                     let tint = if has_update {
-                                        Color32::from_rgb(255, 153, 0)
+                                        update_color
                                     } else {
                                         color(theme.text)
                                     };
@@ -785,23 +895,6 @@ impl Workspace {
                                         Sense::click(),
                                     )
                                     .on_hover_text(tooltip);
-                                    let action = Rect::from_min_size(
-                                        pos2(r.right() - if list { 158. } else { 136. }, y - 17.),
-                                        vec2(if list { 146. } else { 126. }, 34.),
-                                    );
-                                    let response = ui
-                                        .interact(
-                                            action,
-                                            ui.id().with((&key, "install")),
-                                            Sense::click(),
-                                        )
-                                        .on_hover_cursor(CursorIcon::PointingHand);
-                                    let fill = if response.hovered() {
-                                        theme.accent_hover
-                                    } else {
-                                        theme.accent
-                                    };
-                                    ui.painter().rect_filled(action, 5., color(fill));
                                     let label = if has_update && item.plugin() {
                                         "Update"
                                     } else if item.plugin() {
@@ -811,12 +904,30 @@ impl Workspace {
                                     } else {
                                         "Add to project"
                                     };
-                                    ui.painter().text(
-                                        action.center(),
-                                        Align2::CENTER_CENTER,
-                                        label,
-                                        FontId::proportional(14.),
-                                        color(theme.on_accent),
+                                    let text = ui.painter().layout_no_wrap(label.into(),
+                                        buttons::primary_font(1.), color(theme.on_accent));
+                                    let action_width = (if list { 146_f32 } else { 126_f32 })
+                                        .max(text.size().x + 2. * buttons::HORIZONTAL_PADDING);
+                                    let action = Rect::from_min_size(
+                                        pos2(r.right() - if list { 12. } else { 10. } - action_width,
+                                            y - COMPACT_BUTTON_HEIGHT / 2.),
+                                        vec2(action_width, COMPACT_BUTTON_HEIGHT),
+                                    );
+                                    let response = ui
+                                        .interact(action, ui.id().with((&key, "install")), Sense::click())
+                                        .on_hover_cursor(CursorIcon::PointingHand);
+                                    response.widget_info(|| WidgetInfo::labeled(
+                                        WidgetType::Button, response.enabled(), label));
+                                    let update_action = has_update && item.plugin();
+                                    let fill = if update_action {
+                                        if response.hovered() { Color32::from_rgb(255, 173, 51) } else { update_color }
+                                    } else {
+                                        buttons::primary_fill(&theme, &response)
+                                    };
+                                    ui.painter().rect_filled(action, BUTTON_RADIUS, fill);
+                                    ui.painter().galley_with_override_text_color(
+                                        action.center() - text.size() / 2., text,
+                                        if update_action { Color32::BLACK } else { color(theme.on_accent) },
                                     );
                                     if response
                                         .clone()
@@ -837,7 +948,9 @@ impl Workspace {
                             if list { ui.add_space(4.); }
                         }
                         if items.is_empty() && !self.library.loading {
-                            ui.label(if self.library.status.contains("items from") {
+                            ui.label(if self.library.filter == AVAILABLE_UPDATES_FILTER {
+                                "No available updates match the current filters."
+                            } else if self.library.status.contains("items from") {
                                 "No matching library items."
                             } else {
                                 &self.library.status
@@ -986,7 +1099,7 @@ impl Workspace {
                     if targets.is_empty() {
                         ui.add_enabled(
                             false,
-                            Button::new("No compatible engines installed")
+                            buttons::secondary_button("No compatible engines installed")
                                 .min_size(vec2(ui.available_width(), 44.)),
                         );
                         Frame::new().fill(color(self.theme.card)).stroke(Stroke::new(1.,color(self.theme.warning))).corner_radius(6.).inner_margin(16).show(ui,|ui|{
@@ -1016,7 +1129,7 @@ impl Workspace {
                             ui.ctx(),
                             ui.make_persistent_id("fab-install-target"),
                         );
-                        let combo = ComboBox::from_id_salt("fab-install-target")
+                        let combo = AppComboBox::new(&self.theme, "fab-install-target")
                             .width(ui.available_width())
                             .selected_text(&targets[self.library.target].0)
                             .show_ui(ui, |ui| {
@@ -1108,7 +1221,7 @@ impl Workspace {
                             ui.painter().rect_stroke(r,5.,Stroke::new(if selected{2.}else{1.},color(if selected{self.theme.accent}else{self.theme.border})),StrokeKind::Inside);
                             let picture=Rect::from_min_max(r.min+vec2(2.,2.),pos2(r.right()-2.,r.bottom()-32.));
                             let artwork=self.projects.iter().find(|p|Path::new(&p.path).parent().is_some_and(|d|d==Path::new(path))).and_then(|p|p.artwork.as_ref()).and_then(|a|self.textures.get(a));
-                            if let Some(tex)=artwork{ui.painter().image(tex.id(),picture,Rect::from_min_max(Pos2::ZERO,pos2(1.,1.)),Color32::WHITE);}
+                            if let Some(tex)=artwork{paint_thumbnail(ui,tex,picture,Rect::from_min_max(Pos2::ZERO,pos2(1.,1.)),thumbnail_top_corners(3.));}
                             let badge=Rect::from_min_size(picture.right_bottom()-vec2(52.,28.),vec2(48.,24.));ui.painter().rect_filled(badge,4.,color(self.theme.card));
                             ui.painter().text(badge.center(),Align2::CENTER_CENTER,EngineVersion::parse(version).map(|v|v.branch()).unwrap_or_else(||"Custom".into()),FontId::proportional(14.),color(self.theme.text));
                             let text=ui.painter().with_clip_rect(Rect::from_min_max(pos2(r.left()+8.,r.bottom()-30.),r.max-vec2(6.,2.)));
@@ -1143,7 +1256,7 @@ impl Workspace {
                             if !branches.is_empty() {
                                 ui.horizontal(|ui| {
                                     ui.label("Asset version");
-                                    ComboBox::from_id_salt("fab-alternative-version")
+                                    AppComboBox::new(&self.theme, "fab-alternative-version")
                                         .selected_text(if self.library.asset_version.is_empty() {
                                             "Select version"
                                         } else {
@@ -1307,7 +1420,7 @@ impl Workspace {
                             .margin(vec2(12., 8.)),
                     );
                     if ui
-                        .button("Browse")
+                        .add(buttons::secondary_button("Browse"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
@@ -1317,7 +1430,7 @@ impl Workspace {
                         }
                     }
                 });
-                ComboBox::from_id_salt("template-version")
+                AppComboBox::new(&self.theme, "template-version")
                     .selected_text(if self.library.asset_version.is_empty() {
                         "Choose engine version"
                     } else {
@@ -1392,5 +1505,311 @@ impl Workspace {
                 ctx.request_repaint();
             });
         }
+    }
+}
+
+fn reconcile_plugin_check_row(
+    work: &mut plugin_jobs::PluginWork,
+    library: &mut Library,
+    path: String,
+    started: Instant,
+    row: engine_workspace::plugins::Checked,
+) {
+    let mut rows = work
+        .checks
+        .get(&path)
+        .map(|(_, rows)| rows.clone())
+        .unwrap_or_default();
+    rows.retain(|previous| previous.plugin.descriptor != row.plugin.descriptor);
+    rows.push(row);
+    reconcile_plugin_check(work, library, path, started, rows);
+}
+
+fn reconcile_completed_plugin_update(
+    work: &mut plugin_jobs::PluginWork,
+    library: &mut Library,
+    path: String,
+    completed: Instant,
+    plugin: engine_workspace::plugins::Plugin,
+) {
+    let mut rows = work
+        .checks
+        .get(&path)
+        .map(|(_, rows)| rows.clone())
+        .unwrap_or_default();
+    rows.retain(|row| row.plugin.descriptor != plugin.descriptor);
+    rows.push(engine_workspace::plugins::Checked {
+        available_version: Some(plugin.version.clone()),
+        plugin,
+        update: None,
+        status: "Up to date".into(),
+    });
+    // A successful installation is authoritative immediately, including during an
+    // Update all batch. Older checks must not restore its previous update badge.
+    reconcile_plugin_check(work, library, path, completed, rows);
+}
+
+fn reconcile_plugin_check(
+    work: &mut plugin_jobs::PluginWork,
+    library: &mut Library,
+    path: String,
+    started: Instant,
+    rows: Vec<engine_workspace::plugins::Checked>,
+) {
+    if work
+        .checks
+        .get(&path)
+        .is_some_and(|(newer, _)| *newer > started)
+    {
+        return;
+    }
+    for entries in library.updates.values_mut() {
+        entries.retain(|(engine, _)| engine != &path);
+    }
+    for row in rows.iter().filter(|r| r.has_update()) {
+        let listing = engine_workspace::plugins::fab_listing_id(&row.plugin);
+        if let Some(item) = library.items.iter().find(|i| {
+            i.plugin()
+                && (row.plugin.catalog_id.as_deref() == Some(i.asset_id.as_str())
+                    || row.update.as_ref().is_some_and(|u| {
+                        i.project_versions
+                            .iter()
+                            .any(|v| v.artifact_id == u.manifest.app)
+                    })
+                    || listing
+                        .as_ref()
+                        .is_some_and(|id| fab_listing::listing_id(i).as_ref() == Some(id)))
+        }) {
+            library.updates.entry(item.key()).or_default().push((
+                path.clone(),
+                format!("{}: {}", row.plugin.name, row.status_label()),
+            ));
+        }
+    }
+    work.checks.insert(path, (started, rows));
+}
+
+#[cfg(test)]
+mod update_state_tests {
+    use super::*;
+    fn item() -> Item {
+        serde_json::from_value(serde_json::json!({"assetId":"example", "assetNamespace":"publisher", "title":"Example", "distributionMethod":"CODE_PLUGIN"})).unwrap()
+    }
+    fn update() -> engine_workspace::plugins::Checked {
+        engine_workspace::plugins::Checked {
+            plugin: engine_workspace::plugins::Plugin {
+                name: "Example".into(),
+                version: "1.0".into(),
+                number: 1,
+                descriptor: "missing.uplugin".into(),
+                catalog_id: Some("example".into()),
+            },
+            available_version: Some("2.0".into()),
+            update: None,
+            status: "Epic integration update available; update through Epic".into(),
+        }
+    }
+    #[test]
+    fn available_updates_filter_matches_actual_updates_across_content_types() {
+        let mut library = Library::default();
+        for kind in ["CODE_PLUGIN", "ASSET_PACK", "COMPLETE_PROJECT"] {
+            let mut content = item();
+            content.distribution_method = kind.into();
+            content.asset_id = kind.into();
+            assert!(!library.matches_filter(&content, AVAILABLE_UPDATES_FILTER));
+            library.updates.insert(content.key(), vec![]);
+            assert!(!library.matches_filter(&content, AVAILABLE_UPDATES_FILTER));
+            library.updates.insert(
+                content.key(),
+                vec![
+                    ("engine-a".into(), "Update available".into()),
+                    ("engine-b".into(), "Update available".into()),
+                ],
+            );
+            assert!(library.matches_filter(&content, AVAILABLE_UPDATES_FILTER));
+            assert!(library.matches_filter(&content, 0));
+            assert_eq!(library.matches_filter(&content, 2), kind == "CODE_PLUGIN");
+            library.updates.get_mut(&content.key()).unwrap().clear();
+            assert!(!library.matches_filter(&content, AVAILABLE_UPDATES_FILTER));
+        }
+    }
+    #[test]
+    fn newer_dialog_check_clears_cards_and_badges_and_older_background_cannot_restore_them() {
+        let mut work = plugin_jobs::PluginWork::default();
+        let mut library = Library {
+            items: vec![item()],
+            ..Default::default()
+        };
+        let start = Instant::now();
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            start,
+            vec![update()],
+        );
+        assert!(work.checks["engine"].1[0].has_update());
+        assert_eq!(library.updates[&item().key()].len(), 1);
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            start + Duration::from_secs(1),
+            vec![],
+        );
+        assert!(library.updates[&item().key()].is_empty());
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            start,
+            vec![update()],
+        );
+        assert!(work.checks["engine"].1.is_empty());
+        assert!(library.updates[&item().key()].is_empty());
+    }
+    #[test]
+    fn completed_updates_clear_immediately_without_hiding_other_engines_or_pending_plugins() {
+        let mut other_item = item();
+        other_item.asset_id = "other".into();
+        let mut other = update();
+        other.plugin.descriptor = "other.uplugin".into();
+        other.plugin.catalog_id = Some("other".into());
+        let mut work = plugin_jobs::PluginWork::default();
+        let mut library = Library {
+            items: vec![item(), other_item.clone()],
+            ..Default::default()
+        };
+        let start = Instant::now();
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine-a".into(),
+            start,
+            vec![update(), other.clone()],
+        );
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine-b".into(),
+            start,
+            vec![update()],
+        );
+        let mut installed = update().plugin;
+        installed.version = "2.0".into();
+        installed.number = 2;
+        reconcile_completed_plugin_update(
+            &mut work,
+            &mut library,
+            "engine-a".into(),
+            start + Duration::from_secs(1),
+            installed.clone(),
+        );
+        assert_eq!(library.updates[&item().key()].len(), 1);
+        assert_eq!(library.updates[&item().key()][0].0, "engine-b");
+        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
+        let current = work.checks["engine-a"]
+            .1
+            .iter()
+            .find(|row| row.plugin.descriptor == installed.descriptor)
+            .unwrap();
+        assert_eq!(current.status_label(), "Up to date");
+        assert_eq!(current.plugin.version, "2.0");
+        assert!(!current.has_update());
+        // A check started before installation cannot restore the completed update.
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine-a".into(),
+            start,
+            vec![update(), other],
+        );
+        assert_eq!(library.updates[&item().key()].len(), 1);
+        reconcile_completed_plugin_update(
+            &mut work,
+            &mut library,
+            "engine-b".into(),
+            start + Duration::from_secs(2),
+            installed,
+        );
+        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
+        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
+    }
+    #[test]
+    fn incremental_checks_preserve_pending_rows_and_reject_stale_results() {
+        let mut work = plugin_jobs::PluginWork::default();
+        let mut other_item = item();
+        other_item.asset_id = "other".into();
+        let mut library = Library {
+            items: vec![item(), other_item.clone()],
+            ..Default::default()
+        };
+        let mut pending = update();
+        pending.plugin.descriptor = "other.uplugin".into();
+        pending.plugin.catalog_id = Some("other".into());
+        let started = Instant::now();
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            started,
+            vec![update(), pending],
+        );
+        let mut current = update();
+        current.status = "Up to date".into();
+        reconcile_plugin_check_row(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            started + Duration::from_secs(1),
+            current,
+        );
+        assert_eq!(work.checks["engine"].1.len(), 2);
+        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
+        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
+        reconcile_plugin_check_row(&mut work, &mut library, "engine".into(), started, update());
+        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
+        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
+    }
+    #[test]
+    fn unmatched_update_still_has_an_engine_destination() {
+        let mut work = plugin_jobs::PluginWork::default();
+        let mut library = Library::default();
+        reconcile_plugin_check(
+            &mut work,
+            &mut library,
+            "engine".into(),
+            Instant::now(),
+            vec![update()],
+        );
+        assert!(library.updates.is_empty());
+        assert_eq!(work.checks["engine"].1[0].plugin.name, "Example");
+        assert!(work.checks["engine"].1[0].has_update());
+    }
+    #[test]
+    fn sync_keeps_loaded_search_details_and_removes_unowned_items() {
+        let mut old = item();
+        old.listing_updated_at = Some(123);
+        old.listing_search = Some(fab::SearchMetadata {
+            description: "monster".into(),
+            ..Default::default()
+        });
+        let mut removed = old.clone();
+        removed.asset_id = "removed".into();
+        let mut library = Library {
+            items: vec![old, removed],
+            ..Default::default()
+        };
+        library.replace_items(vec![item()]);
+        assert_eq!(library.items.len(), 1);
+        assert_eq!(library.items[0].listing_updated_at, Some(123));
+        assert_eq!(
+            library.items[0]
+                .listing_search
+                .as_ref()
+                .unwrap()
+                .description,
+            "monster"
+        );
     }
 }

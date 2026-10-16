@@ -46,15 +46,38 @@ pub(crate) fn session_lock() -> Result<std::fs::File, String> {
     fs2::FileExt::lock_exclusive(&f).map_err(|e| e.to_string())?;
     Ok(f)
 }
+// Access tokens stay in memory and are tied to the current saved session.
+// Fab HTTP requests do not hold the cross-process refresh-token lock.
+struct FabAccessToken {
+    account: String,
+    refresh_hash: [u8; 20],
+    token: String,
+    until: std::time::Instant,
+}
+impl FabAccessToken {
+    fn matches(&self, session: &Session, now: std::time::Instant) -> bool {
+        self.account == session.account_id
+            && self.refresh_hash == crate::buildpatch::digest(session.refresh_token.as_bytes())
+            && now < self.until
+    }
+}
+static FAB_ACCESS: std::sync::Mutex<Option<FabAccessToken>> = std::sync::Mutex::new(None);
 impl Epic {
     pub fn new() -> Result<Self, String> {
+        static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+        if let Some(client) = CLIENT.get() {
+            return Ok(Self {
+                client: client.clone(),
+            });
+        }
+        let client = Client::builder()
+            .timeout(Duration::from_secs(35))
+            .connect_timeout(Duration::from_secs(12))
+            .user_agent(concat!("DoNothingAndWin/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| e.to_string())?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(35))
-                .connect_timeout(Duration::from_secs(12))
-                .user_agent(concat!("DoNothingAndWin/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .map_err(|e| e.to_string())?,
+            client: CLIENT.get_or_init(|| client).clone(),
         })
     }
     fn decode(r: Response) -> Result<Value, String> {
@@ -129,33 +152,73 @@ impl Epic {
         }
         Self::session(&self.authenticate("authorization_code", Some(code))?)
     }
+    fn fab_access_token(&self, session: &Session) -> Result<String, String> {
+        let mut cached = FAB_ACCESS
+            .lock()
+            .map_err(|_| "Authentication cache unavailable")?;
+        let current = crate::storage::load_session()
+            .filter(|s| s.account_id == session.account_id)
+            .ok_or("Epic account changed")?;
+        if let Some(token) = cached
+            .as_ref()
+            .filter(|t| t.matches(&current, std::time::Instant::now()))
+        {
+            return Ok(token.token.clone());
+        }
+        let _lock = session_lock()?;
+        let current = crate::storage::load_session()
+            .filter(|s| s.account_id == session.account_id)
+            .ok_or("Epic account changed")?;
+        let auth = self.authenticate("refresh_token", Some(&current.refresh_token))?;
+        let renewed = Self::session(&auth)?;
+        crate::storage::save_session(&renewed)?;
+        let token = auth["access_token"]
+            .as_str()
+            .ok_or("Missing access token")?
+            .to_owned();
+        let lifetime = auth["expires_in"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(3600)
+            .saturating_sub(60);
+        *cached = Some(FabAccessToken {
+            account: renewed.account_id,
+            refresh_hash: crate::buildpatch::digest(renewed.refresh_token.as_bytes()),
+            token: token.clone(),
+            until: std::time::Instant::now() + Duration::from_secs(lifetime),
+        });
+        Ok(token)
+    }
     pub fn fab_request(
         &self,
         session: &Session,
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, String> {
-        let _lock = session_lock()?;
-        let current = crate::storage::load_session()
-            .filter(|s| s.account_id == session.account_id)
-            .ok_or("Epic account changed")?;
-        let auth = self.authenticate("refresh_token", Some(&current.refresh_token))?;
-        crate::storage::save_session(&Self::session(&auth)?)?;
-        let token = auth["access_token"]
-            .as_str()
-            .ok_or("Missing access token")?;
         let url = format!("https://www.fab.com/e/{path}");
-        let request = if let Some(body) = body {
-            self.client.post(url).json(body)
-        } else {
-            self.client.get(url)
-        };
-        Self::decode(
-            request
-                .bearer_auth(token)
+        for attempt in 0..2 {
+            let token = self.fab_access_token(session)?;
+            let request = if let Some(body) = body {
+                self.client.post(&url).json(body)
+            } else {
+                self.client.get(&url)
+            };
+            let response = request
+                .bearer_auth(&token)
                 .send()
-                .map_err(|_| "Fab request failed")?,
-        )
+                .map_err(|_| "Fab request failed")?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                let mut cached = FAB_ACCESS
+                    .lock()
+                    .map_err(|_| "Authentication cache unavailable")?;
+                if cached.as_ref().is_some_and(|t| t.token == token) {
+                    *cached = None;
+                }
+                continue;
+            }
+            return Self::decode(response);
+        }
+        Err("Epic sign-in expired. Please reconnect your account.".into())
     }
     pub fn owned_assets(&self, session: &Session) -> Result<Vec<Value>, String> {
         let _lock = session_lock()?;
@@ -508,5 +571,41 @@ mod tests {
         let s = combine(catalog()["elements"].as_array().unwrap(), None).unwrap();
         assert!(!s.verified());
         assert!(!s.missing_builds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fab_token_tests {
+    use super::*;
+    #[test]
+    fn access_token_is_invalid_after_expiry_account_switch_or_session_rotation() {
+        let session = Session {
+            account_id: "a".into(),
+            refresh_token: "test-session".into(),
+            display_name: String::new(),
+        };
+        let now = std::time::Instant::now();
+        let token = FabAccessToken {
+            account: session.account_id.clone(),
+            refresh_hash: crate::buildpatch::digest(session.refresh_token.as_bytes()),
+            token: "test-access".into(),
+            until: now + Duration::from_secs(60),
+        };
+        assert!(token.matches(&session, now));
+        assert!(!token.matches(&session, now + Duration::from_secs(60)));
+        assert!(!token.matches(
+            &Session {
+                account_id: "b".into(),
+                ..session.clone()
+            },
+            now
+        ));
+        assert!(!token.matches(
+            &Session {
+                refresh_token: "rotated".into(),
+                ..session
+            },
+            now
+        ));
     }
 }

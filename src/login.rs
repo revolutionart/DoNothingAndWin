@@ -74,7 +74,7 @@ pub fn run() -> Result<bool, String> {
     };
     let mut events = EventLoopBuilder::<LoginEvent>::with_user_event().build();
     let window = WindowBuilder::new()
-        .with_title("Sign in to Epic Games — DoNothing&Win Launcher")
+        .with_title("Sign in to Epic Games - DoNothing&Win Launcher")
         .with_theme(Some(Theme::Dark))
         .with_inner_size(LogicalSize::new(650., 960.))
         .with_min_inner_size(LogicalSize::new(460., 600.))
@@ -140,7 +140,7 @@ pub fn run() -> Result<bool, String> {
                 if let Some(site) = secure_site(&url) {
                     let label = serde_json::to_string(&site).unwrap_or_default();
                     let _ = bar.evaluate_script(&format!("document.getElementById('site').textContent={label}"));
-                    window.set_title(&format!("{site} — Sign in to Epic Games"));
+                    window.set_title(&format!("{site} - Sign in to Epic Games"));
                 }
                 if is_code_page(&url) {
                     let _ = browser.set_visible(false);

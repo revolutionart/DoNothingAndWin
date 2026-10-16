@@ -128,15 +128,15 @@ impl Workspace {
         let mut remove = None;
         ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{
             ui.style_mut().text_styles.insert(TextStyle::Body,FontId::proportional(16.));
-            ui.style_mut().text_styles.insert(TextStyle::Button,FontId::proportional(16.));
+            ui.style_mut().text_styles.insert(TextStyle::Button,FontId::proportional(COMPACT_BUTTON_FONT_SIZE));
             ui.style_mut().text_styles.insert(TextStyle::Heading,FontId::proportional(23.));
-            AppScrollArea::vertical(&theme).id_salt("settings-flow").auto_shrink([false,true]).show(ui,|ui|{
+            AppScrollArea::vertical(&theme).inner_margin(16.).id_salt("settings-flow").auto_shrink([false,true]).show(ui,|ui|{
                 ui.set_width(ui.available_width());ui.spacing_mut().item_spacing=vec2(14.,14.);ui.spacing_mut().button_padding=vec2(18.,10.);
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Epic account");
                 ui.horizontal_wrapped(|ui|{
                     ui.label(self.session.as_ref().map(|s|s.display_name.as_str()).unwrap_or("Not connected"));
-                    if self.session.is_some(){if ui.button("Sign out").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.sign_out_account();}}else if ui.button("Sign in with Epic").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.login=true;}
+                    if self.session.is_some(){if ui.add(buttons::secondary_button("Sign out")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.sign_out_account();}}else if ui.add(buttons::secondary_button("Sign in with Epic")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.login=true;}
                 });
                 ui.label("Each developer signs in with their own account. Sessions are encrypted for this Windows user.");
                 });
@@ -150,37 +150,37 @@ impl Workspace {
                     if discovery::path_key(Path::new(path))==discovery::path_key(&discovery::default_project_root()){continue;}
                     ui.separator();
                     let (row,_) = ui.allocate_exact_size(vec2(ui.available_width(),42.),Sense::hover());
-                    let button_rect=Rect::from_min_max(pos2(row.right()-100.,row.top()),row.max);
+                    let button_rect=Rect::from_center_size(pos2(row.right()-50.,row.center().y),vec2(100.,COMPACT_BUTTON_HEIGHT));
                     let path_rect=Rect::from_min_max(row.min,pos2(button_rect.left()-14.,row.bottom()));
                     ui.scope_builder(UiBuilder::new().max_rect(path_rect).layout(Layout::left_to_right(Align::Center)),|ui|{
                         ui.add(Label::new(path).truncate()).on_hover_text(path);
                     });
-                    if ui.put(button_rect,Button::new("Remove")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){remove=Some(i);}
+                    if ui.put(button_rect,buttons::secondary_button("Remove")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){remove=Some(i);}
                 }
                 ui.horizontal_wrapped(|ui|{
-                    if ui.button("Add project folder").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){if let Some(p)=rfd::FileDialog::new().pick_folder(){self.add_project_root(p,ctx);}}
-                    if ui.add_enabled(self.scan.receiver.is_none(),Button::new("Rescan folders")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.start_scan(ctx.clone(),None);}
+                    if ui.add(buttons::secondary_button("Add project folder")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){if let Some(p)=rfd::FileDialog::new().pick_folder(){self.add_project_root(p,ctx);}}
+                    if ui.add_enabled(self.scan.receiver.is_none(),buttons::secondary_button("Rescan folders")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.start_scan(ctx.clone(),None);}
                     if self.scan.receiver.is_some(){ui.spinner();ui.label("Scanning project folders…");}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Appearance");
                 ui.horizontal_wrapped(|ui|{
-                    if ui.button("Midnight").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();ctx.set_visuals(self.theme.visuals());self.persist();}
-                    if ui.button("Daylight").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();ctx.set_visuals(self.theme.visuals());self.persist();}
+                    if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();ctx.set_visuals(self.theme.visuals());self.persist();}
+                    if ui.add(buttons::secondary_button("Daylight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();ctx.set_visuals(self.theme.visuals());self.persist();}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Engine release checks");ui.label("Check for available engine releases while the launcher is open. Updates are always installed manually.");
                 ui.horizontal_wrapped(|ui|{
-                    ui.label("Check every");if ui.add(DragValue::new(&mut self.prefs.check_minutes).range(5..=1440).suffix(" minutes")).changed(){self.persist();}
-                    if ui.button("Check now").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.check(ctx.clone());}
+                    ui.label("Check every");if ui.scope(|ui| { buttons::compact_style(ui); ui.add(DragValue::new(&mut self.prefs.check_minutes).range(5..=1440).suffix(" minutes")) }).inner.changed(){self.persist();}
+                    if ui.add(buttons::secondary_button("Check now")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.check(ctx.clone());}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Workspace");ui.horizontal_wrapped(|ui|{
-                    if ui.button("Locate installed engine").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.add_engine();}
-                    if ui.button("Rescan engines").clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.engines=platform::display_engines();self.engine_space.checked=None;self.plugin_counts.clear(); self.workspace_cache.invalidate();self.notify(format!("Engine rescan complete: {} installed engines found.",self.engines.len()));}
+                    if ui.add(buttons::secondary_button("Locate installed engine")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.add_engine();}
+                    if ui.add(buttons::secondary_button("Rescan engines")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.engines=platform::display_engines();self.engine_space.checked=None;self.plugin_counts.clear(); self.workspace_cache.invalidate();self.notify(format!("Engine rescan complete: {} installed engines found.",self.engines.len()));}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
@@ -200,7 +200,7 @@ impl Workspace {
 
 fn settings_section(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui)) {
     Frame::new()
-        .fill(color(theme.panel))
+        .fill(color(theme.card))
         .stroke(Stroke::new(1., color(theme.border)))
         .corner_radius(6.)
         .inner_margin(20)

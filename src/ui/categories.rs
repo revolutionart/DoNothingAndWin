@@ -48,7 +48,7 @@ impl Workspace {
                 ui.separator();
             }
             if ui
-                .button("Add")
+                .add(buttons::secondary_button("Add"))
                 .clone()
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .clicked()
@@ -59,7 +59,7 @@ impl Workspace {
             }
             if !current.is_empty()
                 && ui
-                    .button("Remove from category")
+                    .add(buttons::secondary_button("Remove from category"))
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
             {
@@ -122,22 +122,21 @@ impl Workspace {
         }
     }
     pub(super) fn category_tabs(&mut self, ui: &mut Ui, c: &Canvas, y: f32) {
-        let rect = c.rect([271., y, c.width - 303., 33.]);
+        let rect = c.rect([271., y, c.width - 303., FILTER_ROW_HEIGHT]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal(|ui| {
                 let tab_width = ui.available_width().max(150.);
                 ui.allocate_ui_with_layout(
-                    vec2(tab_width, 31.),
+                    vec2(tab_width, FILTER_ROW_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         AppScrollArea::horizontal(&self.theme)
                             .id_salt("project-category-tabs")
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    if ui
-                                        .selectable_label(
+                                    if buttons::tab_button(ui, &self.theme,
                                             !self.pinned_only && self.category_filter.is_none(),
-                                            "All projects",
+                                            "All projects", 0.,
                                         )
                                         .clone()
                                         .on_hover_cursor(CursorIcon::PointingHand)
@@ -147,8 +146,7 @@ impl Workspace {
                                         self.category_filter = None;
                                         self.project_scroll = 0.;
                                     }
-                                    if ui
-                                        .selectable_label(
+                                    if buttons::tab_button(ui, &self.theme,
                                             self.pinned_only,
                                             format!(
                                                 "Pinned ({})",
@@ -157,7 +155,7 @@ impl Workspace {
                                                     .filter(|p| p.pinned
                                                         && self.project_visible(&p.path))
                                                     .count()
-                                            ),
+                                            ), 0.,
                                         )
                                         .clone()
                                         .on_hover_cursor(CursorIcon::PointingHand)
@@ -188,17 +186,16 @@ impl Workspace {
                                                         == key
                                                 })
                                                 .count();
-                                            let tab = ui
-                                                .selectable_label(
+                                            let tab = buttons::tab_button(ui, &self.theme,
                                                     self.category_filter.as_ref() == Some(&key),
-                                                    format!("{label} ({count})"),
+                                                    format!("{label} ({count})"), 0.,
                                                 )
                                                 .clone()
                                                 .on_hover_cursor(CursorIcon::PointingHand);
                                             let empty = self.category_is_empty(&key);
-                                            tab.context_menu(|ui| {
+                                            Popup::context_menu(&tab).frame(menu_frame(&self.theme)).show(|ui| {
                                                 style_menu(ui, &self.theme);
-                                                if ui.add_enabled(empty, Button::new("Remove category"))
+                                                if ui.add_enabled(empty, buttons::secondary_button("Remove category"))
                                                     .on_disabled_hover_text("Move all projects out of this category first, including hidden projects.")
                                                     .on_hover_cursor(CursorIcon::PointingHand).clicked() {
                                                     self.remove_empty_category(&key);
@@ -248,7 +245,7 @@ impl Workspace {
                     let name = self.category_name.trim().to_owned();
                     let valid = self.valid_category_name(&name);
                     if ui
-                        .add_enabled(valid, Button::new("Add category"))
+                        .add_enabled(valid, buttons::secondary_button("Add category"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
@@ -268,7 +265,7 @@ impl Workspace {
                             ui.label(&category);
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
-                                    .add_enabled(self.category_is_empty(&category), Button::new("Remove category"))
+                                    .add_enabled(self.category_is_empty(&category), buttons::secondary_button("Remove category"))
                                     .on_disabled_hover_text("Move all projects out of this category first, including hidden projects.")
                                     .clone()
                                     .on_hover_cursor(CursorIcon::PointingHand)

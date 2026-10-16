@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -53,6 +53,10 @@ pub struct Progress {
     pub completed: u64,
     pub total: u64,
     pub network: u64,
+    pub read: u64,
+    pub written: u64,
+    pub package_bytes: u64,
+    pub files_total: usize,
     pub files: usize,
 }
 #[derive(Clone, Default)]
@@ -75,19 +79,26 @@ impl Control {
     }
 }
 pub fn client() -> Result<Client, String> {
-    Client::builder()
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(120))
         .user_agent("EngineWorkspace/0.1")
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(CLIENT.get_or_init(|| client).clone())
 }
+
 fn valid_cdn(url: &Url) -> bool {
     url.scheme() == "https"
         && url.host_str().is_some_and(|h| {
             h == "epicgames.com"
                 || h == "media.fab.com"
+                || h == "cdn.quixel.com"
                 || h == "egdownload.fastly-edge.com"
                 || h == "epicgames-download1.akamaized.net"
                 || h.ends_with(".epicgames.com")
@@ -95,6 +106,14 @@ fn valid_cdn(url: &Url) -> bool {
         })
 }
 pub fn fetch(c: &Client, url: Url, limit: u64) -> Result<Vec<u8>, String> {
+    fetch_progress(c, url, limit, &mut |_| {})
+}
+fn fetch_progress(
+    c: &Client,
+    url: Url,
+    limit: u64,
+    received: &mut impl FnMut(u64),
+) -> Result<Vec<u8>, String> {
     if !valid_cdn(&url) {
         return Err("Unexpected CDN host or protocol".into());
     }
@@ -115,6 +134,7 @@ pub fn fetch(c: &Client, url: Url, limit: u64) -> Result<Vec<u8>, String> {
         if n == 0 {
             break;
         }
+        received(n as u64);
         crate::download_policy::throttle(n);
         data.extend_from_slice(&buffer[..n]);
     }
@@ -249,6 +269,9 @@ pub(crate) fn no_links(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn hash_file(path: &Path) -> Result<[u8; 20], String> {
+    hash_file_progress(path, &mut |_| {})
+}
+fn hash_file_progress(path: &Path, received: &mut impl FnMut(u64)) -> Result<[u8; 20], String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let mut hash = Sha1::new();
     let mut buf = [0u8; 128 * 1024];
@@ -257,6 +280,7 @@ fn hash_file(path: &Path) -> Result<[u8; 20], String> {
         if n == 0 {
             break;
         }
+        received(n as u64);
         hash.update(&buf[..n]);
     }
     Ok(hash.finalize().into())
@@ -268,12 +292,56 @@ pub(crate) fn valid_cached_chunk(path: &Path, chunk: &Chunk) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() == chunk.window as u64)
         && fs::read(path).is_ok_and(|b| buildpatch::valid_chunk_data(&b, chunk))
 }
+// Count completed payload I/O without another verification pass. Memory-cache hits
+// and metadata operations do not contribute to storage throughput.
+fn read_payload(path: &Path, progress: &Mutex<Progress>) -> Result<Vec<u8>, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        progress.lock().unwrap().read += n as u64;
+        bytes.extend_from_slice(&buffer[..n]);
+    }
+    Ok(bytes)
+}
+fn write_payload(
+    out: &mut impl Write,
+    mut bytes: &[u8],
+    progress: &Mutex<Progress>,
+) -> Result<(), String> {
+    while !bytes.is_empty() {
+        match out.write(&bytes[..bytes.len().min(128 * 1024)]) {
+            Ok(0) => return Err("Could not write package data".into()),
+            Ok(n) => {
+                progress.lock().unwrap().written += n as u64;
+                bytes = &bytes[n..];
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
 pub(crate) fn chunk_data(
     client: &Client,
     chunk: &Chunk,
     bases: &[Url],
     feature: u32,
     control: &Control,
+) -> Result<Vec<u8>, String> {
+    chunk_data_progress(client, chunk, bases, feature, control, &mut |_| {})
+}
+pub(crate) fn chunk_data_progress(
+    client: &Client,
+    chunk: &Chunk,
+    bases: &[Url],
+    feature: u32,
+    control: &Control,
+    received: &mut impl FnMut(u64),
 ) -> Result<Vec<u8>, String> {
     let mut error = "No working CDN".to_string();
     for attempt in 0..3 {
@@ -283,7 +351,7 @@ pub(crate) fn chunk_data(
                 .join(&chunk.path(feature))
                 .map_err(|_| "Invalid chunk location")?;
             url.set_query(base.query());
-            match fetch(client, url, 64 * 1024 * 1024)
+            match fetch_progress(client, url, 64 * 1024 * 1024, received)
                 .and_then(|b| buildpatch::decode_chunk(&b, chunk))
             {
                 Ok(b) => return Ok(b),
@@ -350,11 +418,13 @@ pub fn install(
     {
         return Err("Selected components exclude Unreal Editor".into());
     }
+    let (install_size, package_bytes, _) = plan.sizes();
     *progress.lock().unwrap() = Progress {
         phase: "Checking staging and available disk space".into(),
+        package_bytes,
+        files_total: files.len(),
         ..Default::default()
     };
-    let (install_size, _, _) = plan.sizes();
     let free = fs2::available_space(parent).map_err(|e| e.to_string())?;
     crate::storage::write_json(
         &work.join("plan.json"),
@@ -371,8 +441,12 @@ pub fn install(
         control.check()?;
         let dest = stage.join(relative(&f.name)?);
         no_links(&dest)?;
-        if valid_file(&dest, &f.sha, f.size()) {
+        if fs::metadata(&dest).is_ok_and(|m| m.len() == f.size())
+            && hash_file_progress(&dest, &mut |n| progress.lock().unwrap().read += n)
+                .is_ok_and(|hash| hash == f.sha)
+        {
             verified += f.size();
+            progress.lock().unwrap().files += 1;
         } else {
             pending.push(*f);
             needed.extend(f.parts.iter().map(|p| p.guid.clone()));
@@ -407,14 +481,12 @@ pub fn install(
         ));
     }
     let total = chunks.iter().map(|c| c.size).sum();
-    *progress.lock().unwrap() = Progress {
-        phase: "Downloading and verifying chunks".into(),
-        total,
-        ..Default::default()
-    };
+    {
+        let mut p = progress.lock().unwrap();
+        p.phase = "Downloading and verifying chunks".into();
+        p.total = total;
+    }
     let next = AtomicUsize::new(0);
-    let done = AtomicU64::new(0);
-    let network = AtomicU64::new(0);
     let failure = Mutex::new(None::<String>);
     std::thread::scope(|scope| {
         for _ in 0..8 {
@@ -435,22 +507,28 @@ pub fn install(
                     let path = cache.join(&chunk.guid);
                     let result = (|| {
                         no_links(&path)?;
-                        if !valid_cached_chunk(&path, chunk) {
-                            let bytes = chunk_data(
+                        let cached = fs::metadata(&path)
+                            .is_ok_and(|m| m.len() == chunk.window as u64)
+                            && read_payload(&path, &progress)
+                                .is_ok_and(|bytes| buildpatch::valid_chunk_data(&bytes, chunk));
+                        if !cached {
+                            let bytes = chunk_data_progress(
                                 &client,
                                 chunk,
                                 &plan.bases,
                                 plan.manifest.feature,
                                 control,
+                                &mut |n| progress.lock().unwrap().network += n,
                             )?;
                             let tmp = path.with_extension("partial");
                             no_links(&tmp)?;
-                            fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+                            let mut out = File::create(&tmp).map_err(|e| e.to_string())?;
+                            write_payload(&mut out, &bytes, &progress)?;
+                            drop(out);
                             if path.exists() {
                                 fs::remove_file(&path).map_err(|e| e.to_string())?;
                             }
                             fs::rename(tmp, &path).map_err(|e| e.to_string())?;
-                            network.fetch_add(chunk.size, Ordering::Relaxed);
                         }
                         Ok::<_, String>(())
                     })();
@@ -458,10 +536,8 @@ pub fn install(
                         *failure.lock().unwrap() = Some(e);
                         break;
                     }
-                    let completed = done.fetch_add(chunk.size, Ordering::Relaxed) + chunk.size;
                     let mut p = progress.lock().unwrap();
-                    p.completed = completed;
-                    p.network = network.load(Ordering::Relaxed);
+                    p.completed += chunk.size;
                 }
             });
         }
@@ -470,13 +546,12 @@ pub fn install(
     if let Some(e) = failure.into_inner().unwrap() {
         return Err(format!("{e}. Resume to retry; verified data is retained."));
     }
-    *progress.lock().unwrap() = Progress {
-        phase: "Reconstructing and verifying engine files".into(),
-        completed: verified,
-        total: install_size,
-        network: network.load(Ordering::Relaxed),
-        files: files.len() - pending.len(),
-    };
+    {
+        let mut p = progress.lock().unwrap();
+        p.phase = "Reconstructing and verifying engine files".into();
+        p.completed = verified;
+        p.total = install_size;
+    }
     let mut chunk_memory: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
     let mut chunk_order: VecDeque<String> = VecDeque::new();
     for f in pending {
@@ -495,7 +570,7 @@ pub fn install(
             let bytes = if let Some(bytes) = chunk_memory.get(&part.guid) {
                 bytes.clone()
             } else {
-                let bytes = fs::read(cache.join(&part.guid)).map_err(|e| e.to_string())?;
+                let bytes = read_payload(&cache.join(&part.guid), &progress)?;
                 if !buildpatch::valid_chunk_data(&bytes, ch) {
                     return Err("Cached chunk integrity failed; resume to repair".into());
                 }
@@ -516,7 +591,7 @@ pub fn install(
             let piece = bytes
                 .get(part.offset as usize..part.offset as usize + part.size as usize)
                 .ok_or("Invalid chunk extent")?;
-            out.write_all(piece).map_err(|e| e.to_string())?;
+            write_payload(&mut out, piece, &progress)?;
             hash.update(piece);
         }
         let actual: [u8; 20] = hash.finalize().into();
@@ -564,7 +639,7 @@ pub fn install(
         let p = cache.join(id);
         let _ = fs::remove_file(p);
     }
-    progress.lock().unwrap().phase = "Installation complete — files verified".into();
+    progress.lock().unwrap().phase = "Installation complete - files verified".into();
     Ok(plan.target.clone())
 }
 #[cfg(test)]
@@ -631,7 +706,30 @@ mod tests {
         paused.stop();
         assert!(install(&plan, &paused, Arc::default()).is_err());
         assert!(!plan.target.exists());
-        let result = install(&plan, &Control::default(), Arc::default()).unwrap();
+        let staged_editor = work.join("files/Engine/Binaries/Win64/UnrealEditor.exe");
+        fs::create_dir_all(staged_editor.parent().unwrap()).unwrap();
+        fs::write(&staged_editor, b"editor fixture").unwrap();
+        let progress = Arc::new(Mutex::new(Progress::default()));
+        let result = install(&plan, &Control::default(), progress.clone()).unwrap();
+        let p = progress.lock().unwrap();
+        assert_eq!(
+            p.network, 0,
+            "verified cached chunks need no network traffic"
+        );
+        assert_eq!(
+            p.read,
+            14 + 2 * data.len() as u64,
+            "staged verification plus cache verification and reconstruction"
+        );
+        assert_eq!(
+            p.written,
+            data.len() as u64 - 14,
+            "only the missing file is written"
+        );
+        assert_eq!(p.completed, data.len() as u64);
+        assert_eq!(p.files, p.files_total);
+        assert_eq!(p.files_total, 2);
+        assert_eq!(p.package_bytes, data.len() as u64);
         assert_eq!(result, plan.target);
         assert_eq!(
             fs::read(result.join("Engine/Binaries/Win64/UnrealEditor.exe")).unwrap(),
@@ -639,6 +737,30 @@ mod tests {
         );
         assert!(result.join(".engine-workspace-install.json").is_file());
         assert!(!cache.join(guid).exists());
+    }
+    #[test]
+    fn payload_counters_include_corrupt_reads_and_partial_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("chunk");
+        fs::write(&file, b"corrupt data").unwrap();
+        let progress = Mutex::new(Progress::default());
+        assert_eq!(read_payload(&file, &progress).unwrap(), b"corrupt data");
+        assert_eq!(progress.lock().unwrap().read, 12);
+        struct FailingWriter(bool);
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("disk full"));
+                }
+                self.0 = true;
+                Ok(3)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(write_payload(&mut FailingWriter(false), b"payload", &progress).is_err());
+        assert_eq!(progress.lock().unwrap().written, 3);
     }
     #[test]
     fn unsafe_windows_paths_rejected() {

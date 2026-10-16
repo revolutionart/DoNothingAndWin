@@ -432,14 +432,14 @@ impl Workspace {
             ctx,
             &self.theme.clone(),
             "engine-options",
-            &format!("Engine options — UE {}", engine.version),
+            &format!("Engine options - UE {}", engine.version),
             "Choose components and target platforms for this installation.",
             &mut open,
             None,
             |ui| {
                 if self.options.receiver.is_some() {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        ui.add(egui::Spinner::new().color(color(self.theme.text)));
                         ui.label("Loading installed engine components...");
                     });
                 }

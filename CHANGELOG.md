@@ -1,6 +1,48 @@
 # Changelog
 
-## 1.1.0 — 2026-10-15
+## 1.2.0 - 2026-10-17
+
+### Plugin updates
+
+- Check up to four plugins concurrently, reuse HTTP connections and access tokens, and show results as each check finishes. Recent results are cached for five minutes per account and engine, with changed plugin descriptors and installation receipts checked again.
+- Clear completed updates immediately across Library, Available Updates and engine dialogs. Preserve updates for other engines and unfinished batch items, and prevent older background checks from restoring cleared notices.
+- Show matching compatible versions as **Up to date** and plugins absent from the connected Fab library as **Not available through Fab**. Failed checks and replacement builds remain distinct.
+- Improve matching against the complete owned catalog, including publisher namespaces, shortened artifact names, Fab URLs and Epic launcher links. Keep package identity, engine compatibility, ambiguity and downgrade checks.
+- Save artifact/build receipts and read matching Epic installation records to detect replacement builds even when a publisher reuses a version label. Support the FabLauncher export integration's separate update feed.
+- Refresh the engine plugin dialog with underline tabs, a combined search/action toolbar and highlighted update rows. Keep direct Update and Remove actions, add an installed-folder button, and simplify status summaries and progress text.
+
+### Downloads and engine installations
+
+- Add live **Download**, **Read** and **Write** graphs to engine and plugin installation activity, using measured network and file I/O. Show compressed package size separately from prepared file size and retain the Stop transfer action.
+- Reuse verified cached data without redundant reads while retaining size and SHA-1 validation. Corrupt cached data is rejected and fetched again.
+- Load engine installation options automatically when opening the install dialog from Workspace or Engine versions.
+- Hide installed engine versions from the new-engine picker and prevent duplicate installs. Newer hotfixes remain available.
+- Move engine releases closer to the toolbar, add row hover highlighting and move Epic verification details to the footer.
+
+### Library and responsiveness
+
+- Add an **Available Updates** Library tab and category filter, with one count per item and links to the affected engine's plugin updates.
+- Load saved Library data off the UI thread, display first-time sync pages progressively and publish listing details incrementally. Reuse the owned catalog across engine checks and thumbnail connections without decoding images twice.
+- Save completed metadata batches during long refreshes and back off failed detail requests for five minutes. Optional metadata continues loading in the background without a blocking missing-details notice.
+- Hide legacy Marketplace-only entries from Library cards and filters while retaining the official Fab UE Plugin and the complete catalog needed to match installed plugins.
+- Synchronize type tabs and category filters, highlight cards with available updates, and show Library counts and sync progress consistently.
+
+### Interface consistency
+
+- Standardize action buttons across the app on 14-pixel text, 32-pixel height and compact padding. Blue buttons share the same lighter hover color; destructive actions retain red hover styling.
+- Use consistent grid/list icons, dropdown and context-menu styling, scrollbar sizing and spacing across pages.
+- Make engine cards more compact and distribute project and Library grid columns evenly. Fit full thumbnail artwork, round image corners and align project images to the top of their frames.
+- Add Recently opened, Name A-Z and Name Z-A sorting to Projects and Workspace.
+- Align page headers, dividers and search/filter rows. Add the Settings header divider, darker section backgrounds and more space beside its scrollbar.
+- Match Downloads section backgrounds, retain the activity card border on the Downloads page and remove the redundant ACTIVE heading.
+- Improve installation loader and checkbox contrast, center and enlarge the plugin dialog close icon, and remove redundant plugin counts and explanatory labels.
+
+### Upgrade notes
+
+- Installer and portable builds are included with SHA-256 checksums. Both remain unsigned.
+- Finish transfers and exit the launcher before replacing an installed build. Engine installations, projects and saved preferences are retained.
+
+## 1.1.0 - 2026-10-15
 
 ### Launcher updates
 
@@ -45,6 +87,6 @@
 - This release is unsigned. Checksums are supplied with the installer and portable ZIP.
 - Plugin update detection has automated regression coverage and live catalog checks; a complete real older-to-newer ACF installation was not available for end-to-end testing.
 
-## 1.0.0 — 2026-10-15
+## 1.0.0 - 2026-10-15
 
 Initial community release: project discovery and organization; engine installation, verification and removal; owned Fab library browsing; engine plugin management; download progress and activity history; dark/light themes; optional Windows startup.

@@ -531,7 +531,7 @@ pub fn create_project(parent: &Path, name: &str, engine: &Installation) -> Resul
         || name.len() > 64
         || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err("Use 1–64 letters, digits or underscores for the project name.".into());
+        return Err("Use 1-64 letters, digits or underscores for the project name.".into());
     }
     let root = parent.join(name);
     fs::create_dir(&root)

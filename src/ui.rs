@@ -1,3 +1,4 @@
+mod buttons;
 mod categories;
 mod clone_project;
 mod dialog;
@@ -6,6 +7,7 @@ mod engine_options;
 mod launcher_updates;
 mod layout_probe;
 mod library;
+mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
 mod project_cards;
@@ -14,6 +16,7 @@ mod scrollbar;
 mod settings_flow;
 mod transfers;
 mod workspace_cache;
+use buttons::primary_button;
 use eframe::egui::{self, *};
 use engine_workspace::{
     epic::{self, Epic, Session},
@@ -22,7 +25,7 @@ use engine_workspace::{
     storage::{self, Preferences},
     theme::{Theme, color},
 };
-use scrollbar::AppScrollArea;
+use scrollbar::{AppComboBox, AppScrollArea};
 use std::{
     collections::HashMap,
     path::Path,
@@ -38,6 +41,22 @@ enum Page {
     Engines,
     Downloads,
     Settings,
+}
+#[derive(Clone, Copy, Default, PartialEq)]
+enum ProjectSort {
+    #[default]
+    RecentlyOpened,
+    NameAscending,
+    NameDescending,
+}
+impl ProjectSort {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RecentlyOpened => "Recently opened",
+            Self::NameAscending => "Name A-Z",
+            Self::NameDescending => "Name Z-A",
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum Icon {
@@ -88,7 +107,7 @@ pub struct Workspace {
     category_add_project: Option<String>,
     category_name: String,
     filter: String,
-    sort_name: bool,
+    project_sort: ProjectSort,
     list_view: bool,
     pending: Option<Receiver<Job>>,
     next_check: Instant,
@@ -124,7 +143,17 @@ pub struct Workspace {
     launcher_updates: launcher_updates::LauncherUpdates,
 }
 const BUTTON_SCALE: f32 = 0.75;
+const COMPACT_BUTTON_HEIGHT: f32 = 32.;
+const COMPACT_BUTTON_FONT_SIZE: f32 = 14.;
 const BUTTON_RADIUS: f32 = 5. * BUTTON_SCALE;
+const VIEW_MODE_ICON_SIZE: f32 = 16.;
+fn table_row_hover_color(theme: &Theme) -> Color32 {
+    color(if theme.dark {
+        [29, 34, 38]
+    } else {
+        [232, 236, 241]
+    })
+}
 fn button_bounds([x, y, w, h]: [f32; 4]) -> [f32; 4] {
     [
         x + w * (1. - BUTTON_SCALE) / 2.,
@@ -231,28 +260,36 @@ fn menu_frame(theme: &Theme) -> Frame {
         visuals: theme.visuals(),
         ..Default::default()
     })
-    .inner_margin(Margin::symmetric(0, 4))
+    .inner_margin(Margin::same(8))
 }
 fn style_menu(ui: &mut Ui, theme: &Theme) {
-    ui.spacing_mut().menu_margin = Margin::symmetric(0, 4);
-    ui.spacing_mut().button_padding = vec2(16., 9.);
-    ui.spacing_mut().item_spacing = vec2(0., 0.);
-    ui.spacing_mut().interact_size.y = 38.;
-    ui.visuals_mut().button_frame = true;
-    ui.visuals_mut().override_text_color = None;
-    let widgets = &mut ui.visuals_mut().widgets;
+    style_menu_settings(ui.style_mut(), theme);
+}
+fn style_menu_settings(style: &mut Style, theme: &Theme) {
+    style.override_font_id = Some(FontId::proportional(COMPACT_BUTTON_FONT_SIZE));
+    style.spacing.menu_margin = Margin::same(8);
+    style.spacing.button_padding = vec2(10., 5.);
+    style.spacing.item_spacing = vec2(8., 4.);
+    style.spacing.interact_size.y = 32.;
+    style.visuals.button_frame = true;
+    style.visuals.override_text_color = None;
+    style.visuals.selection.bg_fill = color(theme.accent);
+    style.visuals.selection.stroke.color = color(theme.on_accent);
+    let widgets = &mut style.visuals.widgets;
     widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     widgets.inactive.bg_stroke = Stroke::NONE;
-    widgets.inactive.corner_radius = CornerRadius::ZERO;
-    for w in [&mut widgets.hovered, &mut widgets.active] {
+    widgets.inactive.fg_stroke.color = color(theme.text);
+    widgets.inactive.corner_radius = CornerRadius::same(5);
+    for w in [&mut widgets.hovered, &mut widgets.active, &mut widgets.open] {
         w.weak_bg_fill = color(theme.accent);
         w.bg_fill = color(theme.accent);
-        w.fg_stroke.color = Color32::WHITE;
+        w.fg_stroke.color = color(theme.on_accent);
         w.bg_stroke = Stroke::NONE;
-        w.corner_radius = CornerRadius::ZERO;
+        w.corner_radius = CornerRadius::same(5);
         w.expansion = 0.;
     }
 }
+
 impl Workspace {
     fn launch_button(&mut self, ui: &mut Ui, c: &Canvas, r: [f32; 4]) {
         let chosen = self
@@ -260,7 +297,9 @@ impl Workspace {
             .iter()
             .position(|e| e.path == self.prefs.default_engine)
             .or_else(|| latest_installation(&self.engines));
-        let r = button_bounds(r);
+        let mut r = button_bounds(r);
+        r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
+        r[3] = COMPACT_BUTTON_HEIGHT;
         let [x, y, w, h] = r;
         let split = 42. * BUTTON_SCALE;
         let launch = ui
@@ -309,7 +348,7 @@ impl Workspace {
             x + (w - split) / 2.,
             y + h / 2.,
             &label,
-            15.,
+            COMPACT_BUTTON_FONT_SIZE,
             true,
             t.launch_foreground,
             Align2::CENTER_CENTER,
@@ -376,7 +415,7 @@ impl Workspace {
                 }
                 ui.separator();
                 if ui
-                    .button("Install engine…")
+                    .add(buttons::secondary_button("Install engine…"))
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
@@ -428,8 +467,12 @@ impl Workspace {
             options.input_options.line_scroll_speed = 100.;
         });
         cc.egui_ctx.style_mut(|style| {
-            style.spacing.button_padding = vec2(16., 8.);
-            style.spacing.interact_size.y = 34.;
+            style.spacing.button_padding = vec2(buttons::HORIZONTAL_PADDING, 5.);
+            style.spacing.interact_size.y = COMPACT_BUTTON_HEIGHT;
+            style.text_styles.insert(
+                TextStyle::Button,
+                FontId::proportional(COMPACT_BUTTON_FONT_SIZE),
+            );
         });
         let mut prefs = storage::load_preferences();
         prefs.run_at_startup = engine_workspace::download_policy::startup_enabled();
@@ -475,7 +518,7 @@ impl Workspace {
             category_add_project: None,
             category_name: String::new(),
             filter: "All versions".into(),
-            sort_name: false,
+            project_sort: ProjectSort::default(),
             list_view: false,
             pending: None,
             next_check: Instant::now()
@@ -668,7 +711,7 @@ impl Workspace {
                     self.snapshot = snapshot;
                     if let Some(change) = changed {
                         self.notify(format!(
-                            "{}: {:?} available — {}",
+                            "{}: {:?} available - {}",
                             change.app, change.kind, change.current
                         ));
                         ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
@@ -888,7 +931,7 @@ impl Workspace {
                 },
                 Align2::LEFT_CENTER,
             );
-            if matches!(page, Page::Library | Page::Engines) && self.has_plugin_updates() {
+            if matches!(page, Page::Library) && self.has_plugin_updates() {
                 let badge_color = if active || r.hovered() {
                     SIDEBAR_ON_HIGHLIGHT
                 } else {
@@ -1047,7 +1090,7 @@ impl Workspace {
                     if ui
                         .add_enabled(
                             self.pending.is_none() && !self.transfer.preparing(),
-                            Button::new("Sign Out"),
+                            buttons::secondary_button("Sign Out"),
                         )
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
@@ -1057,7 +1100,7 @@ impl Workspace {
                         ui.close();
                     }
                 } else if ui
-                    .button("Sign in to Epic")
+                    .add(buttons::secondary_button("Sign in to Epic"))
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
@@ -1133,43 +1176,46 @@ impl Workspace {
             self.theme.muted,
             Align2::LEFT_CENTER,
         );
+        let header = PageHeaderLayout::new(c.width);
         if matches!(self.page, Page::Workspace | Page::Projects) {
             if c.button(
                 ui,
                 "import",
-                button_slot([c.width - 373., 38., 160., 31.]),
+                button_slot([c.width - 373., header.actions_y, 160., 31.]),
                 "Import project",
                 Some(Icon::Upload),
                 false,
             ) {
                 self.import(ctx);
             }
-            self.launch_button(ui, &c, button_slot([c.width - 203., 38., 177., 31.]));
+            self.launch_button(
+                ui,
+                &c,
+                button_slot([c.width - 203., header.actions_y, 177., 31.]),
+            );
         }
-        if matches!(self.page, Page::Projects | Page::Engines) {
-            let y = if self.page == Page::Projects && c.width < 1320. {
-                148.
-            } else {
-                104.
-            };
-            c.line(ui, [271., y], [c.width - 26., y], self.theme.border);
+        if matches!(self.page, Page::Workspace | Page::Projects | Page::Library) {
+            c.line(
+                ui,
+                [271., header.divider_y],
+                [c.width - 26., header.divider_y],
+                self.theme.border,
+            );
+        } else if matches!(self.page, Page::Engines | Page::Settings) {
+            c.line(ui, [271., 104.], [c.width - 26., 104.], self.theme.border);
         }
         match self.page {
             Page::Workspace => {
-                self.engine_section(ui, &c, ctx);
-                self.project_section(ui, &c, ctx, if c.height < 800. { 296. } else { 370. });
+                let projects_divider = self.engine_section(ui, &c, ctx);
+                self.project_section(ui, &c, ctx, projects_divider);
             }
             Page::Projects => {
                 if c.button(
                     ui,
                     "scanroot",
                     button_slot([
-                        if c.width >= 1320. {
-                            c.width - 535.
-                        } else {
-                            c.width - 176.
-                        },
-                        if c.width >= 1320. { 38. } else { 103. },
+                        if header.wrapped { 271. } else { c.width - 535. },
+                        header.actions_y,
                         150.,
                         31.,
                     ]),
@@ -1181,7 +1227,7 @@ impl Workspace {
                         self.add_project_root(p, ctx);
                     }
                 }
-                self.project_section(ui, &c, ctx, if c.width >= 1320. { 110. } else { 154. });
+                self.project_section(ui, &c, ctx, header.divider_y);
             }
             Page::Library => self.library_page(ui, &c),
             Page::Engines => self.release_page(ui, &c, ctx),
@@ -1194,6 +1240,18 @@ impl Workspace {
             self.theme.success
         } else {
             self.theme.subtle
+        };
+        let storage = if self.demo {
+            "Storage 248 GB available".into()
+        } else {
+            self.free
+                .map(|n| format!("Storage {} GB available", n / 1_073_741_824))
+                .unwrap_or_else(|| "Storage unavailable".into())
+        };
+        let storage = if self.page == Page::Library && !self.library.footer.is_empty() {
+            format!("{} | {storage}", self.library.footer)
+        } else {
+            storage
         };
         let activity = if self.transfer.busy() {
             let p = self.transfer.progress.lock().unwrap().clone();
@@ -1210,9 +1268,12 @@ impl Workspace {
             Some(("Library installation".into(), status.into(), None))
         } else if self.plugin_work.mutating {
             Some((
-                "Plugin operation".into(),
+                self.plugin_work
+                    .snapshot()
+                    .map(|p| p.title)
+                    .unwrap_or_else(|| "Plugin operation".into()),
                 self.plugin_work.status.clone(),
-                None,
+                self.plugin_work.fraction(),
             ))
         } else {
             None
@@ -1223,8 +1284,8 @@ impl Workspace {
                 ui.set_width(rect.width());
                 ui.spacing_mut().item_spacing.y = 3.;
                 let text = match progress {
-                    Some(p) => format!("{title} — {detail} · {:.0}%", p * 100.),
-                    None => format!("{title} — {detail}"),
+                    Some(p) => format!("{title} - {detail} · {:.0}%", p * 100.),
+                    None => format!("{title} - {detail}"),
                 };
                 ui.add(
                     Label::new(
@@ -1269,28 +1330,98 @@ impl Workspace {
             let status = if self.page == Page::Downloads {
                 "No active downloads".into()
             } else if self.page == Page::Library {
-                self.library.footer.clone()
+                self.library_footer_status().to_owned()
+            } else if self.page == Page::Engines {
+                if let Some(error) = &self.error {
+                    error.clone()
+                } else if self.pending.is_some() {
+                    self.status.clone()
+                } else if self.snapshot.verified() {
+                    format!(
+                        "Verified against Epic • {} catalog branches • {} account-visible builds • hotfix tracking active",
+                        self.snapshot.catalog_count,
+                        self.snapshot.releases.len()
+                    )
+                } else {
+                    "Sign in with Epic to verify hotfixes and account-visible builds.".into()
+                }
             } else {
                 self.status.clone()
             };
-            c.text(
-                ui,
-                297.,
-                c.height - 26.,
-                &status,
-                14.,
-                false,
-                self.theme.muted,
-                Align2::LEFT_CENTER,
-            );
+            if self.page == Page::Library {
+                if !status.is_empty() {
+                    ui.put(
+                        c.rect([271., c.height - 37., 22., 22.]),
+                        egui::Spinner::new()
+                            .size(22. * c.scale())
+                            .color(color(self.theme.text)),
+                    );
+                    let storage_width = ui
+                        .painter()
+                        .layout_no_wrap(
+                            storage.clone(),
+                            FontId::proportional(14. * c.scale()),
+                            color(self.theme.muted),
+                        )
+                        .size()
+                        .x;
+                    let left = c.point(305., c.height - 40.);
+                    let right = c.point(c.width - 31., c.height - 12.);
+                    let rect = Rect::from_min_max(
+                        left,
+                        pos2((right.x - storage_width - 24.).max(left.x + 1.), right.y),
+                    );
+                    ui.scope_builder(
+                        UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
+                            ui.add(
+                                Label::new(
+                                    RichText::new(&status)
+                                        .size(14. * c.scale())
+                                        .color(color(self.theme.text)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&status);
+                        },
+                    );
+                }
+            } else {
+                let storage_width = ui
+                    .painter()
+                    .layout_no_wrap(
+                        storage.clone(),
+                        FontId::proportional(14. * c.scale()),
+                        color(self.theme.muted),
+                    )
+                    .size()
+                    .x;
+                let left = c.point(297., c.height - 40.);
+                let right = c.point(c.width - 31., c.height - 12.);
+                let rect = Rect::from_min_max(
+                    left,
+                    pos2((right.x - storage_width - 24.).max(left.x + 1.), right.y),
+                );
+                ui.scope_builder(
+                    UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                    |ui| {
+                        ui.add(
+                            Label::new(
+                                RichText::new(&status)
+                                    .size(14. * c.scale())
+                                    .color(color(self.theme.muted)),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&status);
+                    },
+                );
+            }
         }
-        let storage = if self.demo {
-            "Storage 248 GB available".into()
-        } else {
-            self.free
-                .map(|n| format!("Storage {} GB available", n / 1_073_741_824))
-                .unwrap_or_else(|| "Storage unavailable".into())
-        };
         c.text(
             ui,
             c.width - 31.,
@@ -1323,10 +1454,13 @@ impl Workspace {
             }
         }
     }
-    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, _ctx: &Context) {
+    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, _ctx: &Context) -> f32 {
         let short = c.height < 800.;
+        let offset = PageHeaderLayout::new(c.width).divider_y
+            - PAGE_HEADER_DIVIDER_Y
+            - if short { 16. } else { 0. };
         let local = Canvas {
-            origin: c.origin - vec2(0., if short { 50. } else { 0. }),
+            origin: c.origin + vec2(0., offset),
             width: c.width,
             height: c.height,
             sx: 1.,
@@ -1334,7 +1468,7 @@ impl Workspace {
             theme: c.theme.clone(),
         };
         let c = &local;
-        let divider = if short { 344. } else { 356. };
+        let divider = ENGINE_CARDS_TOP + ENGINE_CARD_HEIGHT + if short { 12. } else { 24. };
         c.line(
             ui,
             [271., divider],
@@ -1363,7 +1497,7 @@ impl Workspace {
         ) {
             self.prefs.pending_engines.push(String::new());
             self.engine_page = (self.engines.len() + self.prefs.pending_engines.len() - 1)
-                / card_columns(c.width - 297., 301., 12.);
+                / card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
             self.persist();
         }
         if self.engines.is_empty() && self.prefs.pending_engines.is_empty() {
@@ -1398,7 +1532,7 @@ impl Workspace {
                 self.add_engine();
             }
         }
-        let columns = card_columns(c.width - 297., 301., 12.);
+        let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
         let pages = (self.engines.len() + self.prefs.pending_engines.len())
             .div_ceil(columns)
             .max(1);
@@ -1426,7 +1560,12 @@ impl Workspace {
                     ui,
                     c,
                     draft,
-                    [271. + slot as f32 * 313., 170., 301., 162.],
+                    [
+                        271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
+                        ENGINE_CARDS_TOP,
+                        ENGINE_CARD_WIDTH,
+                        ENGINE_CARD_HEIGHT,
+                    ],
                 );
                 continue;
             }
@@ -1434,15 +1573,20 @@ impl Workspace {
                 ui,
                 c,
                 i,
-                [271. + slot as f32 * 313., 170., 301., 162.],
-                true,
+                [
+                    271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
+                    ENGINE_CARDS_TOP,
+                    ENGINE_CARD_WIDTH,
+                    ENGINE_CARD_HEIGHT,
+                ],
             );
         }
+        divider + offset
     }
     fn project_toolbar(&mut self, ui: &mut Ui, c: &Canvas, right: f32, top: f32, compact: bool) {
-        let search_w = if compact { 180. } else { 258. };
+        let search_w = if compact { 145. } else { 258. };
         let filter_w = if compact { 110. } else { 130. };
-        let sort_w = if compact { 135. } else { 152. };
+        let sort_w = 170.;
         let list = right - 32.;
         let grid = list - 40.;
         let sort = grid - 8. - sort_w;
@@ -1517,6 +1661,7 @@ impl Workspace {
             ]),
             TextEdit::singleline(&mut self.search)
                 .id_salt(("project-search", compact))
+                .vertical_align(Align::Center)
                 .hint_text("Search projects...")
                 .font(FontId::proportional(14. * c.scale()))
                 .frame(false),
@@ -1552,99 +1697,79 @@ impl Workspace {
                 self.project_scroll = 0.;
             }
         }
-        let rect = [filter, top, filter_w, 32.];
-        let response = ui
-            .interact(
-                c.rect(rect),
-                Id::new(("project-version-filter", compact)),
-                Sense::click(),
-            )
-            .on_hover_cursor(CursorIcon::PointingHand);
-        c.boxed(
-            ui,
-            rect,
-            if response.hovered() {
-                SIDEBAR_HIGHLIGHT
-            } else {
-                self.theme.card
+        ui.scope_builder(
+            UiBuilder::new().max_rect(c.rect([filter, top, filter_w, 32.])),
+            |ui| {
+                ui.style_mut().override_font_id = Some(FontId::proportional(14. * c.scale()));
+                ui.spacing_mut().button_padding = vec2(10., 5.) * c.scale();
+                ui.spacing_mut().interact_size.y = 32. * c.scale();
+                AppComboBox::new(&self.theme, ("project-version-filter", compact))
+                    .width(filter_w * c.sx)
+                    .selected_text(if self.filter.trim().is_empty() {
+                        "Unknown engine"
+                    } else {
+                        &self.filter
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(
+                                &mut self.filter,
+                                "All versions".into(),
+                                "All versions",
+                            )
+                            .clicked()
+                        {
+                            self.project_scroll = 0.;
+                        }
+                        let mut versions: Vec<_> = self
+                            .projects
+                            .iter()
+                            .filter(|p| self.project_visible(&p.path))
+                            .map(|p| p.engine.clone())
+                            .collect();
+                        versions.sort();
+                        versions.dedup();
+                        for version in versions {
+                            let label = if version.trim().is_empty() {
+                                "Unknown engine"
+                            } else {
+                                &version
+                            };
+                            if ui
+                                .selectable_value(&mut self.filter, version.clone(), label)
+                                .clicked()
+                            {
+                                self.project_scroll = 0.;
+                            }
+                        }
+                    });
             },
-            self.theme.border,
-            BUTTON_RADIUS,
-            1.,
         );
-        c.text(
-            ui,
-            filter + 11.,
-            top + 16.,
-            &self.filter,
-            14.,
-            false,
-            if response.hovered() {
-                SIDEBAR_ON_HIGHLIGHT
-            } else {
-                self.theme.text
+        ui.scope_builder(
+            UiBuilder::new().max_rect(c.rect([sort, top, sort_w, 32.])),
+            |ui| {
+                ui.style_mut().override_font_id = Some(FontId::proportional(14. * c.scale()));
+                ui.spacing_mut().button_padding = vec2(10., 5.) * c.scale();
+                ui.spacing_mut().interact_size.y = 32. * c.scale();
+                AppComboBox::new(&self.theme, ("project-sort", compact))
+                    .width(sort_w * c.sx)
+                    .selected_text(self.project_sort.label())
+                    .show_ui(ui, |ui| {
+                        for sort in [
+                            ProjectSort::RecentlyOpened,
+                            ProjectSort::NameAscending,
+                            ProjectSort::NameDescending,
+                        ] {
+                            if ui
+                                .selectable_value(&mut self.project_sort, sort, sort.label())
+                                .changed()
+                            {
+                                self.project_scroll = 0.;
+                            }
+                        }
+                    });
             },
-            Align2::LEFT_CENTER,
         );
-        c.icon(
-            ui,
-            Icon::Down,
-            filter + filter_w - 19.,
-            top + 12.,
-            9.,
-            if response.hovered() {
-                SIDEBAR_ON_HIGHLIGHT
-            } else {
-                self.theme.muted
-            },
-        );
-        Popup::menu(&response)
-            .frame(menu_frame(&self.theme))
-            .show(|ui| {
-                style_menu(ui, &self.theme);
-                if ui
-                    .selectable_value(&mut self.filter, "All versions".into(), "All versions")
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.project_scroll = 0.;
-                    ui.close();
-                }
-                let mut versions: Vec<_> = self
-                    .projects
-                    .iter()
-                    .filter(|p| self.project_visible(&p.path))
-                    .map(|p| p.engine.clone())
-                    .collect();
-                versions.sort();
-                versions.dedup();
-                for version in versions {
-                    if ui
-                        .selectable_value(&mut self.filter, version.clone(), version)
-                        .clone()
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        self.project_scroll = 0.;
-                        ui.close();
-                    }
-                }
-            });
-        if c.button(
-            ui,
-            ("project-sort", compact),
-            button_slot([sort, top, sort_w, 32.]),
-            if self.sort_name {
-                "Name  ↓"
-            } else {
-                "Recently opened"
-            },
-            None,
-            false,
-        ) {
-            self.sort_name = !self.sort_name;
-        }
         if c.icon_button(
             ui,
             ("project-grid", compact),
@@ -1664,15 +1789,26 @@ impl Workspace {
             self.list_view = true;
         }
     }
-    fn project_section(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context, y: f32) {
-        let wrap = c.width < 1320.;
-        let extra = if wrap { 44. } else { 0. };
+    fn project_section(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context, divider_y: f32) {
+        let y = divider_y + FILTER_DIVIDER_GAP;
+        let wrap = PageHeaderLayout::new(c.width).wrapped;
+        let extra = if wrap {
+            FILTER_ROW_HEIGHT + FILTER_ROW_GAP
+        } else {
+            0.
+        };
         let bottom = c.height - 50.;
-        let columns = card_columns(c.width - 315., PROJECT_CARD_WIDTH, PROJECT_CARD_GAP);
+        let categories_y = y + FILTER_ROW_HEIGHT + FILTER_ROW_GAP + extra;
+        let content_top = categories_y + FILTER_ROW_HEIGHT + FILTER_ROW_GAP;
+        let track_x = c.width - 26. - scrollbar::MARGIN - scrollbar::WIDTH;
+        let grid_width = track_x - scrollbar::GRID_MARGIN - 271.;
+        let (columns, card_width) =
+            card_grid_metrics(grid_width, PROJECT_CARD_WIDTH, PROJECT_CARD_GAP);
+        let card_height = card_width - 2. + 64.;
         c.text(
             ui,
             271.,
-            y + 38.,
+            y + FILTER_ROW_HEIGHT / 2.,
             &format!(
                 "Projects ({})",
                 self.projects
@@ -1685,8 +1821,14 @@ impl Workspace {
             self.theme.text,
             Align2::LEFT_CENTER,
         );
-        self.project_toolbar(ui, c, c.width - 26., y + 22. + extra, wrap);
-        self.category_tabs(ui, c, y + 62. + extra);
+        self.project_toolbar(
+            ui,
+            c,
+            c.width - 26.,
+            y + extra + (FILTER_ROW_HEIGHT - 32.) / 2.,
+            wrap,
+        );
+        self.category_tabs(ui, c, categories_y);
         let mut indices: Vec<_> = (0..self.projects.len())
             .filter(|i| {
                 let p = &self.projects[*i];
@@ -1704,16 +1846,23 @@ impl Workspace {
                     && p.name.to_lowercase().contains(&self.search.to_lowercase())
             })
             .collect();
-        if self.sort_name {
-            indices.sort_by_key(|i| self.projects[*i].name.to_lowercase());
-        } else if !self.demo {
-            indices.sort_by_key(|i| std::cmp::Reverse(self.projects[*i].last_opened));
+        match self.project_sort {
+            ProjectSort::NameAscending => {
+                indices.sort_by_key(|i| self.projects[*i].name.to_lowercase());
+            }
+            ProjectSort::NameDescending => {
+                indices.sort_by_key(|i| std::cmp::Reverse(self.projects[*i].name.to_lowercase()));
+            }
+            ProjectSort::RecentlyOpened if !self.demo => {
+                indices.sort_by_key(|i| std::cmp::Reverse(self.projects[*i].last_opened));
+            }
+            ProjectSort::RecentlyOpened => {}
         }
         let content = c.rect([
             271.,
-            y + 98. + extra,
-            c.width - 312.,
-            (bottom - y - 98. - extra).max(1.),
+            content_top,
+            grid_width,
+            (bottom - content_top).max(1.),
         ]);
         if indices.is_empty() {
             c.text(
@@ -1742,13 +1891,17 @@ impl Workspace {
             );
             return;
         }
-        let row_h = if self.list_view { 86. } else { 202. };
+        let row_h = if self.list_view {
+            86.
+        } else {
+            card_height + PROJECT_CARD_GAP
+        };
         let rows = if self.list_view {
             indices.len()
         } else {
             indices.len().div_ceil(columns)
         };
-        let max_scroll = (rows as f32 * row_h - (bottom - y - 98. - extra).max(1.)).max(0.);
+        let max_scroll = (rows as f32 * row_h - (bottom - content_top).max(1.)).max(0.);
         if ui.rect_contains_pointer(content) {
             self.project_scroll = (self.project_scroll
                 - ui.input(|i| i.smooth_scroll_delta.y) / c.sy)
@@ -1757,12 +1910,12 @@ impl Workspace {
         self.project_scroll = self.project_scroll.min(max_scroll);
         if max_scroll > 0. {
             let track = c.rect([
-                c.width - 36.,
-                y + 98. + extra,
+                track_x,
+                content_top,
                 scrollbar::WIDTH,
-                (bottom - y - 98. - extra).max(1.),
+                (bottom - content_top).max(1.),
             ]);
-            let visible = (bottom - y - 98. - extra).max(1.);
+            let visible = (bottom - content_top).max(1.);
             let thumb_height =
                 scrollbar::thumb_length(track.height(), visible, rows as f32 * row_h);
             let travel = (track.height() - thumb_height).max(1.);
@@ -1820,15 +1973,15 @@ impl Workspace {
             let (x, cy) = if self.list_view {
                 (
                     271.,
-                    y + 100. + extra + position as f32 * row_h - self.project_scroll,
+                    content_top + 2. + position as f32 * row_h - self.project_scroll,
                 )
             } else {
                 (
-                    271. + (position % columns) as f32 * (PROJECT_CARD_WIDTH + PROJECT_CARD_GAP),
-                    y + 100. + extra + (position / columns) as f32 * row_h - self.project_scroll,
+                    271. + (position % columns) as f32 * (card_width + PROJECT_CARD_GAP),
+                    content_top + 2. + (position / columns) as f32 * row_h - self.project_scroll,
                 )
             };
-            if cy + row_h < y + 98. + extra || cy > bottom {
+            if cy + row_h < content_top || cy > bottom {
                 continue;
             }
             if self.list_view {
@@ -1869,11 +2022,14 @@ impl Workspace {
                     } else {
                         (1., size.x / size.y)
                     };
-                    let uv = Rect::from_min_max(
-                        pos2((1. - uw) / 2., (1. - uh) / 2.),
-                        pos2((1. + uw) / 2., (1. + uh) / 2.),
+                    let uv = Rect::from_min_max(pos2((1. - uw) / 2., 0.), pos2((1. + uw) / 2., uh));
+                    paint_thumbnail(
+                        &child,
+                        tex,
+                        image,
+                        uv,
+                        CornerRadius::same((4. * c.scale()).round() as u8),
                     );
-                    child.painter().image(tex.id(), image, uv, Color32::WHITE);
                 } else {
                     c.fill(
                         &child,
@@ -1928,7 +2084,7 @@ impl Workspace {
                 }
                 continue;
             }
-            self.project_card(&mut child, c, index, [x, cy, PROJECT_CARD_WIDTH, 188.]);
+            self.project_card(&mut child, c, index, [x, cy, card_width, card_height]);
         }
         let _ = ctx;
     }
@@ -1958,31 +2114,6 @@ impl Workspace {
         ) {
             self.check(ctx.clone());
         }
-        let message = if let Some(e) = &self.error {
-            e.clone()
-        } else if self.snapshot.verified() {
-            format!(
-                "Verified against Epic • {} catalog branches • {} account-visible builds",
-                self.snapshot.catalog_count,
-                self.snapshot.releases.len()
-            )
-        } else {
-            "Sign in with Epic to verify hotfixes and account-visible builds.".into()
-        };
-        c.text(
-            ui,
-            271.,
-            if c.width < 1140. { 230. } else { 190. },
-            &message,
-            15.,
-            false,
-            if self.error.is_some() {
-                self.theme.warning
-            } else {
-                self.theme.muted
-            },
-            Align2::LEFT_CENTER,
-        );
         if c.button(
             ui,
             "locate-engine",
@@ -1993,10 +2124,11 @@ impl Workspace {
         ) {
             self.add_engine();
         }
+        let header_y = actions_y + 56.;
         c.text(
             ui,
             281.,
-            283.,
+            header_y,
             "VERSION",
             12.,
             true,
@@ -2006,7 +2138,7 @@ impl Workspace {
         c.text(
             ui,
             480.,
-            283.,
+            header_y,
             "BUILD / HOTFIX",
             12.,
             true,
@@ -2016,17 +2148,26 @@ impl Workspace {
         c.text(
             ui,
             c.width - 340.,
-            283.,
+            header_y,
             "STATUS",
             12.,
             true,
             self.theme.subtle,
             Align2::LEFT_CENTER,
         );
-        let area = c.rect([271., 307., c.width - 318., (c.height - 384.).max(100.)]);
+        let area = c.rect([
+            271.,
+            header_y + 24.,
+            c.width - 318.,
+            (c.height - header_y - 101.).max(100.),
+        ]);
         ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{AppScrollArea::vertical(&self.theme).id_salt("release-scroll").show(ui,|ui|{
             for r in self.snapshot.releases.clone(){
-                let (rect,_)=ui.allocate_exact_size(vec2(area.width()-15.,65.*c.sy),Sense::hover());let p=ui.painter().clone();p.rect_filled(rect,4.,color(self.theme.card));
+                let (rect,_)=ui.allocate_exact_size(vec2(area.width()-15.,65.*c.sy),Sense::hover());
+                let p=ui.painter().clone();
+                if ui.rect_contains_pointer(rect) {
+                    p.rect_filled(rect, 0., table_row_hover_color(&self.theme));
+                }
                 let font=FontId::proportional(15.*c.scale());let v=r.version.as_ref().map(|v|v.to_string()).unwrap_or_else(||r.app.trim_start_matches("UE_").to_owned());
                 p.text(rect.left_center()+vec2(10.*c.sx,0.),Align2::LEFT_CENTER,&v,FontId::new(19.*c.scale(),FontFamily::Name("semibold".into())),color(self.theme.text));
                 let build = r.build.as_deref().unwrap_or("Sign in to resolve hotfix version");
@@ -2036,7 +2177,12 @@ impl Workspace {
                 let installed=self.engines.iter().find(|e|EngineVersion::parse(&e.version).zip(EngineVersion::parse(&r.app)).is_some_and(|(a,b)|a.major==b.major&&a.minor==b.minor));
                 let label=match installed{Some(e)=>if r.version.as_ref()>EngineVersion::parse(&e.version).as_ref(){"Update available"}else{"Installed"},None=>if r.build.is_some(){"Available"}else{"Catalog only"}};
                 p.text(pos2(c.point(c.width - 340., 0.).x, rect.center().y),Align2::LEFT_CENTER,label,font,color(if label=="Update available"{self.theme.warning}else if label=="Installed"{self.theme.success}else{self.theme.muted}));
-                let b=Rect::from_min_size(rect.right_top()-vec2(142.*c.sx,-13.*c.sy),vec2(130.*c.sx,36.*c.sy));if ui.put(b,egui::Button::new("Install engine")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.choose_install(r);}
+                let b=Rect::from_min_size(pos2(rect.right()-142.*c.sx, rect.center().y-COMPACT_BUTTON_HEIGHT*c.sy/2.),vec2(130.*c.sx,COMPACT_BUTTON_HEIGHT*c.sy));
+                let already_installed = transfers::release_is_installed(&r, &self.engines);
+                let response = ui.scope_builder(UiBuilder::new().max_rect(b), |ui| {
+                    ui.add_enabled(!already_installed, buttons::secondary_button(if already_installed { "Installed" } else { "Install engine" }).min_size(b.size()))
+                }).inner;
+                if response.on_hover_cursor(CursorIcon::PointingHand).clicked() { self.choose_install(r, ctx.clone()); }
                 ui.add_space(5.*c.sy);
             }
             if self.snapshot.releases.is_empty(){ui.label("No successful release check yet. Connect your Epic account to get started.");}
@@ -2117,7 +2263,7 @@ impl Workspace {
                     ui.label("Parent folder");
                     dialog::folder(ui, &mut self.new_path);
                     ui.label("Engine version");
-                    ComboBox::from_id_salt("new-engine")
+                    AppComboBox::new(&self.theme, "new-engine")
                         .width(ui.available_width())
                         .selected_text(
                             self.engines
@@ -2240,6 +2386,27 @@ impl eframe::App for Workspace {
     }
 }
 
+fn thumbnail_top_corners(radius: f32) -> CornerRadius {
+    CornerRadius {
+        nw: radius.round() as u8,
+        ne: radius.round() as u8,
+        sw: 0,
+        se: 0,
+    }
+}
+
+fn paint_thumbnail(ui: &Ui, texture: &TextureHandle, rect: Rect, uv: Rect, corners: CornerRadius) {
+    ui.painter().add(
+        egui::epaint::RectShape::filled(rect, corners, Color32::WHITE)
+            .with_texture(texture.id(), uv),
+    );
+}
+
+const ENGINE_CARD_WIDTH: f32 = 340.;
+const ENGINE_CARD_HEIGHT: f32 = 140.;
+const ENGINE_CARD_GAP: f32 = 12.;
+const ENGINE_CARDS_TOP: f32 = 170.;
+
 const SIDEBAR_HIGHLIGHT: [u8; 3] = [234, 189, 93];
 fn idle_frame_interval(backgrounded: bool, busy: bool) -> Duration {
     match (backgrounded, busy) {
@@ -2339,14 +2506,16 @@ impl Canvas {
         primary: bool,
     ) -> bool {
         let mut r = button_bounds(r);
-        let font = FontId::new(
-            if icon.is_some() { 15. } else { 14. } * self.scale(),
-            if primary {
-                FontFamily::Name("semibold".into())
-            } else {
-                FontFamily::Proportional
-            },
-        );
+        r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
+        r[3] = COMPACT_BUTTON_HEIGHT;
+        let font = if primary {
+            buttons::primary_font(self.scale())
+        } else {
+            FontId::new(
+                COMPACT_BUTTON_FONT_SIZE * self.scale(),
+                FontFamily::Proportional,
+            )
+        };
         let text_width = ui
             .painter()
             .layout_no_wrap(label.to_owned(), font, color(self.theme.text))
@@ -2359,14 +2528,14 @@ impl Canvas {
             } else {
                 0.
             }
-            + 28.;
+            + 2. * buttons::HORIZONTAL_PADDING;
         let extra = (needed - r[2]).max(0.);
         r[0] -= extra / 2.;
         r[2] += extra;
         let response = ui.interact(self.rect(r), Id::new(id), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
         let bg = if primary {
-            if response.hovered() {
+            if response.hovered() || response.is_pointer_button_down_on() {
                 self.theme.accent_hover
             } else {
                 self.theme.accent
@@ -2388,7 +2557,7 @@ impl Canvas {
                 self.theme.border
             },
             BUTTON_RADIUS,
-            if response.hovered() || response.is_pointer_button_down_on() {
+            if primary || response.hovered() || response.is_pointer_button_down_on() {
                 0.
             } else {
                 1.
@@ -2402,14 +2571,14 @@ impl Canvas {
             self.theme.text
         };
         if let Some(icon) = icon {
-            let font = FontId::new(
-                15. * self.scale(),
-                if primary {
-                    FontFamily::Name("semibold".into())
-                } else {
-                    FontFamily::Proportional
-                },
-            );
+            let font = if primary {
+                buttons::primary_font(self.scale())
+            } else {
+                FontId::new(
+                    COMPACT_BUTTON_FONT_SIZE * self.scale(),
+                    FontFamily::Proportional,
+                )
+            };
             let text_width = ui
                 .painter()
                 .layout_no_wrap(label.to_owned(), font, color(fg))
@@ -2430,9 +2599,9 @@ impl Canvas {
             self.text(
                 ui,
                 left + icon_size + gap,
-                r[1] + r[3] / 2. - 1.5,
+                r[1] + r[3] / 2.,
                 label,
-                15.,
+                COMPACT_BUTTON_FONT_SIZE,
                 primary,
                 fg,
                 Align2::LEFT_CENTER,
@@ -2441,9 +2610,9 @@ impl Canvas {
             self.text(
                 ui,
                 r[0] + r[2] / 2.,
-                r[1] + r[3] / 2. - 1.5,
+                r[1] + r[3] / 2.,
                 label,
-                14.,
+                COMPACT_BUTTON_FONT_SIZE,
                 primary,
                 fg,
                 Align2::CENTER_CENTER,
@@ -2459,13 +2628,21 @@ impl Canvas {
         icon: Icon,
         primary: bool,
     ) -> bool {
-        let r = button_bounds(r);
+        let mut r = button_bounds(r);
+        r[0] += (r[2] - COMPACT_BUTTON_HEIGHT) / 2.;
+        r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
+        r[2] = COMPACT_BUTTON_HEIGHT;
+        r[3] = COMPACT_BUTTON_HEIGHT;
         let res = ui.interact(self.rect(r), Id::new(id), Sense::click());
         self.boxed(
             ui,
             r,
             if primary {
-                self.theme.accent
+                if res.hovered() || res.is_pointer_button_down_on() {
+                    self.theme.accent_hover
+                } else {
+                    self.theme.accent
+                }
             } else if res.hovered() || res.is_pointer_button_down_on() {
                 SIDEBAR_HIGHLIGHT
             } else {
@@ -2479,12 +2656,17 @@ impl Canvas {
                 1.
             },
         );
+        let icon_size = if matches!(icon, Icon::Grid | Icon::List) {
+            VIEW_MODE_ICON_SIZE
+        } else {
+            18. * BUTTON_SCALE
+        };
         self.icon(
             ui,
             icon,
-            r[0] + r[2] / 2. - 9. * BUTTON_SCALE,
-            r[1] + r[3] / 2. - 9. * BUTTON_SCALE,
-            18. * BUTTON_SCALE,
+            r[0] + (r[2] - icon_size) / 2.,
+            r[1] + (r[3] - icon_size) / 2.,
+            icon_size,
             if primary {
                 self.theme.on_accent
             } else if res.hovered() || res.is_pointer_button_down_on() {
@@ -2496,13 +2678,19 @@ impl Canvas {
         res.on_hover_cursor(CursorIcon::PointingHand).clicked()
     }
     fn pill(&self, ui: &mut Ui, id: &str, r: [f32; 4], text: &str, active: bool) -> bool {
-        let r = button_bounds(r);
+        let mut r = button_bounds(r);
+        r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
+        r[3] = COMPACT_BUTTON_HEIGHT;
         let res = ui.interact(self.rect(r), Id::new(id), Sense::click());
         self.boxed(
             ui,
             r,
             if active {
-                self.theme.accent
+                if res.hovered() || res.is_pointer_button_down_on() {
+                    self.theme.accent_hover
+                } else {
+                    self.theme.accent
+                }
             } else {
                 self.theme.card
             },
@@ -2519,8 +2707,8 @@ impl Canvas {
             r[0] + r[2] / 2.,
             r[1] + r[3] / 2.,
             text,
-            13.,
-            active,
+            COMPACT_BUTTON_FONT_SIZE,
+            true,
             if active {
                 self.theme.on_accent
             } else {
@@ -2852,17 +3040,71 @@ impl Canvas {
     }
 }
 
-// Card geometry stays in logical pixels; window size changes only the column count.
-const PROJECT_CARD_WIDTH: f32 = 240.8;
+// Preferred card widths determine column count; each row shares the remaining width.
+const PAGE_HEADER_DIVIDER_Y: f32 = 102.;
+const FILTER_DIVIDER_GAP: f32 = 6.;
+const FILTER_ROW_HEIGHT: f32 = 34.;
+const FILTER_ROW_GAP: f32 = 12.;
+struct PageHeaderLayout {
+    wrapped: bool,
+    actions_y: f32,
+    divider_y: f32,
+}
+impl PageHeaderLayout {
+    fn new(width: f32) -> Self {
+        let wrapped = width < 1320.;
+        Self {
+            wrapped,
+            actions_y: if wrapped { 108. } else { 38. },
+            divider_y: PAGE_HEADER_DIVIDER_Y + if wrapped { 52. } else { 0. },
+        }
+    }
+    fn filters_y(&self) -> f32 {
+        self.divider_y + FILTER_DIVIDER_GAP
+    }
+}
+const PROJECT_CARD_WIDTH: f32 = 200.;
+const LIBRARY_CARD_WIDTH: f32 = 240.8;
 const PROJECT_CARD_GAP: f32 = 14.;
-const PROJECT_THUMBNAIL_HEIGHT: f32 = 124.;
+const LIBRARY_THUMBNAIL_ASPECT: f32 = (LIBRARY_CARD_WIDTH - 2.) / 124.;
+fn card_grid_metrics(available: f32, preferred: f32, gap: f32) -> (usize, f32) {
+    let available = available.max(1.);
+    let columns = card_columns(available, preferred, gap);
+    let width = (available - gap * (columns - 1) as f32) / columns as f32;
+    (columns, width)
+}
 fn card_columns(available: f32, width: f32, gap: f32) -> usize {
     ((available + gap) / (width + gap)).floor().max(1.) as usize
 }
 
 #[cfg(test)]
 mod responsive_tests {
-    use super::card_columns;
+    use super::{
+        LIBRARY_CARD_WIDTH, PROJECT_CARD_GAP, PROJECT_CARD_WIDTH, card_columns, card_grid_metrics,
+    };
+    #[test]
+    fn grids_fill_available_width_without_changing_column_targets() {
+        for available in [1., 689., 1009., 1517., 1537., 1609., 2249.] {
+            for preferred in [PROJECT_CARD_WIDTH, LIBRARY_CARD_WIDTH] {
+                let (columns, width) = card_grid_metrics(available, preferred, PROJECT_CARD_GAP);
+                assert_eq!(
+                    columns,
+                    card_columns(available, preferred, PROJECT_CARD_GAP)
+                );
+                assert!(width > 0.);
+                let right = columns as f32 * width + (columns - 1) as f32 * PROJECT_CARD_GAP;
+                assert!((right - available).abs() < 0.001);
+            }
+        }
+        assert_eq!(
+            card_grid_metrics(1517., PROJECT_CARD_WIDTH, PROJECT_CARD_GAP).0,
+            7
+        );
+        assert_eq!(
+            card_grid_metrics(1517., LIBRARY_CARD_WIDTH, PROJECT_CARD_GAP).0,
+            6
+        );
+    }
     #[test]
     fn cards_reflow_at_exact_width_boundaries() {
         assert_eq!(card_columns(301., 301., 12.), 1);

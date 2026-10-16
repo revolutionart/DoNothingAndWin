@@ -4,8 +4,17 @@ impl Workspace {
         if self.plugin_work.mutating {
             return;
         }
-        self.plugin_work.checked.clear();
-        self.plugin_work.status = "Check for updates for this engine version".into();
+        self.plugin_work.checked = self
+            .plugin_work
+            .checks
+            .get(&self.engines[i].path)
+            .map(|(_, rows)| rows.clone())
+            .unwrap_or_default();
+        self.plugin_work.status = if self.plugin_work.checked.is_empty() {
+            "Check for updates for this engine version".into()
+        } else {
+            engine_workspace::plugins::check_summary(&self.plugin_work.checked)
+        };
         self.plugin_engine = Some(i);
         self.plugin_search.clear();
         self.plugin_updates_only = false;
@@ -14,20 +23,21 @@ impl Workspace {
         } else {
             engine_workspace::plugins::installed(Path::new(&self.engines[i].path))
         };
+        // Never show an old comparison against a newly edited/replaced descriptor.
+        self.plugin_work.checked.retain(|row| {
+            self.plugins.iter().any(|p| {
+                p.descriptor == row.plugin.descriptor
+                    && p.version == row.plugin.version
+                    && p.number == row.plugin.number
+            })
+        });
         if !self.demo {
             self.workspace_cache.invalidate();
             self.plugin_counts
                 .insert(self.engines[i].path.clone(), self.plugins.len());
         }
     }
-    pub(super) fn engine_card(
-        &mut self,
-        ui: &mut Ui,
-        c: &Canvas,
-        i: usize,
-        r: [f32; 4],
-        compact: bool,
-    ) {
+    pub(super) fn engine_card(&mut self, ui: &mut Ui, c: &Canvas, i: usize, r: [f32; 4]) {
         let engine = self.engines[i].clone();
         let [x, y, w, h] = r;
         let selected = if self.prefs.default_engine.is_empty() {
@@ -35,22 +45,28 @@ impl Workspace {
         } else {
             engine.path == self.prefs.default_engine
         };
+        let card_response = ui.interact(
+            c.rect(r),
+            Id::new(("engine-card", &engine.path)),
+            Sense::click(),
+        );
         let t = self.theme.clone();
         c.boxed(
             ui,
             r,
             t.card,
             if selected { t.accent_hover } else { t.border },
-            4.,
+            6.,
             if selected { 1.5 } else { 1. },
         );
-        let tx = x + 20.;
+        let tx = x + 18.;
+        let heading_y = y + 30.;
         c.text(
             ui,
             tx,
-            y + 28.,
+            heading_y,
             "Unreal Engine",
-            if compact { 13. } else { 15. },
+            14.,
             false,
             t.text,
             Align2::LEFT_CENTER,
@@ -58,29 +74,39 @@ impl Workspace {
         let v = EngineVersion::parse(&engine.version)
             .map(|v| v.to_string())
             .unwrap_or(engine.version.clone());
-        c.text(
-            ui,
-            tx,
-            y + 58.,
-            &v,
-            if compact { 26. } else { 29. },
-            true,
-            t.text,
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(
+                "Unreal Engine".into(),
+                FontId::proportional(14. * c.scale()),
+                color(t.text),
+            )
+            .size()
+            .x
+            / c.scale();
+        let version_x = tx + label_width + 18.;
+        let version_right = x + w - if selected { 100. } else { 18. };
+        let version_rect = c.rect([version_x, y + 8., version_right - version_x, 44.]);
+        let version_painter = ui.painter().with_clip_rect(version_rect);
+        version_painter.text(
+            c.point(version_x, heading_y),
             Align2::LEFT_CENTER,
+            &v,
+            FontId::new(28. * c.scale(), FontFamily::Name("semibold".into())),
+            color(t.text),
         );
+        ui.interact(
+            version_rect,
+            Id::new(("engine-version-tip", i)),
+            Sense::hover(),
+        )
+        .on_hover_text(&engine.version);
         if selected {
-            c.boxed(
-                ui,
-                [x + w - 87., y + 14., 71., 29.],
-                t.selection,
-                t.border,
-                4.,
-                1.,
-            );
+            c.fill(ui, [x + w - 86., y + 15., 70., 30.], t.selection, 5.);
             c.text(
                 ui,
                 x + w - 51.,
-                y + 28.,
+                heading_y,
                 "Current",
                 14.,
                 false,
@@ -88,25 +114,44 @@ impl Workspace {
                 Align2::CENTER_CENTER,
             );
         }
-        c.circle(ui, x + 27., y + 100., 6., t.success);
+        let installed = self.workspace_cache.engines.get(&engine.path).copied();
+        let status = if self.demo {
+            "Installed"
+        } else {
+            match installed {
+                Some(true) => "Installed",
+                Some(false) => "Needs repair",
+                None => "Checking…",
+            }
+        };
+        let status_color = if self.demo || installed == Some(true) {
+            t.success
+        } else if installed == Some(false) {
+            t.warning
+        } else {
+            t.muted
+        };
+        c.circle(ui, tx + 7., y + 69., 7., status_color);
         c.text(
             ui,
-            x + 47.,
-            y + 100.,
-            if self.demo {
-                "Installed"
-            } else {
-                match self.workspace_cache.engines.get(&engine.path) {
-                    Some(true) => "Installed",
-                    Some(false) => "Needs repair",
-                    None => "Checking…",
-                }
-            },
-            if compact { 12. } else { 15. },
+            tx + 27.,
+            y + 69.,
+            status,
+            14.,
             false,
             t.muted,
             Align2::LEFT_CENTER,
         );
+        let status_width = ui
+            .painter()
+            .layout_no_wrap(
+                status.into(),
+                FontId::proportional(14. * c.scale()),
+                color(t.muted),
+            )
+            .size()
+            .x
+            / c.scale();
         let count = if self.demo {
             [8, 5, 3][i % 3].to_string()
         } else {
@@ -117,43 +162,27 @@ impl Workspace {
         };
         c.text(
             ui,
-            x + if compact { 108. } else { 122. },
-            y + 100.,
+            tx + 27. + status_width + 16.,
+            y + 69.,
             &format!("|   {count} plugins"),
-            if compact { 12. } else { 15. },
+            14.,
             false,
             t.muted,
             Align2::LEFT_CENTER,
         );
-        if self.demo && i == 0 {
-            let bx = x + if compact { 176. } else { 227. };
-            c.fill(
-                ui,
-                [bx, y + 84., if compact { 77. } else { 100. }, 25.],
-                t.warning,
-                5.,
-            );
-            c.text(
-                ui,
-                bx + if compact { 38. } else { 50. },
-                y + 96.,
-                "2 updates",
-                if compact { 12. } else { 14. },
-                true,
-                t.background,
-                Align2::CENTER_CENTER,
-            );
-        }
-        let link = c.rect([x + 16., y + h - 45., if compact { 137. } else { 175. }, 36.]);
+        let action_y = y + h - 46.;
+        let menu_rect = [x + w - 46., action_y, 30., 32.];
+        let launch_rect = [menu_rect[0] - 92., action_y, 86., 32.];
+        let link = c.rect([tx - 4., action_y, launch_rect[0] - tx - 8., 32.]);
         let response = ui
             .interact(link, Id::new(("manage", i)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         c.text(
             ui,
             x + 20.,
-            y + h - 27.,
+            action_y + 16.,
             "Manage plugins  →",
-            if compact { 13. } else { 16. },
+            14.,
             false,
             if response.hovered() {
                 [255, 255, 255]
@@ -170,14 +199,6 @@ impl Workspace {
             self.show_plugins(i);
             self.check_plugins(ui.ctx().clone());
         }
-        let menu_rect = button_bounds([x + w - 48., y + h - 50., 32., 38.]);
-        let launch_width = if compact { 92. } else { 122. } * BUTTON_SCALE;
-        let launch_rect = [
-            menu_rect[0] - 8. - launch_width,
-            menu_rect[1],
-            launch_width,
-            menu_rect[3],
-        ];
         if c.button(
             ui,
             ("launch", i),
@@ -210,9 +231,9 @@ impl Workspace {
         c.icon(
             ui,
             Icon::Dots,
-            menu_rect[0] + 7. * BUTTON_SCALE,
-            menu_rect[1] + 10. * BUTTON_SCALE,
-            18. * BUTTON_SCALE,
+            menu_rect[0] + 7.,
+            menu_rect[1] + 8.,
+            16.,
             if response.hovered() {
                 SIDEBAR_ON_HIGHLIGHT
             } else {
@@ -221,90 +242,93 @@ impl Workspace {
         );
         egui::Popup::menu(&response)
             .frame(menu_frame(&self.theme))
-            .show(|ui| {
-                style_menu(ui, &self.theme);
-                ui.set_min_width(174.);
-                if ui
-                    .button("Options")
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.engine_options = Some(engine.clone());
-                    ui.close();
-                }
-                if ui
-                    .button("Set Current")
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.prefs.default_engine = engine.path.clone();
-                    self.launch_path = Some(engine.path.clone());
-                    self.persist();
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(!self.demo, Button::new("Create Shortcut"))
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    match platform::create_engine_shortcut(&engine) {
-                        Ok(path) => {
-                            self.notify(format!("Desktop shortcut created: {}", path.display()))
-                        }
-                        Err(e) => self.notify(e),
-                    }
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(!self.demo, Button::new("Show in Folder"))
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    if let Err(e) = platform::open_external(&engine.path) {
-                        self.notify(e);
-                    }
-                    ui.close();
-                }
-                if ui
-                    .button("Manage Plugins")
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.show_plugins(i);
-                    self.check_plugins(ui.ctx().clone());
-                    ui.close();
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        !self.demo && !self.transfer.busy() && !self.plugin_work.mutating,
-                        Button::new("Remove"),
-                    )
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.engine_remove = Some(engine.clone());
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(
-                        !self.demo && !self.transfer.busy() && !self.plugin_work.mutating,
-                        Button::new("Verify"),
-                    )
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.start_maintenance(engine.clone(), false, ui.ctx().clone());
-                    ui.close();
-                }
-            });
+            .show(|ui| self.engine_actions_menu(ui, i));
+        egui::Popup::context_menu(&card_response)
+            .frame(menu_frame(&self.theme))
+            .show(|ui| self.engine_actions_menu(ui, i));
+    }
+    fn engine_actions_menu(&mut self, ui: &mut Ui, i: usize) {
+        let engine = self.engines[i].clone();
+        style_menu(ui, &self.theme);
+        ui.set_min_width(174.);
+        if ui
+            .add(buttons::secondary_button("Options"))
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.engine_options = Some(engine.clone());
+            ui.close();
+        }
+        if ui
+            .add(buttons::secondary_button("Set Current"))
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.prefs.default_engine = engine.path.clone();
+            self.launch_path = Some(engine.path.clone());
+            self.persist();
+            ui.close();
+        }
+        if ui
+            .add_enabled(!self.demo, buttons::secondary_button("Create Shortcut"))
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            match platform::create_engine_shortcut(&engine) {
+                Ok(path) => self.notify(format!("Desktop shortcut created: {}", path.display())),
+                Err(e) => self.notify(e),
+            }
+            ui.close();
+        }
+        if ui
+            .add_enabled(!self.demo, buttons::secondary_button("Show in Folder"))
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            if let Err(e) = platform::open_external(&engine.path) {
+                self.notify(e);
+            }
+            ui.close();
+        }
+        if ui
+            .add(buttons::secondary_button("Manage Plugins"))
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.show_plugins(i);
+            self.check_plugins(ui.ctx().clone());
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                !self.demo && !self.transfer.busy() && !self.plugin_work.mutating,
+                buttons::secondary_button("Remove"),
+            )
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.engine_remove = Some(engine.clone());
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                !self.demo && !self.transfer.busy() && !self.plugin_work.mutating,
+                buttons::secondary_button("Verify"),
+            )
+            .clone()
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.start_maintenance(engine.clone(), false, ui.ctx().clone());
+            ui.close();
+        }
     }
     pub(super) fn library_page(&mut self, ui: &mut Ui, c: &Canvas) {
         if !self.demo {
@@ -370,7 +394,12 @@ impl Workspace {
             if c.pill(
                 ui,
                 &format!("librarytab{j}"),
-                [x + 17. + j as f32 * 82., y + 52., 76., 29.],
+                button_slot([
+                    x + 17. + j as f32 * 82.,
+                    y + 52.,
+                    76.,
+                    COMPACT_BUTTON_HEIGHT,
+                ]),
                 label,
                 j == 0,
             ) {

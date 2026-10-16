@@ -159,7 +159,39 @@ impl Item {
             .map(|x| x.1)
     }
 }
+type RecentLibrary = (String, std::time::Instant, Vec<Item>);
+static RECENT_LIBRARY: std::sync::OnceLock<std::sync::Mutex<Option<RecentLibrary>>> =
+    std::sync::OnceLock::new();
+static LIBRARY_FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const LIBRARY_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+fn recent_library(account: &str) -> Option<Vec<Item>> {
+    RECENT_LIBRARY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(id, at, _)| id == account && at.elapsed() < LIBRARY_TTL)
+        .map(|(_, _, items)| items.clone())
+}
+pub fn library_cached(session: &Session, force: bool) -> Result<Vec<Item>, String> {
+    if !force {
+        if let Some(items) = recent_library(&session.account_id) {
+            return Ok(items);
+        }
+    }
+    let _fetch = LIBRARY_FETCH.lock().unwrap();
+    if !force {
+        if let Some(items) = recent_library(&session.account_id) {
+            return Ok(items);
+        }
+    }
+    library(session, |_| {})
+}
 pub fn library(session: &Session, progress: impl Fn(usize)) -> Result<Vec<Item>, String> {
+    library_pages(session, |items| progress(items.len()))
+}
+/// Publish each page so a first-time library can be browsed before pagination finishes.
+pub fn library_pages(session: &Session, progress: impl Fn(&[Item])) -> Result<Vec<Item>, String> {
     let epic = Epic::new()?;
     let mut cursor = String::new();
     let mut seen = HashSet::new();
@@ -221,7 +253,7 @@ pub fn library(session: &Session, progress: impl Fn(usize)) -> Result<Vec<Item>,
                 items.insert(item.key(), item);
             }
         }
-        progress(items.len());
+        progress(&items.values().cloned().collect::<Vec<_>>());
         cursor = page["cursors"]["next"].as_str().unwrap_or("").to_owned();
         if cursor.is_empty() {
             break;
@@ -232,6 +264,11 @@ pub fn library(session: &Session, progress: impl Fn(usize)) -> Result<Vec<Item>,
     }
     let mut result: Vec<_> = items.into_values().collect();
     result.sort_by_key(|x| x.title.to_lowercase());
+    *RECENT_LIBRARY.get_or_init(Default::default).lock().unwrap() = Some((
+        session.account_id.clone(),
+        std::time::Instant::now(),
+        result.clone(),
+    ));
     Ok(result)
 }
 fn validate_artifact_id(id: &str) -> Result<(), String> {
@@ -469,6 +506,7 @@ pub fn install(
         progress("Installing verified files...".into());
         if item.plugin() {
             crate::maintenance::ensure_closed(&target)?;
+            crate::plugins::receipt::write(&stage, &manifest, &prefix)?;
             installer::no_links(&destination)?;
             if destination.exists() {
                 return Err("Plugin destination appeared during download".into());
@@ -652,7 +690,7 @@ pub fn create_project(
         || name.len() > 64
         || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err("Use 1–64 letters, digits or underscores for the project folder.".into());
+        return Err("Use 1-64 letters, digits or underscores for the project folder.".into());
     }
     if item
         .compatible(branch)
@@ -820,15 +858,15 @@ pub fn thumbnail_is_cached(url: &str) -> bool {
         .join(cache_key(url))
         .is_file()
 }
-pub fn thumbnail_bytes(url: &str) -> Result<Vec<u8>, String> {
+pub fn thumbnail_image(url: &str) -> Result<image::DynamicImage, String> {
     let path = crate::storage::data_dir()
         .join("library/thumbnails")
         .join(cache_key(url));
     if let Ok(metadata) = fs::metadata(&path) {
         if metadata.len() <= 8 * 1024 * 1024 {
             if let Ok(raw) = fs::read(&path) {
-                if image::load_from_memory(&raw).is_ok() {
-                    return Ok(raw);
+                if let Ok(image) = image::load_from_memory(&raw) {
+                    return Ok(image);
                 }
             }
         }
@@ -837,15 +875,55 @@ pub fn thumbnail_bytes(url: &str) -> Result<Vec<u8>, String> {
     if url.scheme() != "https" {
         return Err("Thumbnail must use HTTPS".into());
     }
-    let raw = installer::fetch(&installer::client()?, url, 8 * 1024 * 1024)?;
-    image::load_from_memory(&raw).map_err(|e| e.to_string())?;
+    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+        std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(installer::client)
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let raw = installer::fetch(client, url, 8 * 1024 * 1024)?;
+    let image = image::load_from_memory(&raw).map_err(|e| e.to_string())?;
     let _ = crate::storage::write_atomic(&path, &raw);
-    Ok(raw)
+    Ok(image)
 }
 
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[test]
+    #[ignore = "Read-only live Fab timing probe; requires a connected Epic account"]
+    fn library_latency_probe() {
+        let session = crate::storage::load_session().expect("Connect Epic first");
+        let start = std::time::Instant::now();
+        let saved = load_library_cache(&session.account_id);
+        println!(
+            "Saved library: {} items in {:?}",
+            saved.len(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let items = library_pages(&session, |page| {
+            println!(
+                "Library page: {} items at {:?}",
+                page.len(),
+                start.elapsed()
+            )
+        })
+        .unwrap();
+        println!("Catalog complete in {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let mut failures = 0;
+        for url in items.iter().take(8).filter_map(Item::thumbnail) {
+            if thumbnail_image(&url).is_err() {
+                failures += 1;
+            }
+        }
+        println!(
+            "First 8 thumbnail reads/decodes (sequential): {:?}; {} failures",
+            start.elapsed(),
+            failures
+        );
+    }
     #[test]
     fn library_cache_is_account_scoped_and_round_trips() {
         let d = tempfile::tempdir().unwrap();
@@ -878,7 +956,7 @@ fn transfer_status(
         prepared as f64 / total as f64 * 100.
     };
     format!(
-        "Downloading file {file} / {files} — {percent:.1}%\n{:.1} / {:.1} MiB prepared • {:.1} MiB downloaded",
+        "Downloading file {file} / {files} - {percent:.1}%\n{:.1} / {:.1} MiB prepared • {:.1} MiB downloaded",
         prepared as f64 / mib,
         total as f64 / mib,
         downloaded as f64 / mib

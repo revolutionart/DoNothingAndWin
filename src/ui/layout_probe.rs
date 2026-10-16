@@ -7,6 +7,10 @@ pub(super) struct LayoutProbe {
     step: usize,
     phase: u8,
     deadline: Instant,
+    activity: bool,
+    engine_activity: bool,
+    plugin_design: bool,
+    page: Option<Page>,
 }
 const CASES: &[(f32, f32, bool)] = &[
     (1000., 680., false),
@@ -32,6 +36,17 @@ impl LayoutProbe {
             step: 0,
             phase: 0,
             deadline: Instant::now(),
+            activity: std::env::args().any(|a| a == "--plugin-activity-preview"),
+            engine_activity: std::env::args().any(|a| a == "--engine-activity-preview"),
+            plugin_design: std::env::args().any(|a| a == "--plugin-design-preview"),
+            page: std::env::args().find_map(|a| match a.as_str() {
+                "--settings-preview" => Some(Page::Settings),
+                "--page-preview=downloads" => Some(Page::Downloads),
+                "--page-preview=library" => Some(Page::Library),
+                "--page-preview=engines" => Some(Page::Engines),
+                "--page-preview=projects" => Some(Page::Projects),
+                _ => None,
+            }),
         })
     }
 }
@@ -40,12 +55,19 @@ impl Workspace {
         let Some(mut probe) = self.layout_probe.take() else {
             return;
         };
-        if probe.step >= CASES.len() {
+        if probe.step >= if probe.page.is_some() { 5 } else { CASES.len() } {
+            self.plugin_work.mutating = false;
+            self.transfer.downloading = false;
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
+            if probe.activity || probe.engine_activity {
+                self.plugin_work.mutating = false;
+                self.plugin_work.progress = None;
+                self.transfer.downloading = false;
+            }
             ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(30., 30.)));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(width, height)));
@@ -53,6 +75,72 @@ impl Workspace {
             self.project_scroll = 0.;
             if plugins && !self.engines.is_empty() {
                 self.show_plugins((self.engines.len() - 1).min(1));
+                if probe.plugin_design {
+                    // Render-only comparison states. No package is fetched or installed.
+                    self.plugin_work.checked = self
+                        .plugins
+                        .iter()
+                        .enumerate()
+                        .map(|(index, plugin)| engine_workspace::plugins::Checked {
+                            plugin: plugin.clone(),
+                            available_version: Some(if index == 0 {
+                                "2.85".into()
+                            } else {
+                                plugin.version.clone()
+                            }),
+                            update: (index == 0).then(|| engine_workspace::plugins::Update {
+                                version: "2.85".into(),
+                                number: 285,
+                                manifest: Default::default(),
+                                bases: vec![],
+                                prefix: Default::default(),
+                            }),
+                            status: if index == 1 {
+                                "Managed by its publisher".into()
+                            } else {
+                                "Up to date".into()
+                            },
+                        })
+                        .collect();
+                    self.plugin_work.status = "Design preview".into();
+                }
+            }
+            if probe.activity {
+                self.plugin_work.preview_activity();
+                if !plugins {
+                    self.page = Page::Downloads;
+                }
+            }
+            if probe.engine_activity && !plugins {
+                self.page = Page::Downloads;
+                self.transfer.activity = Default::default();
+                let now = Instant::now();
+                let mut totals = [0; 3];
+                for i in 0..120 {
+                    totals[0] += 12_500_000 + (i % 9) * 400_000;
+                    totals[1] += if i % 13 == 0 { 6_000_000 } else { 0 };
+                    totals[2] += 22_000_000 + (i % 5) * 800_000;
+                    self.transfer.activity.sample_totals(
+                        "engine",
+                        totals,
+                        now - Duration::from_millis((120 - i) * 500),
+                    );
+                }
+                self.transfer.downloading = true;
+                *self.transfer.progress.lock().unwrap() = engine_workspace::installer::Progress {
+                    phase: "Downloading and verifying chunks".into(),
+                    completed: 760_000_000,
+                    total: 13_910_000_000,
+                    package_bytes: 13_910_000_000,
+                    network: totals[0],
+                    read: totals[1],
+                    written: totals[2],
+                    files_total: 50_000,
+                    ..Default::default()
+                };
+            }
+            if let Some(page) = probe.page {
+                self.page = page;
             }
             probe.phase = 1;
             probe.deadline = Instant::now() + Duration::from_millis(700);
@@ -72,7 +160,19 @@ impl Workspace {
             if let Some(image) = screenshot {
                 let name = format!(
                     "{}-{}x{}",
-                    if plugins { "plugins" } else { "workspace" },
+                    match probe.page {
+                        Some(Page::Settings) => "settings",
+                        Some(Page::Downloads) => "downloads",
+                        Some(Page::Library) => "library",
+                        Some(Page::Engines) => "engines",
+                        Some(Page::Projects) => "projects",
+                        _ =>
+                            if plugins {
+                                "plugins"
+                            } else {
+                                "workspace"
+                            },
+                    },
                     width,
                     height
                 );

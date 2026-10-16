@@ -47,15 +47,36 @@ fn cache_path(chunk: &Chunk) -> PathBuf {
         .join(buildpatch::hex(&chunk.sha))
 }
 pub fn cached_chunk(chunk: &Chunk) -> Option<Vec<u8>> {
-    let path = cache_path(chunk);
-    if crate::installer::no_links(&path).is_err()
-        || !crate::installer::valid_file(&path, &chunk.sha, chunk.window as u64)
+    read_cached_chunk(&cache_path(chunk), chunk)
+}
+pub(crate) fn cached_chunk_progress(chunk: &Chunk, read: &mut impl FnMut(u64)) -> Option<Vec<u8>> {
+    read_cached_chunk_progress(&cache_path(chunk), chunk, read)
+}
+fn read_cached_chunk(path: &std::path::Path, chunk: &Chunk) -> Option<Vec<u8>> {
+    read_cached_chunk_progress(path, chunk, &mut |_| {})
+}
+fn read_cached_chunk_progress(
+    path: &std::path::Path,
+    chunk: &Chunk,
+    read: &mut impl FnMut(u64),
+) -> Option<Vec<u8>> {
+    if crate::installer::no_links(path).is_err()
+        || std::fs::metadata(path).ok()?.len() != chunk.window as u64
     {
         return None;
     }
-    std::fs::read(path).ok()
+    // Validate the exact buffer returned to the installer, rather than reading
+    // once for verification and a second time for use.
+    let bytes = std::fs::read(path).ok()?;
+    read(bytes.len() as u64);
+    (bytes.len() == chunk.window as usize && buildpatch::digest(&bytes) == chunk.sha)
+        .then_some(bytes)
 }
+
 pub fn cache_chunk(chunk: &Chunk, bytes: &[u8]) {
+    cache_chunk_progress(chunk, bytes, &mut |_| {});
+}
+pub(crate) fn cache_chunk_progress(chunk: &Chunk, bytes: &[u8], written: &mut impl FnMut(u64)) {
     let path = cache_path(chunk);
     if bytes.len() != chunk.window as usize
         || buildpatch::digest(bytes) != chunk.sha
@@ -68,7 +89,9 @@ pub fn cache_chunk(chunk: &Chunk, bytes: &[u8]) {
             return;
         }
     }
-    let _ = storage::write_atomic(&path, bytes);
+    if storage::write_atomic(&path, bytes).is_ok() {
+        written(bytes.len() as u64);
+    }
 }
 pub fn check_install_allowed() -> Result<(), String> {
     if storage::load_preferences().downloads.allow_editors {
@@ -165,6 +188,33 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_chunks_reject_damage_and_accept_verified_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached-chunk");
+        let original = b"verified package bytes";
+        let chunk = Chunk {
+            window: original.len() as u32,
+            sha: buildpatch::digest(original),
+            ..Default::default()
+        };
+        assert!(read_cached_chunk(&path, &chunk).is_none());
+        std::fs::write(&path, original).unwrap();
+        let mut read_bytes = 0;
+        assert_eq!(
+            read_cached_chunk_progress(&path, &chunk, &mut |n| read_bytes += n).unwrap(),
+            original
+        );
+        assert_eq!(read_bytes, original.len() as u64);
+        let mut damaged = original.to_vec();
+        damaged[0] ^= 1;
+        std::fs::write(&path, damaged).unwrap();
+        assert!(read_cached_chunk(&path, &chunk).is_none());
+        std::fs::write(&path, &original[..original.len() - 1]).unwrap();
+        assert!(read_cached_chunk(&path, &chunk).is_none());
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(read_cached_chunk(&path, &chunk).unwrap(), original);
+    }
     #[test]
     fn bandwidth_limit_delays_transfers_and_can_be_disabled() {
         let mut s = storage::DownloadSettings::default();

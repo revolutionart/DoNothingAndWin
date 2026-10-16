@@ -33,15 +33,20 @@ fn draw_icon(ui: &Ui, theme: &Theme, icon: Icon, rect: Rect, tint: [u8; 3]) {
     canvas.icon(ui, icon, 0., 0., rect.width(), tint);
 }
 fn icon_button(ui: &mut Ui, theme: &Theme, label: &str, icon: Icon) -> bool {
-    let text =
-        ui.painter()
-            .layout_no_wrap(label.into(), FontId::proportional(16.), color(theme.text));
-    let (rect, response) = ui.allocate_exact_size(vec2(text.size().x + 60., 38.), Sense::click());
+    let text = ui.painter().layout_no_wrap(
+        label.into(),
+        FontId::proportional(COMPACT_BUTTON_FONT_SIZE),
+        color(theme.text),
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(text.size().x + 60., COMPACT_BUTTON_HEIGHT),
+        Sense::click(),
+    );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
     let hover = response.hovered() || response.is_pointer_button_down_on();
     ui.painter().rect(
         rect,
-        5.,
+        BUTTON_RADIUS,
         color(if hover { SIDEBAR_HIGHLIGHT } else { theme.card }),
         if hover {
             Stroke::NONE
@@ -54,7 +59,10 @@ fn icon_button(ui: &mut Ui, theme: &Theme, label: &str, icon: Icon) -> bool {
         ui,
         theme,
         icon,
-        Rect::from_min_size(rect.min + vec2(14., 10.), vec2(18., 18.)),
+        Rect::from_min_size(
+            rect.min + vec2(14., (COMPACT_BUTTON_HEIGHT - 18.) / 2.),
+            vec2(18., 18.),
+        ),
         if hover {
             SIDEBAR_ON_HIGHLIGHT
         } else {
@@ -62,7 +70,7 @@ fn icon_button(ui: &mut Ui, theme: &Theme, label: &str, icon: Icon) -> bool {
         },
     );
     ui.painter().galley_with_override_text_color(
-        rect.min + vec2(40., (38. - text.size().y) / 2.),
+        rect.min + vec2(40., (COMPACT_BUTTON_HEIGHT - text.size().y) / 2.),
         text,
         color(if hover {
             SIDEBAR_ON_HIGHLIGHT
@@ -80,7 +88,7 @@ fn panel<R>(
     body: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     Frame::new()
-        .fill(color(theme.panel))
+        .fill(color(theme.card))
         .stroke(Stroke::new(1., color(theme.border)))
         .corner_radius(6.)
         .inner_margin(20)
@@ -250,16 +258,7 @@ impl Workspace {
                 (true, format!("Recently updated ({recent_count})")),
             ] {
                 let selected = self.downloads.recent == recent;
-                let response = ui.add(
-                    Button::new(RichText::new(label).size(16.).color(color(if selected {
-                        t.on_accent
-                    } else {
-                        t.text
-                    })))
-                    .fill(color(if selected { t.accent } else { t.background }))
-                    .stroke(Stroke::NONE)
-                    .min_size(vec2(116., 38.)),
-                );
+                let response = buttons::tab_button(ui, t, selected, label, 116.);
                 if response
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
@@ -293,129 +292,158 @@ impl Workspace {
     }
     fn download_main(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
         if !self.downloads.recent {
-            Frame::new()
-                .fill(color(t.card))
-                .stroke(Stroke::new(1.5, color(t.accent)))
-                .corner_radius(6.)
-                .inner_margin(22)
-                .show(ui, |ui| {
-                    ui.set_width((ui.available_width() - 2.).max(200.));
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
-                        draw_icon(
-                            ui,
-                            t,
-                            if active == 0 {
-                                Icon::Check
-                            } else {
-                                Icon::Download
-                            },
-                            r,
-                            t.accent,
-                        );
-                        ui.add_space(8.);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(if active == 0 {
-                                    "You're all caught up"
+            if self.plugin_work.mutating && self.plugin_work.progress.is_some() {
+                self.plugin_work.show_progress(ui, t, &self.textures, true);
+            } else if self.transfer.downloading && self.transfer.maintenance.is_none() {
+                let p = self.transfer.progress.lock().unwrap().clone();
+                let title = self
+                    .transfer
+                    .release
+                    .as_ref()
+                    .map(|r| {
+                        format!(
+                            "Unreal Engine {}",
+                            r.version
+                                .as_ref()
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| r.app.clone())
+                        )
+                    })
+                    .unwrap_or_else(|| "Unreal Engine".into());
+                let card = super::plugin_activity::Card::engine(&title, &p);
+                self.transfer
+                    .activity
+                    .show_card(ui, t, &card, &self.textures, true);
+                if ui
+                    .add(buttons::secondary_button("Stop transfer"))
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.transfer.control.stop();
+                }
+            } else {
+                Frame::new()
+                    .fill(color(t.card))
+                    .stroke(Stroke::new(1.5, color(t.accent)))
+                    .corner_radius(6.)
+                    .inner_margin(22)
+                    .show(ui, |ui| {
+                        ui.set_width((ui.available_width() - 2.).max(200.));
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
+                            draw_icon(
+                                ui,
+                                t,
+                                if active == 0 {
+                                    Icon::Check
                                 } else {
-                                    "Installation activity"
-                                })
-                                .size(25.)
-                                .strong()
-                                .color(ui.visuals().text_color()),
+                                    Icon::Download
+                                },
+                                r,
+                                t.accent,
                             );
-                            if active == 0 {
-                                ui.label("No downloads in progress.");
-                            }
+                            ui.add_space(8.);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(if active == 0 {
+                                        "You're all caught up"
+                                    } else {
+                                        "Installation activity"
+                                    })
+                                    .size(25.)
+                                    .strong()
+                                    .color(ui.visuals().text_color()),
+                                );
+                                if active == 0 {
+                                    ui.label("No downloads in progress.");
+                                }
+                            });
                         });
-                    });
-                    if self.transfer.busy() {
-                        ui.label(&self.transfer.state);
-                        let p = self.transfer.progress.lock().unwrap().clone();
-                        if p.total == 0 {
+                        if self.transfer.busy() {
+                            ui.label(&self.transfer.state);
+                            let p = self.transfer.progress.lock().unwrap().clone();
+                            if p.total == 0 {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new().color(if self.theme.dark {
+                                        Color32::WHITE
+                                    } else {
+                                        color(self.theme.text)
+                                    }));
+                                    ui.label(&p.phase);
+                                });
+                                indeterminate_progress(
+                                    ui,
+                                    ui.available_width(),
+                                    8.,
+                                    t.accent,
+                                    t.border,
+                                );
+                                ui.label(
+                                    RichText::new("Preparing files and calculating download size…")
+                                        .color(color(t.muted)),
+                                );
+                            } else {
+                                ui.label(&p.phase);
+                                ui.add(
+                                    ProgressBar::new(
+                                        (p.completed as f32 / p.total as f32).clamp(0., 1.),
+                                    )
+                                    .show_percentage()
+                                    .desired_width(ui.available_width()),
+                                );
+                                ui.label(format!(
+                                    "{:.2} / {:.2} GB • {:.2} GB downloaded",
+                                    p.completed as f64 / 1e9,
+                                    p.total as f64 / 1e9,
+                                    p.network as f64 / 1e9
+                                ));
+                            }
+                            if self.transfer.downloading
+                                && self.transfer.maintenance != Some(true)
+                                && ui
+                                    .add(buttons::secondary_button("Stop transfer"))
+                                    .clone()
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                            {
+                                self.transfer.control.stop();
+                            }
+                        }
+                        if let Some(s) = self.library_transfer_status() {
+                            ui.add(egui::Spinner::new().color(if self.theme.dark {
+                                Color32::WHITE
+                            } else {
+                                color(self.theme.text)
+                            }));
+                            ui.label(s);
+                        }
+                        if self.plugin_work.mutating {
                             ui.horizontal(|ui| {
                                 ui.add(egui::Spinner::new().color(if self.theme.dark {
                                     Color32::WHITE
                                 } else {
                                     color(self.theme.text)
                                 }));
-                                ui.label(&p.phase);
+                                ui.label(&self.plugin_work.status);
                             });
-                            indeterminate_progress(
-                                ui,
-                                ui.available_width(),
-                                8.,
-                                t.accent,
-                                t.border,
-                            );
-                            ui.label(
-                                RichText::new("Preparing files and calculating download size…")
-                                    .color(color(t.muted)),
-                            );
-                        } else {
-                            ui.label(&p.phase);
-                            ui.add(
-                                ProgressBar::new(
-                                    (p.completed as f32 / p.total as f32).clamp(0., 1.),
-                                )
-                                .show_percentage()
-                                .desired_width(ui.available_width()),
-                            );
-                            ui.label(format!(
-                                "{:.2} / {:.2} GB • {:.2} GB downloaded",
-                                p.completed as f64 / 1e9,
-                                p.total as f64 / 1e9,
-                                p.network as f64 / 1e9
-                            ));
+                            self.plugin_work.show_progress(ui, t, &self.textures, true);
                         }
-                        if self.transfer.downloading
-                            && self.transfer.maintenance != Some(true)
-                            && ui
-                                .button("Stop transfer")
-                                .clone()
-                                .on_hover_cursor(CursorIcon::PointingHand)
-                                .clicked()
-                        {
-                            self.transfer.control.stop();
-                        }
-                    }
-                    if let Some(s) = self.library_transfer_status() {
-                        ui.add(egui::Spinner::new().color(if self.theme.dark {
-                            Color32::WHITE
-                        } else {
-                            color(self.theme.text)
-                        }));
-                        ui.label(s);
-                    }
-                    if self.plugin_work.mutating {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().color(if self.theme.dark {
-                                Color32::WHITE
-                            } else {
-                                color(self.theme.text)
-                            }));
-                            ui.label(&self.plugin_work.status);
-                        });
-                        indeterminate_progress(ui, ui.available_width(), 8., t.accent, t.border);
-                    }
-                });
+                    });
+            }
             if !self.transfer.busy()
                 && self.transfer.plan.is_some()
                 && self.transfer.installed.is_none()
             {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(&self.transfer.state);
-                    if ui
-                        .button("Resume engine installation")
+                    if ui.add(buttons::secondary_button("Resume engine installation"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
                     {
                         self.transfer.modal = true;
                     }
-                    if ui
-                        .button("Dismiss")
+                    if ui.add(buttons::secondary_button("Dismiss"))
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text("Clear this resume entry. Downloaded files and chunks are kept; install again to the same destination to reuse them.")
                         .clicked()
@@ -427,7 +455,7 @@ impl Workspace {
             if let Some(path) = self.transfer.installed.clone() {
                 ui.horizontal(|ui| {
                     if ui
-                        .button("Open engine folder")
+                        .add(buttons::secondary_button("Open engine folder"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
@@ -439,7 +467,7 @@ impl Workspace {
                     let prereq = path.join("Engine/Extras/Redist/en-us/UEPrereqSetup_x64.exe");
                     if prereq.is_file()
                         && ui
-                            .button("Run prerequisites")
+                            .add(buttons::secondary_button("Run prerequisites"))
                             .clone()
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .clicked()
@@ -491,7 +519,7 @@ impl Workspace {
                 if ui
                     .add_enabled(
                         !self.downloads.history.is_empty(),
-                        Button::new("Clear history"),
+                        buttons::secondary_button("Clear history"),
                     )
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
@@ -510,7 +538,7 @@ impl Workspace {
                     }
                 }
                 if ui
-                    .button("Mark all as seen")
+                    .add(buttons::secondary_button("Mark all as seen"))
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
@@ -614,8 +642,10 @@ impl Workspace {
                         .truncate()
                         .halign(Align::LEFT),
                     );
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(action_width, 38.), Sense::click());
+                    let (rect, response) = ui.allocate_exact_size(
+                        vec2(action_width, COMPACT_BUTTON_HEIGHT),
+                        Sense::click(),
+                    );
                     let response = response
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text("Activity details");
@@ -663,7 +693,7 @@ impl Workspace {
                         .load(std::sync::atomic::Ordering::Relaxed)
                 ));
                 if ui
-                    .button("Stop scan")
+                    .add(buttons::secondary_button("Stop scan"))
                     .clone()
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()

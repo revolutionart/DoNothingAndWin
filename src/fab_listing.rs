@@ -27,8 +27,8 @@ impl Sort {
     pub fn label(self) -> &'static str {
         match self {
             Self::LatestUpdate => "Latest update",
-            Self::NameAscending => "Name A – Z",
-            Self::NameDescending => "Name Z – A",
+            Self::NameAscending => "Name A - Z",
+            Self::NameDescending => "Name Z - A",
         }
     }
 }
@@ -49,9 +49,9 @@ pub fn sort(items: &mut [Item], order: Sort) {
 pub fn supports_engine(item: &Item, branch: &str) -> bool {
     branch.is_empty() || item.compatible(branch).is_some()
 }
-pub fn engine_branches(items: &[Item]) -> Vec<String> {
+pub fn engine_branches<'a>(items: impl IntoIterator<Item = &'a Item>) -> Vec<String> {
     let branches: BTreeSet<_> = items
-        .iter()
+        .into_iter()
         .flat_map(|i| &i.project_versions)
         .filter(|v| {
             v.target_platforms.is_empty() || v.target_platforms.iter().any(|p| p == "Windows")
@@ -68,6 +68,15 @@ pub fn engine_branches(items: &[Item]) -> Vec<String> {
 }
 pub fn listing_id(item: &Item) -> Option<String> {
     listing_url_id(item.url.as_deref()?)
+}
+/// The owned Unreal catalog also includes legacy Marketplace entitlements.
+/// Keep those for installed-package matching, but do not present them as Fab
+/// listings. Epic's launcher-distributed Fab integration is the one exception.
+pub fn visible_in_library(item: &Item) -> bool {
+    listing_id(item).is_some()
+        || (item.plugin()
+            && item.asset_namespace == "ue"
+            && item.asset_id == "c5c30696e4e0482f9c0a170873975230")
 }
 pub(crate) fn listing_url_id(raw: &str) -> Option<String> {
     let url = reqwest::Url::parse(raw).ok()?;
@@ -128,15 +137,66 @@ struct CachedDate {
     search: Option<SearchMetadata>,
     checked_at: u64,
     updated_at: Option<i64>,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    failed_at: u64,
 }
 const CACHE_SECONDS: u64 = 6 * 60 * 60;
+const RETRY_SECONDS: u64 = 5 * 60;
 fn fresh(entry: &CachedDate, now: u64) -> bool {
     entry.search.is_some() && now >= entry.checked_at && now - entry.checked_at < CACHE_SECONDS
+}
+fn needs_refresh(entry: Option<&CachedDate>, now: u64, retry: bool) -> bool {
+    entry.is_none_or(|entry| {
+        !fresh(entry, now)
+            && (retry
+                || entry.last_error.is_none()
+                || now < entry.failed_at
+                || now - entry.failed_at >= RETRY_SECONDS)
+    })
 }
 pub enum DateEvent {
     Batch(Vec<(String, Option<i64>, Option<SearchMetadata>)>),
     Progress(usize, usize),
-    Finished(usize),
+    Finished(Vec<ListingIssue>),
+}
+#[derive(Clone)]
+pub struct ListingIssue {
+    pub key: String,
+    pub title: String,
+    pub reason: String,
+    pub retryable: bool,
+}
+fn listing_issue(
+    item: &Item,
+    cache: &HashMap<String, CachedDate>,
+    errors: &HashMap<String, String>,
+) -> Option<ListingIssue> {
+    let id = listing_id(item);
+    let entry = id.as_ref().and_then(|id| cache.get(id));
+    if entry.is_some_and(|e| e.search.is_some() && e.updated_at.is_some()) {
+        return None;
+    }
+    let reason = if id.is_none() {
+        "The owned library supplies a legacy Marketplace link or no public Fab listing link.".into()
+    } else if entry.is_some_and(|e| e.search.is_some()) {
+        "Fab supplies no update date. Description and tag search are available.".into()
+    } else {
+        errors
+            .get(id.as_ref().unwrap())
+            .or_else(|| entry.and_then(|e| e.last_error.as_ref()))
+            .cloned()
+            .unwrap_or_else(|| {
+                "Detail loading paused after repeated request failures. Retry later.".into()
+            })
+    };
+    Some(ListingIssue {
+        key: item.key(),
+        title: item.title.clone(),
+        reason,
+        retryable: id.is_some(),
+    })
 }
 fn fetch_date(
     client: &reqwest::blocking::Client,
@@ -145,9 +205,13 @@ fn fetch_date(
     let response = client
         .get(format!("https://www.fab.com/i/listings/{id}"))
         .send()
-        .map_err(|_| "Fab listing request failed")?
-        .error_for_status()
-        .map_err(|_| "Fab listing unavailable")?;
+        .map_err(|_| "Fab listing request failed or timed out")?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Fab detail request returned HTTP {}. Cached library information is still available.",
+            response.status().as_u16()
+        ));
+    }
     let mut bytes = vec![];
     response
         .take(2 * 1024 * 1024 + 1)
@@ -183,7 +247,7 @@ fn search_metadata(value: &serde_json::Value) -> SearchMetadata {
     }
 }
 /// Cache access and HTTP requests belong on a background thread. No Epic credentials are sent.
-pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
+pub fn refresh_dates(items: &[Item], retry: bool, notify: impl Fn(DateEvent)) {
     let path = storage::data_dir().join("library/listing-dates.json");
     let mut cache: HashMap<String, CachedDate> = storage::read_json(&path).unwrap_or_default();
     let now = epic::now();
@@ -204,11 +268,12 @@ pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
     ));
     let jobs: Vec<_> = groups
         .keys()
-        .filter(|id| !cache.get(*id).is_some_and(|d| fresh(d, now)))
+        .filter(|id| needs_refresh(cache.get(*id), now, retry))
         .cloned()
         .collect();
     let total = jobs.len();
     let mut updated = Vec::new();
+    let mut errors = HashMap::new();
     notify(DateEvent::Progress(0, total));
     if let Ok(client) = reqwest::blocking::Client::builder()
         .user_agent(concat!("DoNothingAndWin/", env!("CARGO_PKG_VERSION")))
@@ -256,6 +321,12 @@ pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
             }
             drop(tx);
             for (index, (id, result)) in rx.into_iter().enumerate() {
+                if let Err(error) = &result {
+                    errors.insert(id.clone(), error.clone());
+                    let entry = cache.entry(id.clone()).or_default();
+                    entry.last_error = Some(error.clone());
+                    entry.failed_at = epic::now();
+                }
                 if let Ok((updated_at, search)) = result {
                     cache.insert(
                         id.clone(),
@@ -263,6 +334,7 @@ pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
                             search: Some(search.clone()),
                             checked_at: now,
                             updated_at,
+                            ..Default::default()
                         },
                     );
                     updated.extend(
@@ -270,23 +342,36 @@ pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
                             .iter()
                             .map(|k| (k.clone(), updated_at, Some(search.clone()))),
                     );
+                    // Publish metadata promptly; one slow listing must not hold every
+                    // successful date/search result until the entire catalog finishes.
+                    if updated.len() >= 12 {
+                        notify(DateEvent::Batch(std::mem::take(&mut updated)));
+                        // Preserve completed work if the launcher exits during a long refresh.
+                        let _ = storage::write_json(&path, &cache);
+                    }
                 }
                 notify(DateEvent::Progress(index + 1, total));
             }
         });
     }
     notify(DateEvent::Batch(updated));
+    // A follow-up catalog pass must not immediately retry jobs paused by the
+    // service failure threshold, including jobs that never reached a worker.
+    for id in &jobs {
+        if !errors.contains_key(id) && needs_refresh(cache.get(id), epic::now(), false) {
+            let entry = cache.entry(id.clone()).or_default();
+            entry.last_error =
+                Some("Detail loading paused after repeated request failures. Retry later.".into());
+            entry.failed_at = epic::now();
+        }
+    }
     if total > 0 {
         let _ = storage::write_json(&path, &cache);
     }
     let unavailable = items
         .iter()
-        .filter(|i| {
-            listing_id(i)
-                .and_then(|id| cache.get(&id))
-                .is_none_or(|d| d.updated_at.is_none() || d.search.is_none())
-        })
-        .count();
+        .filter_map(|i| listing_issue(i, &cache, &errors))
+        .collect();
     notify(DateEvent::Finished(unavailable));
 }
 
@@ -294,6 +379,120 @@ pub fn refresh_dates(items: &[Item], notify: impl Fn(DateEvent)) {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn library_visibility_keeps_fab_listings_and_only_the_official_integration() {
+        let mut legacy = item("Legacy plugin", None);
+        legacy.distribution_method = "CODE_PLUGIN".into();
+        assert!(!visible_in_library(&legacy));
+        legacy.url = Some("https://www.unrealengine.com/marketplace/en/product/old-plugin".into());
+        assert!(!visible_in_library(&legacy));
+        let mut listing = legacy.clone();
+        listing.url =
+            Some("https://www.fab.com/listings/907039cf-f267-489e-afe4-7e74768e9b7a".into());
+        // Missing optional metadata is not evidence that a listing is unavailable.
+        assert!(listing.listing_search.is_none());
+        assert!(visible_in_library(&listing));
+        let mut fab = legacy.clone();
+        fab.url = None;
+        fab.asset_namespace = "ue".into();
+        fab.asset_id = "c5c30696e4e0482f9c0a170873975230".into();
+        assert!(visible_in_library(&fab));
+        let mut impostor = fab.clone();
+        impostor.asset_namespace = "another-publisher".into();
+        assert!(!visible_in_library(&impostor));
+        let catalog = [legacy, listing, fab, impostor];
+        let visible: Vec<_> = catalog
+            .iter()
+            .filter(|item| visible_in_library(item))
+            .collect();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible.iter().filter(|item| item.plugin()).count(), 2);
+        assert_eq!(
+            catalog.len(),
+            4,
+            "raw entitlements remain available for installed-plugin matching"
+        );
+    }
+    #[test]
+    fn failed_details_back_off_but_manual_retry_bypasses_cooldown() {
+        let entry = CachedDate {
+            last_error: Some("Fab detail request returned HTTP 403".into()),
+            failed_at: 100,
+            ..Default::default()
+        };
+        assert!(!needs_refresh(Some(&entry), 100, false));
+        assert!(!needs_refresh(Some(&entry), 100 + RETRY_SECONDS - 1, false));
+        assert!(needs_refresh(Some(&entry), 100 + RETRY_SECONDS, false));
+        assert!(needs_refresh(Some(&entry), 101, true));
+        assert!(needs_refresh(Some(&entry), 99, false));
+        assert!(needs_refresh(None, 101, false));
+        let restored: CachedDate =
+            serde_json::from_slice(&serde_json::to_vec(&entry).unwrap()).unwrap();
+        assert!(!needs_refresh(Some(&restored), 101, false));
+        let mut item = item("Unavailable", None);
+        item.url = Some("https://www.fab.com/listings/907039cf-f267-489e-afe4-7e74768e9b7a".into());
+        let cache = HashMap::from([(listing_id(&item).unwrap(), restored)]);
+        assert!(
+            listing_issue(&item, &cache, &HashMap::new())
+                .unwrap()
+                .reason
+                .contains("403")
+        );
+    }
+    #[test]
+    fn retry_preserves_usable_cached_metadata_and_skips_fresh_successes() {
+        let entry = CachedDate {
+            search: Some(SearchMetadata::default()),
+            checked_at: 100,
+            updated_at: Some(50),
+            ..Default::default()
+        };
+        assert!(!needs_refresh(Some(&entry), 101, true));
+        let failed = CachedDate {
+            last_error: Some("Timeout".into()),
+            failed_at: 100 + CACHE_SECONDS,
+            ..entry
+        };
+        assert!(!needs_refresh(Some(&failed), 101 + CACHE_SECONDS, false));
+        assert!(needs_refresh(Some(&failed), 101 + CACHE_SECONDS, true));
+        assert!(failed.search.is_some());
+        assert_eq!(failed.updated_at, Some(50));
+    }
+    #[test]
+    fn missing_details_explain_legacy_links_request_failures_and_date_only_gaps() {
+        let mut i = item("Example", None);
+        let mut cache = HashMap::new();
+        let mut errors = HashMap::new();
+        let legacy = listing_issue(&i, &cache, &errors).unwrap();
+        assert!(!legacy.retryable);
+        assert!(legacy.reason.contains("legacy Marketplace"));
+        let id = "907039cf-f267-489e-afe4-7e74768e9b7a";
+        i.url = Some(format!("https://www.fab.com/listings/{id}"));
+        errors.insert(id.into(), "Fab detail request returned HTTP 403".into());
+        assert!(
+            listing_issue(&i, &cache, &errors)
+                .unwrap()
+                .reason
+                .contains("403")
+        );
+        cache.insert(
+            id.into(),
+            CachedDate {
+                search: Some(SearchMetadata::default()),
+                checked_at: 1,
+                updated_at: None,
+                ..Default::default()
+            },
+        );
+        assert!(
+            listing_issue(&i, &cache, &errors)
+                .unwrap()
+                .reason
+                .contains("tag search are available")
+        );
+        cache.get_mut(id).unwrap().updated_at = Some(1);
+        assert!(listing_issue(&i, &cache, &errors).is_none());
+    }
 
     #[test]
     fn actual_grux_listing_matches_monster_tag() {
@@ -411,6 +610,7 @@ mod tests {
             search: Some(SearchMetadata::default()),
             checked_at: 100,
             updated_at: Some(50),
+            ..Default::default()
         };
         assert!(fresh(&entry, 100));
         assert!(fresh(&entry, 100 + CACHE_SECONDS - 1));

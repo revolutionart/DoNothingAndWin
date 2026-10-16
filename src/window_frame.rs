@@ -102,7 +102,7 @@ unsafe fn tray(hwnd: windows_sys::Win32::Foundation::HWND, add: bool) -> bool {
         for (dest, src) in n
             .szTip
             .iter_mut()
-            .zip("DoNothing&Win Launcher — click to restore".encode_utf16())
+            .zip("DoNothing&Win Launcher - click to restore".encode_utf16())
         {
             *dest = src;
         }

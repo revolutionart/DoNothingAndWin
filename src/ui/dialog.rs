@@ -164,50 +164,59 @@ pub(super) fn footer(ui: &mut Ui, theme: &Theme, label: &str, enabled: bool, dan
     ui.separator();
     ui.add_space(4.);
     ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), 40.),
+        vec2(ui.available_width(), COMPACT_BUTTON_HEIGHT),
         Layout::right_to_left(Align::Center),
         |ui| {
-            let action = ui
-                .scope(|ui| {
-                    let base = color(if !enabled {
-                        theme.button
-                    } else if danger {
-                        theme.danger
-                    } else {
-                        theme.accent
-                    });
-                    let hover = color(if danger {
-                        theme.danger
-                    } else {
-                        theme.accent_hover
-                    });
+            let action = if danger {
+                ui.scope(|ui| {
+                    ui.spacing_mut().button_padding = vec2(buttons::HORIZONTAL_PADDING, 5.);
+                    ui.spacing_mut().interact_size.y = COMPACT_BUTTON_HEIGHT;
+                    let fill = color(if enabled { theme.danger } else { theme.button });
                     let widgets = &mut ui.visuals_mut().widgets;
-                    widgets.inactive.weak_bg_fill = base;
-                    widgets.hovered.weak_bg_fill = hover;
-                    widgets.active.weak_bg_fill = hover;
-                    widgets.noninteractive.weak_bg_fill = base;
+                    for widget in [
+                        &mut widgets.inactive,
+                        &mut widgets.hovered,
+                        &mut widgets.active,
+                        &mut widgets.noninteractive,
+                    ] {
+                        widget.weak_bg_fill = fill;
+                    }
                     ui.add_enabled(
                         enabled,
-                        Button::new(RichText::new(label).color(color(theme.on_accent)))
-                            .stroke(Stroke::NONE)
-                            .min_size(vec2(150., 40.))
-                            .corner_radius(6.),
+                        buttons::secondary_button(
+                            RichText::new(label)
+                                .font(buttons::primary_font(1.))
+                                .color(color(theme.on_accent)),
+                        )
+                        .stroke(Stroke::NONE)
+                        .corner_radius(BUTTON_RADIUS)
+                        .min_size(vec2(150., COMPACT_BUTTON_HEIGHT)),
                     )
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
+                })
+                .inner
+            } else {
+                ui.add_enabled(
+                    enabled,
+                    primary_button(label, theme).min_size(vec2(150., COMPACT_BUTTON_HEIGHT)),
+                )
+            }
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked();
+            let cancel = ui
+                .scope(|ui| {
+                    ui.spacing_mut().button_padding = vec2(buttons::HORIZONTAL_PADDING, 5.);
+                    ui.spacing_mut().interact_size.y = COMPACT_BUTTON_HEIGHT;
+                    ui.add(
+                        buttons::secondary_button(
+                            RichText::new("Cancel")
+                                .font(FontId::proportional(COMPACT_BUTTON_FONT_SIZE)),
+                        )
+                        .min_size(vec2(120., COMPACT_BUTTON_HEIGHT))
+                        .corner_radius(BUTTON_RADIUS),
+                    )
                 })
                 .inner;
-            if ui
-                .add(
-                    Button::new("Cancel")
-                        .min_size(vec2(120., 40.))
-                        .corner_radius(6.),
-                )
-                .clone()
-                .on_hover_cursor(CursorIcon::PointingHand)
-                .clicked()
-            {
+            if cancel.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 ui.close();
             }
             action
@@ -233,7 +242,10 @@ pub(super) fn folder(ui: &mut Ui, value: &mut String) {
     ui.horizontal(|ui| {
         path_input(ui, value, ui.available_width() - 112.);
         if ui
-            .add_sized([100., 40.], Button::new("Browse"))
+            .add_sized(
+                [100., COMPACT_BUTTON_HEIGHT],
+                buttons::secondary_button("Browse"),
+            )
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()
