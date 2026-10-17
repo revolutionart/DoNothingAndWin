@@ -1,8 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(windows)]
+mod desktop_launch;
 mod event_loop;
 mod ui;
 mod window_frame;
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    if std::env::args().any(|a| a == "--launch-from-desktop") {
+        if let Err(message) = desktop_launch::relaunch() {
+            rfd::MessageDialog::new()
+                .set_title("Installation complete")
+                .set_description(format!(
+                    "The launcher was installed successfully. Open it from the Start menu or desktop shortcut.\n\nAutomatic launch failed: {message}"
+                ))
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--epic-login") {
         let exit = match engine_workspace::login::run() {
             Ok(true) => 0,

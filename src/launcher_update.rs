@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::{io::Read, time::Duration};
 
+pub mod install;
+
 const REPOSITORY: &str = "https://github.com/revolutionart/DoNothingAndWin";
 const API: &str = "https://api.github.com/repos/revolutionart/DoNothingAndWin/releases/latest";
 const MAX_RESPONSE: u64 = 1024 * 1024;
@@ -10,6 +12,8 @@ pub struct Update {
     pub version: String,
     pub release_url: String,
     pub download_url: String,
+    pub size: u64,
+    pub sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +30,8 @@ struct Asset {
     state: String,
     size: u64,
     browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 pub fn check(current: &str, portable: bool) -> Result<Option<Update>, String> {
@@ -91,20 +97,29 @@ fn parse(data: &[u8], current: &str, portable: bool) -> Result<Option<Update>, S
         format!("DoNothingAndWin-Setup-{version}.exe")
     };
     let download_url = format!("{REPOSITORY}/releases/download/{}/{name}", release.tag_name);
-    if !release.assets.iter().any(|asset| {
-        asset.name == name
-            && asset.state == "uploaded"
-            && asset.size > 0
-            && asset.browser_download_url == download_url
-    }) {
-        return Err(
-            "The new release does not yet have a download for this launcher edition.".into(),
-        );
-    }
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.name == name
+                && asset.state == "uploaded"
+                && asset.size > 0
+                && asset.browser_download_url == download_url
+        })
+        .ok_or_else(|| {
+            "The new release does not yet have a download for this launcher edition.".to_string()
+        })?;
     Ok(Some(Update {
         version: version.to_string(),
         release_url: format!("{REPOSITORY}/releases/tag/{}", release.tag_name),
         download_url,
+        size: asset.size,
+        sha256: asset
+            .digest
+            .as_deref()
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase),
     }))
 }
 

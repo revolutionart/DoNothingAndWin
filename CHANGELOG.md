@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.1 - 2026-10-17
+
+### Launcher updates
+
+- Add **Update launcher** for installed editions: download and verify the release installer, wait for active operations, install into the existing location and restart through the Windows desktop.
+- Verify the installer against GitHub's SHA-256 release asset digest and size. Failed or cancelled downloads leave the current installation running.
+- Preserve startup and shortcut choices during automatic updates. Portable editions keep downloading the ZIP for manual replacement.
+- Existing 1.2.0 users need to install this release manually once to enable the new updater for future releases.
+
+### Installation fix
+
+- Start the launcher through the Windows desktop when **Launch after setup** is selected. This prevents inherited installer restrictions from blocking Unreal Editor's cache folders when they use junctions or symbolic links.
+- Keep the installer's security settings enabled. If the desktop handoff is unavailable, show instructions to open the installed launcher from its shortcut.
+
+### Known limitations
+
+- Final installer verification can briefly make the launcher unresponsive on slow storage.
+- If an update is waiting for a project clone that finishes while the launcher is minimized or hidden, restore the launcher window so the update can continue.
+- If setup fails or is cancelled after the launcher closes, reopen the launcher manually.
+- Installer and portable builds remain unsigned. Windows may show security prompts.
+
 ## 1.2.0 - 2026-10-17
 
 ### Plugin updates

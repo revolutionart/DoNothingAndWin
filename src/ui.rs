@@ -2350,6 +2350,9 @@ impl eframe::App for Workspace {
         }
         self.poll(ctx);
         self.poll_launcher_updates(ctx);
+        if self.launcher_updates.applying {
+            return;
+        }
         self.poll_transfers(ctx);
         self.poll_plugins(ctx);
         self.poll_library(ctx);

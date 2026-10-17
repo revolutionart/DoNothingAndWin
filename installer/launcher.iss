@@ -38,17 +38,25 @@ Name: "startup\minimized"; Description: "Start minimized"
 Source: "..\dist\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\DoNothing&Win Launcher"; Filename: "{app}\DoNothingAndWinLauncher.exe"
-Name: "{autodesktop}\DoNothing&Win Launcher"; Filename: "{app}\DoNothingAndWinLauncher.exe"; Tasks: desktopicon
+Name: "{group}\DoNothing&Win Launcher"; Filename: "{app}\DoNothingAndWinLauncher.exe"; Check: not IsLauncherUpdate
+Name: "{autodesktop}\DoNothing&Win Launcher"; Filename: "{app}\DoNothingAndWinLauncher.exe"; Tasks: desktopicon; Check: not IsLauncherUpdate
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "EngineWorkspace"; ValueData: "{code:StartupCommand}"; Tasks: startup; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "EngineWorkspace"; Tasks: not startup; Flags: deletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "EngineWorkspace"; ValueData: "{code:StartupCommand}"; Tasks: startup; Flags: uninsdeletevalue; Check: not IsLauncherUpdate
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "EngineWorkspace"; Tasks: not startup; Flags: deletevalue; Check: not IsLauncherUpdate
 
 [Run]
-Filename: "{app}\DoNothingAndWinLauncher.exe"; Description: "Launch DoNothing&&Win Launcher"; Flags: nowait postinstall skipifsilent
+; Hand off to the desktop before starting the app so installer process restrictions
+; cannot propagate to Unreal Editor and block users' redirected cache folders.
+Filename: "{app}\DoNothingAndWinLauncher.exe"; Parameters: "--launch-from-desktop"; Description: "Launch DoNothing&&Win Launcher"; Flags: nowait postinstall skipifsilent; Check: not IsLauncherUpdate
+Filename: "{app}\DoNothingAndWinLauncher.exe"; Parameters: "--launch-from-desktop"; Flags: nowait; Check: IsLauncherUpdate
 
 [Code]
+function IsLauncherUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:DNWUPDATE|0}') = '1';
+end;
+
 function StartupCommand(Param: String): String;
 begin
   Result := '"' + ExpandConstant('{app}\DoNothingAndWinLauncher.exe') + '" --no-scan';
@@ -56,13 +64,26 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-var ExitCode: Integer;
+var ExitCode, Attempts: Integer;
 begin
   ExtractTemporaryFile('DoNothingAndWinLauncher.exe');
-  if not Exec(ExpandConstant('{tmp}\DoNothingAndWinLauncher.exe'), '--check-running', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
-    Result := 'Could not check whether the launcher is running. Setup has stopped safely.'
-  else if ExitCode <> 0 then
-    Result := 'Finish any downloads or installations, then exit DoNothing&Win Launcher and retry. Setup will not interrupt active work.';
+  Attempts := 0;
+  repeat
+    if not Exec(ExpandConstant('{tmp}\DoNothingAndWinLauncher.exe'), '--check-running', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    begin
+      Result := 'Could not check whether the launcher is running. Setup has stopped safely.';
+      Exit;
+    end;
+    if ExitCode = 0 then Exit;
+    if (ExitCode <> 2) or (not IsLauncherUpdate) or (Attempts >= 120) then
+    begin
+      Result := 'Finish any downloads or installations, then exit DoNothing&Win Launcher and retry. Setup will not interrupt active work.';
+      Exit;
+    end;
+    { Let the updater's parent exit normally; never terminate a running launcher. }
+    Sleep(250);
+    Attempts := Attempts + 1;
+  until False;
 end;
 
 function InitializeUninstall(): Boolean;
