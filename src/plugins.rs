@@ -1,3 +1,4 @@
+pub mod catalogue;
 use std::path::{Path, PathBuf};
 mod check_cache;
 mod parallel_checks;

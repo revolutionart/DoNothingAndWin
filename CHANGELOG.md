@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.2 - 2026-10-17
+
+### Launcher updates
+
+- Keep final installer verification and update preparation off the UI thread. Continue processing project clone completion while minimized or hidden.
+- Supervise setup from outside the installed launcher. Reopen the installed launcher once after success, cancellation or failure; explain failed updates and leave retrying to the user. If reopening fails, show manual recovery instructions and the setup log location.
+- Preserve installer digest checks, active-operation protection, startup choices and the Windows desktop handoff that protects redirected Unreal cache folders.
+
+### Internal architecture
+
+- Give plugin update comparisons one owner shared by the engine dialog, Library and Available Updates.
+- Centralize engine operation transitions, cancellation eligibility and retained resume plans; release busy state when a worker disconnects.
+
+### Known limitations
+
+- Installer and portable builds remain unsigned. Windows may show security prompts.
+- Recovery improvements apply to updates started from 1.2.2 or later. When updating from 1.2.1, reopen the launcher manually if setup fails or is cancelled.
+
 ## 1.2.1 - 2026-10-17
 
 ### Launcher updates

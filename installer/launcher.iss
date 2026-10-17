@@ -49,12 +49,17 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; Hand off to the desktop before starting the app so installer process restrictions
 ; cannot propagate to Unreal Editor and block users' redirected cache folders.
 Filename: "{app}\DoNothingAndWinLauncher.exe"; Parameters: "--launch-from-desktop"; Description: "Launch DoNothing&&Win Launcher"; Flags: nowait postinstall skipifsilent; Check: not IsLauncherUpdate
-Filename: "{app}\DoNothingAndWinLauncher.exe"; Parameters: "--launch-from-desktop"; Flags: nowait; Check: IsLauncherUpdate
+Filename: "{app}\DoNothingAndWinLauncher.exe"; Parameters: "--launch-from-desktop"; Flags: nowait; Check: ShouldRestartUpdate
 
 [Code]
 function IsLauncherUpdate(): Boolean;
 begin
   Result := ExpandConstant('{param:DNWUPDATE|0}') = '1';
+end;
+
+function ShouldRestartUpdate(): Boolean;
+begin
+  Result := IsLauncherUpdate and (ExpandConstant('{param:DNWSUPERVISED|0}') <> '1');
 end;
 
 function StartupCommand(Param: String): String;

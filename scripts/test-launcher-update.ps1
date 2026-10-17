@@ -63,8 +63,14 @@ try {
     $startupAfter = (Get-ItemProperty -LiteralPath $startupKey).EngineWorkspace
     if ($startupBefore -ne $startupAfter) { throw 'Updater changed the real startup setting' }
 
-    # A launcher that stays busy must not be replaced or restarted, even silently.
+    # Supervised updates leave restart ownership to the helper, preventing a double launch.
     Remove-Item -LiteralPath $restarted
+    Set-Content -LiteralPath (Join-Path $probe 'mode.txt') -Value 'idle' -NoNewline
+    $process = Start-Process -FilePath $setup -ArgumentList ($args + '/DNWSUPERVISED=1') -WindowStyle Hidden -PassThru -Wait
+    if ($process.ExitCode -ne 0) { throw 'Supervised fixture update failed' }
+    if (Test-Path -LiteralPath $restarted) { throw 'Setup restarted the app despite supervisor ownership' }
+
+    # A launcher that stays busy must not be replaced or restarted, even silently.
     Set-Content -LiteralPath (Join-Path $probe 'mode.txt') -Value 'busy' -NoNewline
     $installed = Join-Path $destination 'DoNothingAndWinLauncher.exe'
     $before = (Get-Item -LiteralPath $installed).LastWriteTimeUtc

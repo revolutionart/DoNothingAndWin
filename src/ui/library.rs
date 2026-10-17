@@ -23,6 +23,7 @@ enum UpdateEvent {
 }
 #[derive(Default)]
 pub(super) struct Library {
+    pub(super) catalogue: engine_workspace::plugins::catalogue::Catalogue,
     account: String,
     items: Vec<Item>,
     rx: Option<Receiver<Event>>,
@@ -57,11 +58,14 @@ pub(super) struct Library {
     image_attempts: std::collections::HashSet<String>,
 }
 impl Library {
+    fn item_updates(&self, item: &Item) -> Vec<(String, String)> {
+        let mut updates = self.catalogue.for_item(item);
+        updates.extend(self.updates.get(&item.key()).into_iter().flatten().cloned());
+        updates
+    }
     fn matches_filter(&self, item: &Item, filter: usize) -> bool {
         if filter == AVAILABLE_UPDATES_FILTER {
-            self.updates
-                .get(&item.key())
-                .is_some_and(|updates| !updates.is_empty())
+            !self.item_updates(item).is_empty()
         } else {
             library_kind(item, filter)
         }
@@ -85,70 +89,20 @@ impl Library {
 impl Workspace {
     pub(super) fn has_plugin_updates(&self) -> bool {
         self.engines.iter().any(|e| {
-            self.plugin_work
-                .checks
-                .get(&e.path)
-                .is_some_and(|(_, rows)| rows.iter().any(|r| r.has_update()))
+            self.library
+                .catalogue
+                .rows(&e.path)
+                .iter()
+                .any(|r| r.has_update())
         })
     }
-    pub(super) fn record_completed_plugin_update(
-        &mut self,
-        path: String,
-        completed: Instant,
-        plugin: engine_workspace::plugins::Plugin,
-    ) {
-        reconcile_completed_plugin_update(
-            &mut self.plugin_work,
-            &mut self.library,
-            path,
-            completed,
-            plugin,
-        );
-    }
-    pub(super) fn record_plugin_check_row(
-        &mut self,
-        path: String,
-        started: Instant,
-        row: engine_workspace::plugins::Checked,
-    ) {
-        reconcile_plugin_check_row(
-            &mut self.plugin_work,
-            &mut self.library,
-            path.clone(),
-            started,
-            row,
-        );
-        if self
-            .plugin_engine
-            .is_some_and(|i| self.engines[i].path == path)
-        {
-            if let Some((_, rows)) = self.plugin_work.checks.get(&path) {
-                self.plugin_work.checked = rows.clone();
-            }
-        }
-    }
-    pub(super) fn record_plugin_check(
-        &mut self,
-        path: String,
-        started: Instant,
-        rows: Vec<engine_workspace::plugins::Checked>,
-    ) {
-        reconcile_plugin_check(
-            &mut self.plugin_work,
-            &mut self.library,
-            path,
-            started,
-            rows,
-        );
-    }
-
     pub(super) fn plugin_update_links(&mut self, ui: &mut Ui) {
         let updates: Vec<_> = self
             .engines
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                let (_, rows) = self.plugin_work.checks.get(&e.path)?;
+                let rows = self.library.catalogue.rows(&e.path);
                 let names: Vec<_> = rows
                     .iter()
                     .filter(|r| r.has_update())
@@ -287,7 +241,7 @@ impl Workspace {
             .map(|s| s.account_id.clone())
             .unwrap_or_default();
         if account != self.library.account {
-            self.plugin_work.checks.clear();
+            self.library.catalogue.clear();
             let (tx, rx) = mpsc::channel();
             let cached_account = account.clone();
             let context = ctx.clone();
@@ -462,10 +416,10 @@ impl Workspace {
         {
             match event {
                 UpdateEvent::Plugin(path, started, row) => {
-                    self.record_plugin_check_row(path, started, row)
+                    self.library.catalogue.checked_row(path, started, row)
                 }
                 UpdateEvent::Engine(path, started, Ok(rows)) => {
-                    self.record_plugin_check(path, started, rows)
+                    self.library.catalogue.checked(path, started, rows)
                 }
                 UpdateEvent::Engine(_, _, Err(_)) => {}
                 UpdateEvent::Projects(updates) => {
@@ -728,7 +682,8 @@ impl Workspace {
                                         ui.allocate_exact_size(vec2(width, height), Sense::hover());
                                     let mut card_ui = ui.new_child(UiBuilder::new().max_rect(r));
                                     let ui = &mut card_ui;
-                                    let updates = self.library.updates.get(&item.key());
+                                    let item_updates = self.library.item_updates(item);
+                                    let updates = (!item_updates.is_empty()).then_some(&item_updates);
                                     let has_update = updates.is_some_and(|u| !u.is_empty());
                                     let update_color = Color32::from_rgb(255, 153, 0);
                                     ui.painter().rect_filled(r, 6., color(theme.card));
@@ -1508,106 +1463,11 @@ impl Workspace {
     }
 }
 
-fn reconcile_plugin_check_row(
-    work: &mut plugin_jobs::PluginWork,
-    library: &mut Library,
-    path: String,
-    started: Instant,
-    row: engine_workspace::plugins::Checked,
-) {
-    let mut rows = work
-        .checks
-        .get(&path)
-        .map(|(_, rows)| rows.clone())
-        .unwrap_or_default();
-    rows.retain(|previous| previous.plugin.descriptor != row.plugin.descriptor);
-    rows.push(row);
-    reconcile_plugin_check(work, library, path, started, rows);
-}
-
-fn reconcile_completed_plugin_update(
-    work: &mut plugin_jobs::PluginWork,
-    library: &mut Library,
-    path: String,
-    completed: Instant,
-    plugin: engine_workspace::plugins::Plugin,
-) {
-    let mut rows = work
-        .checks
-        .get(&path)
-        .map(|(_, rows)| rows.clone())
-        .unwrap_or_default();
-    rows.retain(|row| row.plugin.descriptor != plugin.descriptor);
-    rows.push(engine_workspace::plugins::Checked {
-        available_version: Some(plugin.version.clone()),
-        plugin,
-        update: None,
-        status: "Up to date".into(),
-    });
-    // A successful installation is authoritative immediately, including during an
-    // Update all batch. Older checks must not restore its previous update badge.
-    reconcile_plugin_check(work, library, path, completed, rows);
-}
-
-fn reconcile_plugin_check(
-    work: &mut plugin_jobs::PluginWork,
-    library: &mut Library,
-    path: String,
-    started: Instant,
-    rows: Vec<engine_workspace::plugins::Checked>,
-) {
-    if work
-        .checks
-        .get(&path)
-        .is_some_and(|(newer, _)| *newer > started)
-    {
-        return;
-    }
-    for entries in library.updates.values_mut() {
-        entries.retain(|(engine, _)| engine != &path);
-    }
-    for row in rows.iter().filter(|r| r.has_update()) {
-        let listing = engine_workspace::plugins::fab_listing_id(&row.plugin);
-        if let Some(item) = library.items.iter().find(|i| {
-            i.plugin()
-                && (row.plugin.catalog_id.as_deref() == Some(i.asset_id.as_str())
-                    || row.update.as_ref().is_some_and(|u| {
-                        i.project_versions
-                            .iter()
-                            .any(|v| v.artifact_id == u.manifest.app)
-                    })
-                    || listing
-                        .as_ref()
-                        .is_some_and(|id| fab_listing::listing_id(i).as_ref() == Some(id)))
-        }) {
-            library.updates.entry(item.key()).or_default().push((
-                path.clone(),
-                format!("{}: {}", row.plugin.name, row.status_label()),
-            ));
-        }
-    }
-    work.checks.insert(path, (started, rows));
-}
-
 #[cfg(test)]
 mod update_state_tests {
     use super::*;
     fn item() -> Item {
         serde_json::from_value(serde_json::json!({"assetId":"example", "assetNamespace":"publisher", "title":"Example", "distributionMethod":"CODE_PLUGIN"})).unwrap()
-    }
-    fn update() -> engine_workspace::plugins::Checked {
-        engine_workspace::plugins::Checked {
-            plugin: engine_workspace::plugins::Plugin {
-                name: "Example".into(),
-                version: "1.0".into(),
-                number: 1,
-                descriptor: "missing.uplugin".into(),
-                catalog_id: Some("example".into()),
-            },
-            available_version: Some("2.0".into()),
-            update: None,
-            status: "Epic integration update available; update through Epic".into(),
-        }
     }
     #[test]
     fn available_updates_filter_matches_actual_updates_across_content_types() {
@@ -1632,159 +1492,6 @@ mod update_state_tests {
             library.updates.get_mut(&content.key()).unwrap().clear();
             assert!(!library.matches_filter(&content, AVAILABLE_UPDATES_FILTER));
         }
-    }
-    #[test]
-    fn newer_dialog_check_clears_cards_and_badges_and_older_background_cannot_restore_them() {
-        let mut work = plugin_jobs::PluginWork::default();
-        let mut library = Library {
-            items: vec![item()],
-            ..Default::default()
-        };
-        let start = Instant::now();
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            start,
-            vec![update()],
-        );
-        assert!(work.checks["engine"].1[0].has_update());
-        assert_eq!(library.updates[&item().key()].len(), 1);
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            start + Duration::from_secs(1),
-            vec![],
-        );
-        assert!(library.updates[&item().key()].is_empty());
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            start,
-            vec![update()],
-        );
-        assert!(work.checks["engine"].1.is_empty());
-        assert!(library.updates[&item().key()].is_empty());
-    }
-    #[test]
-    fn completed_updates_clear_immediately_without_hiding_other_engines_or_pending_plugins() {
-        let mut other_item = item();
-        other_item.asset_id = "other".into();
-        let mut other = update();
-        other.plugin.descriptor = "other.uplugin".into();
-        other.plugin.catalog_id = Some("other".into());
-        let mut work = plugin_jobs::PluginWork::default();
-        let mut library = Library {
-            items: vec![item(), other_item.clone()],
-            ..Default::default()
-        };
-        let start = Instant::now();
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine-a".into(),
-            start,
-            vec![update(), other.clone()],
-        );
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine-b".into(),
-            start,
-            vec![update()],
-        );
-        let mut installed = update().plugin;
-        installed.version = "2.0".into();
-        installed.number = 2;
-        reconcile_completed_plugin_update(
-            &mut work,
-            &mut library,
-            "engine-a".into(),
-            start + Duration::from_secs(1),
-            installed.clone(),
-        );
-        assert_eq!(library.updates[&item().key()].len(), 1);
-        assert_eq!(library.updates[&item().key()][0].0, "engine-b");
-        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
-        let current = work.checks["engine-a"]
-            .1
-            .iter()
-            .find(|row| row.plugin.descriptor == installed.descriptor)
-            .unwrap();
-        assert_eq!(current.status_label(), "Up to date");
-        assert_eq!(current.plugin.version, "2.0");
-        assert!(!current.has_update());
-        // A check started before installation cannot restore the completed update.
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine-a".into(),
-            start,
-            vec![update(), other],
-        );
-        assert_eq!(library.updates[&item().key()].len(), 1);
-        reconcile_completed_plugin_update(
-            &mut work,
-            &mut library,
-            "engine-b".into(),
-            start + Duration::from_secs(2),
-            installed,
-        );
-        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
-        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
-    }
-    #[test]
-    fn incremental_checks_preserve_pending_rows_and_reject_stale_results() {
-        let mut work = plugin_jobs::PluginWork::default();
-        let mut other_item = item();
-        other_item.asset_id = "other".into();
-        let mut library = Library {
-            items: vec![item(), other_item.clone()],
-            ..Default::default()
-        };
-        let mut pending = update();
-        pending.plugin.descriptor = "other.uplugin".into();
-        pending.plugin.catalog_id = Some("other".into());
-        let started = Instant::now();
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            started,
-            vec![update(), pending],
-        );
-        let mut current = update();
-        current.status = "Up to date".into();
-        reconcile_plugin_check_row(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            started + Duration::from_secs(1),
-            current,
-        );
-        assert_eq!(work.checks["engine"].1.len(), 2);
-        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
-        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
-        reconcile_plugin_check_row(&mut work, &mut library, "engine".into(), started, update());
-        assert!(!library.matches_filter(&item(), AVAILABLE_UPDATES_FILTER));
-        assert!(library.matches_filter(&other_item, AVAILABLE_UPDATES_FILTER));
-    }
-    #[test]
-    fn unmatched_update_still_has_an_engine_destination() {
-        let mut work = plugin_jobs::PluginWork::default();
-        let mut library = Library::default();
-        reconcile_plugin_check(
-            &mut work,
-            &mut library,
-            "engine".into(),
-            Instant::now(),
-            vec![update()],
-        );
-        assert!(library.updates.is_empty());
-        assert_eq!(work.checks["engine"].1[0].plugin.name, "Example");
-        assert!(work.checks["engine"].1[0].has_update());
     }
     #[test]
     fn sync_keeps_loaded_search_details_and_removes_unowned_items() {

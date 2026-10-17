@@ -67,6 +67,8 @@ Download the Windows installer, portable ZIP and SHA-256 checksums from the **[l
 - Setup refuses to replace a running launcher. Finish your transfers and exit before installing an update. It never force-closes a download.
 - The launcher checks for stable app updates at startup and daily while open. An available-update notice opens **Settings → Launcher updates**, where you can also check manually and read release notes. From 1.2.1, installed editions offer **Update launcher**: download and verify the installer, finish active operations, install and restart automatically. Startup and shortcut choices are preserved. Portable editions download the new ZIP for manual replacement. Users on 1.2.0 or earlier need to install 1.2.1 manually once to enable this flow for future releases. Windows may still show security prompts for the installer.
 
+Starting with 1.2.2, update verification runs in the background. If setup fails or is cancelled, the launcher reopens once, explains the outcome and waits for you to retry. If it cannot reopen, recovery instructions include the setup log location. Updates started from 1.2.1 still use its earlier recovery behavior.
+
 This release is unsigned; Windows may display an unknown-publisher/SmartScreen prompt. Download only from this repository's releases and compare the provided SHA-256 checksums if needed.
 
 ## What it does

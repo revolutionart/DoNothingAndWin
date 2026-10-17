@@ -12,6 +12,24 @@ pub(super) struct Cloning {
     rx: Option<Receiver<Event>>,
 }
 impl Cloning {
+    fn next_event(&mut self) -> Option<Event> {
+        let result = self.rx.as_ref()?.try_recv();
+        match result {
+            Ok(event) => {
+                if matches!(&event, Event::Done(_)) {
+                    self.rx = None;
+                }
+                Some(event)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.rx = None;
+                Some(Event::Done(Err(
+                    "Project cloning interrupted. Please retry.".into(),
+                )))
+            }
+        }
+    }
     pub fn busy(&self) -> bool {
         self.rx.is_some()
     }
@@ -33,31 +51,30 @@ impl Workspace {
             ..Default::default()
         };
     }
-    pub(super) fn clone_dialog(&mut self, ctx: &Context) {
-        while let Some(event) = self.cloning.rx.as_ref().and_then(|r| r.try_recv().ok()) {
+    pub(super) fn poll_clone(&mut self, ctx: &Context) {
+        while let Some(event) = self.cloning.next_event() {
             match event {
                 Event::Progress(n, total) => {
                     self.cloning.status = format!("Copying project: {n} / {total} files")
                 }
-                Event::Done(result) => {
-                    self.cloning.rx = None;
-                    match result {
-                        Ok(p) => {
-                            self.prefs.manual_projects.push(p.path.clone());
-                            self.projects.push(p);
-                            self.load_assets(ctx);
-                            self.persist();
-                            self.cloning.source = None;
-                            self.notify("Project cloned. Original project unchanged.");
-                        }
-                        Err(e) => self.cloning.status = e,
+                Event::Done(result) => match result {
+                    Ok(p) => {
+                        self.prefs.manual_projects.push(p.path.clone());
+                        self.projects.push(p);
+                        self.load_assets(ctx);
+                        self.persist();
+                        self.cloning.source = None;
+                        self.notify("Project cloned. Original project unchanged.");
                     }
-                }
+                    Err(e) => self.cloning.status = e,
+                },
             }
         }
         if self.cloning.busy() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+    pub(super) fn clone_dialog(&mut self, ctx: &Context) {
         let Some(source) = self.cloning.source.clone() else {
             return;
         };
@@ -144,6 +161,29 @@ impl Workspace {
                 let _ = tx.send(Event::Done(result));
                 ctx.request_repaint();
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn clone_completion_and_worker_loss_release_busy_without_a_dialog() {
+        for disconnect in [false, true] {
+            let (tx, rx) = mpsc::channel();
+            let mut cloning = Cloning {
+                rx: Some(rx),
+                ..Default::default()
+            };
+            if !disconnect {
+                assert!(tx.send(Event::Done(Err("stopped".into()))).is_ok());
+            }
+            drop(tx);
+            assert!(cloning.busy());
+            assert!(matches!(cloning.next_event(), Some(Event::Done(_))));
+            assert!(!cloning.busy());
+            assert!(cloning.next_event().is_none());
         }
     }
 }

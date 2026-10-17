@@ -57,7 +57,7 @@ impl Workspace {
         };
         if probe.step >= if probe.page.is_some() { 5 } else { CASES.len() } {
             self.plugin_work.mutating = false;
-            self.transfer.downloading = false;
+            self.transfer.operation = Default::default();
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
@@ -66,7 +66,7 @@ impl Workspace {
             if probe.activity || probe.engine_activity {
                 self.plugin_work.mutating = false;
                 self.plugin_work.progress = None;
-                self.transfer.downloading = false;
+                self.transfer.operation = Default::default();
             }
             ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(30., 30.)));
@@ -77,7 +77,7 @@ impl Workspace {
                 self.show_plugins((self.engines.len() - 1).min(1));
                 if probe.plugin_design {
                     // Render-only comparison states. No package is fetched or installed.
-                    self.plugin_work.checked = self
+                    let rows = self
                         .plugins
                         .iter()
                         .enumerate()
@@ -102,6 +102,13 @@ impl Workspace {
                             },
                         })
                         .collect();
+                    if let Some(i) = self.plugin_engine {
+                        self.library.catalogue.checked(
+                            self.engines[i].path.clone(),
+                            Instant::now(),
+                            rows,
+                        );
+                    }
                     self.plugin_work.status = "Design preview".into();
                 }
             }
@@ -126,18 +133,19 @@ impl Workspace {
                         now - Duration::from_millis((120 - i) * 500),
                     );
                 }
-                self.transfer.downloading = true;
-                *self.transfer.progress.lock().unwrap() = engine_workspace::installer::Progress {
-                    phase: "Downloading and verifying chunks".into(),
-                    completed: 760_000_000,
-                    total: 13_910_000_000,
-                    package_bytes: 13_910_000_000,
-                    network: totals[0],
-                    read: totals[1],
-                    written: totals[2],
-                    files_total: 50_000,
-                    ..Default::default()
-                };
+                self.transfer
+                    .operation
+                    .preview(engine_workspace::installer::Progress {
+                        phase: "Downloading and verifying chunks".into(),
+                        completed: 760_000_000,
+                        total: 13_910_000_000,
+                        package_bytes: 13_910_000_000,
+                        network: totals[0],
+                        read: totals[1],
+                        written: totals[2],
+                        files_total: 50_000,
+                        ..Default::default()
+                    });
             }
             if let Some(page) = probe.page {
                 self.page = page;

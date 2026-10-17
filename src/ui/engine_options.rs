@@ -1,12 +1,6 @@
 use super::*;
-use engine_workspace::{
-    installer::{Control, Plan, Progress},
-    maintenance,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-};
+use engine_workspace::{installer::Plan, maintenance};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub(super) struct Options {
@@ -326,9 +320,10 @@ impl Workspace {
             },
         );
         if apply {
-            if let (Some(plan), Some(options)) =
-                (&mut self.transfer.plan, &self.transfer.component_options)
-            {
+            if let (Some(plan), Some(options)) = (
+                self.transfer.operation.plan_mut(),
+                &self.transfer.component_options,
+            ) {
                 plan.selected = options.plan.as_ref().unwrap().selected.clone();
             }
         }
@@ -508,18 +503,17 @@ impl Workspace {
             let mut original = self.options.plan.take().unwrap();
             let selected = original.selected.clone();
             original.selected = self.options.original.clone();
-            let control = Control::default();
-            let progress = Arc::new(Mutex::new(Progress::default()));
-            let (tx, rx) = mpsc::channel();
             self.transfer = transfers::Transfers {
-                receiver: Some(rx),
-                control: control.clone(),
-                progress: progress.clone(),
-                downloading: true,
-                maintenance: Some(false),
                 state: "Applying engine component changes".into(),
                 ..Default::default()
             };
+            let Some(worker) = self.transfer.operation.maintain(
+                engine_workspace::engine_operation::Kind::Components,
+                engine.clone(),
+            ) else {
+                return;
+            };
+            let (tx, control, progress) = (worker.events, worker.control, worker.progress);
             self.engine_options = None;
             self.options = Options::default();
             self.page = Page::Downloads;

@@ -793,7 +793,9 @@ impl Workspace {
         }
     }
     fn open_project(&mut self, index: usize) {
-        if self.transfer.maintenance.is_some() && self.transfer.busy() {
+        if self.transfer.operation.kind() != engine_workspace::engine_operation::Kind::Install
+            && self.transfer.busy()
+        {
             self.notify("Wait for engine maintenance to finish before opening a project.");
             return;
         }
@@ -818,7 +820,9 @@ impl Workspace {
         }
     }
     fn launch_engine(&mut self, index: usize) {
-        if self.transfer.maintenance.is_some() && self.transfer.busy() {
+        if self.transfer.operation.kind() != engine_workspace::engine_operation::Kind::Install
+            && self.transfer.busy()
+        {
             self.notify("Wait for engine maintenance to finish before launching.");
             return;
         }
@@ -1254,7 +1258,7 @@ impl Workspace {
             storage
         };
         let activity = if self.transfer.busy() {
-            let p = self.transfer.progress.lock().unwrap().clone();
+            let p = self.transfer.operation.progress();
             Some((
                 self.transfer.state.clone(),
                 p.phase,
@@ -2348,14 +2352,23 @@ impl eframe::App for Workspace {
             self.run_layout_probe(ctx);
             resize_window_edges(ctx);
         }
-        self.poll(ctx);
-        self.poll_launcher_updates(ctx);
-        if self.launcher_updates.applying {
-            return;
+        if self.launcher_updates.blocks_work() {
+            self.poll_launcher_download();
+            if self.launcher_updates.blocks_work() {
+                self.show_update_preparation(ctx, backgrounded);
+                return;
+            }
         }
+        self.poll(ctx);
         self.poll_transfers(ctx);
         self.poll_plugins(ctx);
         self.poll_library(ctx);
+        self.poll_clone(ctx);
+        self.poll_launcher_updates(ctx);
+        if self.launcher_updates.blocks_work() {
+            self.show_update_preparation(ctx, backgrounded);
+            return;
+        }
         // Continue consuming worker results and running scheduled release checks,
         // but do not build invisible widgets, animate spinners or start UI-only scans.
         if !backgrounded {
@@ -2380,7 +2393,9 @@ impl eframe::App for Workspace {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        let busy = self.pending.is_some()
+        let busy = self.launcher_updates.active()
+            || self.cloning.busy()
+            || self.pending.is_some()
             || self.transfer.busy()
             || self.scan.receiver.is_some()
             || self.library_transfer_status().is_some()

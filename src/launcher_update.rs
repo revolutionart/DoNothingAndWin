@@ -2,12 +2,13 @@ use serde::Deserialize;
 use std::{io::Read, time::Duration};
 
 pub mod install;
+pub mod lifecycle;
 
 const REPOSITORY: &str = "https://github.com/revolutionart/DoNothingAndWin";
 const API: &str = "https://api.github.com/repos/revolutionart/DoNothingAndWin/releases/latest";
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Update {
     pub version: String,
     pub release_url: String,

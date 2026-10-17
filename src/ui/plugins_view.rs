@@ -4,16 +4,11 @@ impl Workspace {
         if self.plugin_work.mutating {
             return;
         }
-        self.plugin_work.checked = self
-            .plugin_work
-            .checks
-            .get(&self.engines[i].path)
-            .map(|(_, rows)| rows.clone())
-            .unwrap_or_default();
-        self.plugin_work.status = if self.plugin_work.checked.is_empty() {
+        let checked = self.library.catalogue.rows(&self.engines[i].path);
+        self.plugin_work.status = if checked.is_empty() {
             "Check for updates for this engine version".into()
         } else {
-            engine_workspace::plugins::check_summary(&self.plugin_work.checked)
+            engine_workspace::plugins::check_summary(checked)
         };
         self.plugin_engine = Some(i);
         self.plugin_search.clear();
@@ -24,13 +19,9 @@ impl Workspace {
             engine_workspace::plugins::installed(Path::new(&self.engines[i].path))
         };
         // Never show an old comparison against a newly edited/replaced descriptor.
-        self.plugin_work.checked.retain(|row| {
-            self.plugins.iter().any(|p| {
-                p.descriptor == row.plugin.descriptor
-                    && p.version == row.plugin.version
-                    && p.number == row.plugin.number
-            })
-        });
+        self.library
+            .catalogue
+            .retain_installed(&self.engines[i].path, &self.plugins);
         if !self.demo {
             self.workspace_cache.invalidate();
             self.plugin_counts

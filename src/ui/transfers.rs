@@ -1,54 +1,44 @@
 use super::*;
+pub(super) use engine_workspace::engine_operation::Event;
 use engine_workspace::{
     discovery,
-    installer::{self, Control, Plan, Progress},
+    engine_operation::{Kind, Operation},
+    installer,
 };
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize},
     },
 };
-pub(super) enum Event {
-    Prepared(Result<Plan, String>),
-    Maintained(Installation, bool, Result<String, String>),
-    Finished(Result<PathBuf, String>),
-}
 #[derive(Default)]
 pub(super) struct Transfers {
-    pub receiver: Option<Receiver<Event>>,
-    pub plan: Option<Plan>,
+    pub operation: Operation,
     pub release: Option<Release>,
     pub parent: String,
     pub modal: bool,
     pub shortcut: bool,
     pub component_options: Option<super::engine_options::Options>,
     pub state: String,
-    pub progress: Arc<Mutex<Progress>>,
-    pub control: Control,
-    pub downloading: bool,
-    pub preparing: bool,
-    pub installed: Option<PathBuf>,
-    pub maintenance: Option<bool>,
     pub activity: super::plugin_activity::Activity,
 }
 impl Transfers {
     pub fn busy(&self) -> bool {
-        self.receiver.is_some()
+        self.operation.busy()
     }
     pub fn preparing(&self) -> bool {
-        self.preparing
+        self.operation.preparing()
     }
     pub fn is_install_for(&self, app: &str) -> bool {
-        self.maintenance.is_none()
+        self.operation.kind() == Kind::Install
             && self
                 .release
                 .as_ref()
                 .is_some_and(|release| release.app == app)
     }
     pub fn dismiss_install(&mut self) -> bool {
-        if self.busy() || self.maintenance.is_some() || self.installed.is_some() {
+        if !self.operation.dismiss() {
             return false;
         }
         // Only discard the UI plan. Verified staging files and cached chunks remain on disk.
@@ -116,70 +106,6 @@ mod resume_tests {
         release.app = "UE_5.7".into();
         assert!(!release_is_installed(&release, &engines));
     }
-
-    fn stopped(target: PathBuf) -> Transfers {
-        Transfers {
-            release: Some(Release {
-                app: "UE_5.8".into(),
-                catalog_id: String::new(),
-                channel: "Live".into(),
-                platform: "Windows".into(),
-                build: None,
-                version: None,
-            }),
-            plan: Some(Plan {
-                manifest: engine_workspace::buildpatch::Manifest::default(),
-                bases: vec![],
-                target,
-                tags: vec![],
-                selected: vec![],
-            }),
-            state: "Stopped. Verified files and chunks are retained.".into(),
-            modal: true,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn removing_matching_pending_engine_clears_resume_without_deleting_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let chunk = dir.path().join("verified.chunk");
-        std::fs::write(&chunk, b"verified data").unwrap();
-        let mut transfer = stopped(dir.path().to_owned());
-        assert!(!transfer.dismiss_install_for("UE_5.7"));
-        assert!(transfer.plan.is_some());
-        assert!(transfer.dismiss_install_for("UE_5.8"));
-        assert!(transfer.plan.is_none());
-        assert!(transfer.release.is_none());
-        assert!(transfer.state.is_empty());
-        assert!(!transfer.modal);
-        assert_eq!(std::fs::read(chunk).unwrap(), b"verified data");
-    }
-
-    #[test]
-    fn dismissal_preserves_active_transfers_and_completed_installs() {
-        let mut transfer = stopped(PathBuf::from("unused"));
-        let (_sender, receiver) = mpsc::channel();
-        transfer.receiver = Some(receiver);
-        assert!(!transfer.dismiss_install());
-        assert!(transfer.busy());
-        assert!(transfer.plan.is_some());
-        assert!(
-            !transfer
-                .control
-                .cancel
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-        transfer.receiver = None;
-        transfer.installed = Some(PathBuf::from("installed"));
-        assert!(!transfer.dismiss_install());
-        transfer.installed = None;
-        transfer.maintenance = Some(false);
-        assert!(!transfer.dismiss_install());
-        transfer.maintenance = None;
-        assert!(transfer.dismiss_install());
-        assert!(transfer.plan.is_none());
-    }
 }
 #[derive(Default)]
 pub(super) struct Scan {
@@ -194,22 +120,7 @@ impl Workspace {
             self.notify("Another engine operation is running.");
             return;
         }
-        let control = Control::default();
-        let progress = Arc::new(Mutex::new(Progress {
-            phase: if remove {
-                "Preparing removal".into()
-            } else {
-                "Loading the installed build manifest".into()
-            },
-            ..Default::default()
-        }));
-        let (tx, rx) = mpsc::channel();
         self.transfer = Transfers {
-            receiver: Some(rx),
-            control: control.clone(),
-            progress: progress.clone(),
-            downloading: true,
-            maintenance: Some(remove),
             state: format!(
                 "{} Unreal Engine {}",
                 if remove { "Removing" } else { "Verifying" },
@@ -217,6 +128,21 @@ impl Workspace {
             ),
             ..Default::default()
         };
+        let worker = self
+            .transfer
+            .operation
+            .maintain(
+                if remove { Kind::Remove } else { Kind::Verify },
+                engine.clone(),
+            )
+            .unwrap();
+        let (tx, control, progress) = (worker.events, worker.control, worker.progress);
+        progress.lock().unwrap().phase = if remove {
+            "Preparing removal"
+        } else {
+            "Loading the installed build manifest"
+        }
+        .into();
         self.plugin_engine = None;
         self.page = Page::Downloads;
         let snapshot = self.snapshot.clone();
@@ -279,11 +205,9 @@ impl Workspace {
             self.page = Page::Downloads;
             return;
         }
-        self.transfer.maintenance = None;
-        self.transfer.installed = None;
+        self.transfer.operation = Operation::default();
         self.transfer.release = Some(r);
         self.transfer.parent = self.prefs.install_root.clone();
-        self.transfer.plan = None;
         self.transfer.modal = true;
         self.transfer.shortcut = true;
         self.transfer.component_options = None;
@@ -307,9 +231,10 @@ impl Workspace {
             return;
         }
         let parent = PathBuf::from(&self.transfer.parent);
-        let (tx, rx) = mpsc::channel();
-        self.transfer.receiver = Some(rx);
-        self.transfer.preparing = true;
+        let Some(worker) = self.transfer.operation.prepare(parent.clone()) else {
+            return;
+        };
+        let tx = worker.events;
         self.transfer.state = "Fetching Epic's engine manifest…".into();
         std::thread::spawn(move || {
             let result = installer::prepare(&s, &r, &parent);
@@ -321,7 +246,7 @@ impl Workspace {
         if self.transfer.busy() || self.plugin_work.mutating {
             return;
         }
-        let Some(plan) = self.transfer.plan.clone() else {
+        let Some(plan) = self.transfer.operation.plan().cloned() else {
             return;
         };
         // Recheck local installations before starting a previously prepared plan.
@@ -338,17 +263,14 @@ impl Workspace {
             self.notify("This engine version is already installed.");
             return;
         }
-        let control = Control::default();
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        let (tx, rx) = mpsc::channel();
-        self.transfer.receiver = Some(rx);
-        self.transfer.control = control.clone();
-        self.transfer.progress = progress.clone();
+        let Some(worker) = self.transfer.operation.install() else {
+            return;
+        };
+        let (tx, control, progress) = (worker.events, worker.control, worker.progress);
         self.transfer.activity = Default::default();
         self.transfer
             .activity
             .sample_totals("engine", [0; 3], Instant::now());
-        self.transfer.downloading = true;
         self.transfer.modal = false;
         self.transfer.state = "Preparing download…".into();
         self.page = Page::Downloads;
@@ -359,8 +281,9 @@ impl Workspace {
         });
     }
     pub(super) fn poll_transfers(&mut self, ctx: &Context) {
-        if self.transfer.downloading && self.transfer.maintenance.is_none() {
-            let p = self.transfer.progress.lock().unwrap().clone();
+        if self.transfer.operation.transferring() && self.transfer.operation.kind() == Kind::Install
+        {
+            let p = self.transfer.operation.progress();
             self.transfer.activity.sample_totals(
                 "engine",
                 [p.network, p.read, p.written],
@@ -404,22 +327,14 @@ impl Workspace {
             self.persist();
             self.load_assets(ctx);
         }
-        if let Some(event) = self
-            .transfer
-            .receiver
-            .as_ref()
-            .and_then(|r| r.try_recv().ok())
-        {
-            self.transfer.receiver = None;
-            self.transfer.preparing = false;
-            self.transfer.downloading = false;
+        if let Some(event) = self.transfer.operation.poll() {
             self.session = storage::load_session();
             match &event {
                 Event::Maintained(engine, removed, result) => self.record_activity(
                     if *removed {
                         "Engine removal".into()
                     } else {
-                        if self.transfer.maintenance == Some(false) {
+                        if self.transfer.operation.kind() == Kind::Verify {
                             "Engine verification".into()
                         } else {
                             "Engine component changes".into()
@@ -476,11 +391,9 @@ impl Workspace {
                         self.notify(message);
                     }
                 },
-                Event::Prepared(Ok(mut p)) => {
-                    p.target = PathBuf::from(&self.transfer.parent).join(&p.manifest.app);
+                Event::Prepared(Ok(_)) => {
                     self.transfer.state =
                         "Manifest verified. Choose components and installation destination.".into();
-                    self.transfer.plan = Some(p);
                 }
                 Event::Prepared(Err(e)) => self.transfer.state = e,
                 Event::Finished(Ok(path)) => {
@@ -506,7 +419,6 @@ impl Workspace {
                     let registration: Option<serde_json::Value> =
                         storage::read_json(&path.join(".alpine-epic-registration.json"));
                     self.transfer.state = registration.as_ref().and_then(|v|v["warning"].as_str()).map(|w|format!("Engine installed and verified; Epic registration needs attention: {w}")).unwrap_or_else(||"Engine installed, verified and registered with Epic. Ready to launch.".into());
-                    self.transfer.installed = Some(path);
                     self.notify(self.transfer.state.clone());
                     if self.prefs.downloads.notify_complete {
                         ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
@@ -716,7 +628,7 @@ impl Workspace {
                         "Directory must be empty. Choose another folder.",
                     );
                 }
-                if let Some(plan) = &mut self.transfer.plan {
+                if let Some(plan) = self.transfer.operation.plan_mut() {
                     plan.target = target;
                     options = ui
                         .add(buttons::secondary_button("Options"))
@@ -729,7 +641,7 @@ impl Workspace {
                         download as f64 / 1e9,
                         disk as f64 / 1e9
                     ));
-                } else if self.transfer.preparing {
+                } else if self.transfer.preparing() {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().color(color(self.theme.text)));
                         ui.label("Loading installation options…");
@@ -756,7 +668,7 @@ impl Workspace {
                     ui,
                     &self.theme,
                     "Install",
-                    self.transfer.plan.is_some()
+                    self.transfer.operation.plan().is_some()
                         && !self.transfer.busy()
                         && !occupied
                         && Path::new(&self.transfer.parent).is_absolute()
@@ -770,7 +682,7 @@ impl Workspace {
             self.prepare_install(ctx.clone());
         }
         if options {
-            if let Some(plan) = &self.transfer.plan {
+            if let Some(plan) = self.transfer.operation.plan() {
                 self.transfer.component_options = Some(
                     super::engine_options::Options::from_install_plan(plan.clone()),
                 );

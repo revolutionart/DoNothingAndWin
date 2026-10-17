@@ -3,8 +3,22 @@
 mod desktop_launch;
 mod event_loop;
 mod ui;
+#[cfg(windows)]
+mod update_supervisor;
 mod window_frame;
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    if std::env::args().any(|a| a == "--supervise-update") {
+        if let Err(error) = update_supervisor::run() {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(root) = exe.parent() {
+                    let _ = std::fs::write(root.join("helper-error.txt"), error);
+                }
+            }
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     #[cfg(windows)]
     if std::env::args().any(|a| a == "--launch-from-desktop") {
         if let Err(message) = desktop_launch::relaunch() {

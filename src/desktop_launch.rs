@@ -22,6 +22,17 @@ pub fn relaunch() -> Result<(), String> {
     launch(&executable, "", 1).map_err(|e| e.to_string())
 }
 
+pub fn launch_installed(executable: &Path) -> Result<(), String> {
+    if !executable.is_absolute()
+        || executable
+            .file_name()
+            .is_none_or(|n| n != "DoNothingAndWinLauncher.exe")
+    {
+        return Err("Invalid installed launcher path".into());
+    }
+    launch(executable, "", 1).map_err(|e| e.to_string())
+}
+
 fn launch(executable: &Path, arguments: &str, show: i32) -> windows::core::Result<()> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
     struct Apartment;

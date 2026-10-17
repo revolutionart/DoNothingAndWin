@@ -294,8 +294,11 @@ impl Workspace {
         if !self.downloads.recent {
             if self.plugin_work.mutating && self.plugin_work.progress.is_some() {
                 self.plugin_work.show_progress(ui, t, &self.textures, true);
-            } else if self.transfer.downloading && self.transfer.maintenance.is_none() {
-                let p = self.transfer.progress.lock().unwrap().clone();
+            } else if self.transfer.operation.transferring()
+                && self.transfer.operation.kind()
+                    == engine_workspace::engine_operation::Kind::Install
+            {
+                let p = self.transfer.operation.progress();
                 let title = self
                     .transfer
                     .release
@@ -319,7 +322,7 @@ impl Workspace {
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
                 {
-                    self.transfer.control.stop();
+                    self.transfer.operation.stop();
                 }
             } else {
                 Frame::new()
@@ -361,7 +364,7 @@ impl Workspace {
                         });
                         if self.transfer.busy() {
                             ui.label(&self.transfer.state);
-                            let p = self.transfer.progress.lock().unwrap().clone();
+                            let p = self.transfer.operation.progress();
                             if p.total == 0 {
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new().color(if self.theme.dark {
@@ -398,15 +401,14 @@ impl Workspace {
                                     p.network as f64 / 1e9
                                 ));
                             }
-                            if self.transfer.downloading
-                                && self.transfer.maintenance != Some(true)
+                            if self.transfer.operation.can_stop()
                                 && ui
                                     .add(buttons::secondary_button("Stop transfer"))
                                     .clone()
                                     .on_hover_cursor(CursorIcon::PointingHand)
                                     .clicked()
                             {
-                                self.transfer.control.stop();
+                                self.transfer.operation.stop();
                             }
                         }
                         if let Some(s) = self.library_transfer_status() {
@@ -430,10 +432,7 @@ impl Workspace {
                         }
                     });
             }
-            if !self.transfer.busy()
-                && self.transfer.plan.is_some()
-                && self.transfer.installed.is_none()
-            {
+            if self.transfer.operation.can_resume() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(&self.transfer.state);
                     if ui.add(buttons::secondary_button("Resume engine installation"))
@@ -452,7 +451,7 @@ impl Workspace {
                     }
                 });
             }
-            if let Some(path) = self.transfer.installed.clone() {
+            if let Some(path) = self.transfer.operation.installed().cloned() {
                 ui.horizontal(|ui| {
                     if ui
                         .add(buttons::secondary_button("Open engine folder"))

@@ -24,6 +24,15 @@ impl Drop for StagedInstaller {
             // Only remove our own files, never recursively traverse a staging folder.
             let _ = fs::remove_file(self.directory.join("installer.part"));
             let _ = fs::remove_file(&self.path);
+            for name in [
+                "update-supervisor.exe",
+                "handoff.json",
+                "ready",
+                "proceed",
+                "helper-error.txt",
+            ] {
+                let _ = fs::remove_file(self.directory.join(name));
+            }
             let _ = fs::remove_dir(&self.directory);
         }
     }
@@ -184,40 +193,91 @@ fn copy_verified(
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Handoff {
+    pub directory: PathBuf,
+    pub update: Update,
+}
+pub fn verify_handoff(root: &Path, request: &Handoff) -> Result<File, String> {
+    if !request.directory.is_absolute()
+        || !request.directory.join("unins000.exe").is_file()
+        || !request
+            .directory
+            .join("DoNothingAndWinLauncher.exe")
+            .is_file()
+    {
+        return Err("The installed launcher location is no longer valid.".into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1); // FILE_SHARE_READ; reject writes/deletion until setup exits.
+    }
+    let mut file = options
+        .open(root.join("installer.exe"))
+        .map_err(|e| e.to_string())?;
+    copy_verified(
+        &mut file,
+        &mut std::io::sink(),
+        &request.update,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )?;
+    Ok(file)
+}
 impl StagedInstaller {
-    /// Call only after background mutations have finished and preferences are saved.
-    pub fn launch(&mut self) -> Result<(), String> {
-        let directory = installation_directory()?;
-        // Recheck the staged file immediately before executing it.
-        let mut file = File::open(&self.path).map_err(|e| e.to_string())?;
-        copy_verified(
-            &mut file,
-            &mut std::io::sink(),
-            &self.update,
-            &AtomicBool::new(false),
-            &mut |_| {},
-        )?;
-        std::process::Command::new(&self.path)
-            .args([
-                "/SILENT",
-                "/SP-",
-                "/NORESTART",
-                "/NOCLOSEAPPLICATIONS",
-                "/NOFORCECLOSEAPPLICATIONS",
-                "/DNWUPDATE=1",
-            ])
-            .arg(format!("/DIR={}", directory.display()))
-            .arg(format!(
-                "/LOG={}",
-                self.directory.join("setup.log").display()
-            ))
+    /// Runs on a worker after active operations finish. The helper never holds the app lock.
+    pub fn launch_supervised(&mut self, cancelled: &AtomicBool) -> Result<(), String> {
+        let request = Handoff {
+            directory: installation_directory()?,
+            update: self.update.clone(),
+        };
+        let _verified = verify_handoff(&self.directory, &request)?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Update cancelled before handoff.".into());
+        }
+        let helper = self.directory.join("update-supervisor.exe");
+        fs::copy(std::env::current_exe().map_err(|e| e.to_string())?, &helper)
+            .map_err(|e| e.to_string())?;
+        fs::write(
+            self.directory.join("handoff.json"),
+            serde_json::to_vec(&request).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut child = std::process::Command::new(&helper)
+            .arg("--supervise-update")
             .current_dir(&self.directory)
             .spawn()
-            .map_err(|e| {
-                format!("Could not start the installer: {e}. The launcher is still open.")
-            })?;
-        self.handed_off = true;
-        Ok(())
+            .map_err(|e| format!("Could not start update helper: {e}"))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if cancelled.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(
+                    "Update preparation cancelled or timed out. The launcher is still open.".into(),
+                );
+            }
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                let detail = fs::read_to_string(self.directory.join("helper-error.txt"))
+                    .unwrap_or_else(|_| status.to_string());
+                return Err(format!(
+                    "Update helper failed: {detail}. The launcher is still open."
+                ));
+            }
+            if self.directory.join("ready").is_file() {
+                if let Err(e) = fs::write(self.directory.join("proceed"), b"proceed") {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Could not hand off update: {e}"));
+                }
+                self.handed_off = true;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 

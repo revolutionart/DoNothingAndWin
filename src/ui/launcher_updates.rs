@@ -1,10 +1,8 @@
 use super::*;
 use engine_workspace::launcher_update::{self, Update};
 use launcher_update::install::{self, StagedInstaller};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use launcher_update::lifecycle::{Lifecycle, Phase};
+use std::sync::atomic::Ordering;
 
 #[derive(Default)]
 pub(super) struct LauncherUpdates {
@@ -12,21 +10,30 @@ pub(super) struct LauncherUpdates {
     checked: Option<Instant>,
     pub(super) available: Option<Update>,
     error: Option<String>,
-    download: Option<Receiver<Result<StagedInstaller, String>>>,
-    cancelled: Arc<AtomicBool>,
-    downloaded: Arc<AtomicU64>,
+    flow: Lifecycle<StagedInstaller>,
     download_size: u64,
-    staged: Option<StagedInstaller>,
     pub(super) applying: bool,
 }
-
-impl Drop for LauncherUpdates {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+impl LauncherUpdates {
+    pub(super) fn active(&self) -> bool {
+        self.flow.active()
+    }
+    pub(super) fn blocks_work(&self) -> bool {
+        self.flow.blocks_work()
     }
 }
 
 impl Workspace {
+    pub(super) fn show_update_preparation(&self, ctx: &Context, backgrounded: bool) {
+        if !backgrounded {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("Preparing launcher update");
+                ui.spinner();
+                ui.label("Verifying the installer and saving your settings...");
+            });
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
     fn launcher_update_busy(&self) -> bool {
         self.pending.is_some()
             || self.login
@@ -38,81 +45,50 @@ impl Workspace {
     }
 
     fn start_launcher_download(&mut self, update: Update, ctx: &Context) {
-        if self.launcher_updates.download.is_some() || self.launcher_updates.staged.is_some() {
+        if self.launcher_updates.flow.active() {
             return;
         }
         if let Err(error) = install::installation_directory() {
             self.launcher_updates.error = Some(error);
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let downloaded = Arc::new(AtomicU64::new(0));
-        self.launcher_updates.cancelled = cancelled.clone();
-        self.launcher_updates.downloaded = downloaded.clone();
         self.launcher_updates.download_size = update.size;
-        self.launcher_updates.download = Some(rx);
         self.launcher_updates.error = None;
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let result = install::download(
-                update,
-                &storage::data_dir().join("launcher-updates"),
-                &cancelled,
-                |bytes| {
-                    downloaded.store(bytes, Ordering::Relaxed);
-                    ctx.request_repaint();
-                },
-            );
-            // Closing the app or cancelling discards the staged executable, even if
-            // the final network read finished after cancellation was requested.
-            if !cancelled.load(Ordering::Relaxed) {
-                let _ = tx.send(result);
-            }
-            ctx.request_repaint();
-        });
+        self.launcher_updates
+            .flow
+            .start(move |cancelled, downloaded| {
+                let result = install::download(
+                    update,
+                    &storage::data_dir().join("launcher-updates"),
+                    &cancelled,
+                    |bytes| {
+                        downloaded.store(bytes, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    },
+                );
+                ctx.request_repaint();
+                result
+            });
     }
 
-    fn poll_launcher_download(&mut self) {
-        if let Some(result) = self
-            .launcher_updates
-            .download
-            .as_ref()
-            .map(|rx| rx.try_recv())
-        {
-            match result {
-                Ok(result) => {
-                    self.launcher_updates.download = None;
-                    if !self.launcher_updates.cancelled.load(Ordering::Relaxed) {
-                        match result {
-                            Ok(staged) => self.launcher_updates.staged = Some(staged),
-                            Err(error) => self.launcher_updates.error = Some(error),
-                        }
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.launcher_updates.download = None;
-                    if !self.launcher_updates.cancelled.load(Ordering::Relaxed) {
-                        self.launcher_updates.error =
-                            Some("Launcher download interrupted. Please retry.".into());
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
+    pub(super) fn poll_launcher_download(&mut self) {
+        let busy = self.launcher_update_busy();
+        let mut prefs = self.prefs.clone();
+        prefs.launch_engine = self.launch_path.clone();
+        prefs.projects = self.projects.clone();
+        self.launcher_updates
+            .flow
+            .poll(busy, move |mut staged, cancelled| {
+                storage::save_preferences(&prefs)?;
+                staged.launch_supervised(&cancelled)
+            });
+        if let Some(error) = self.launcher_updates.flow.take_error() {
+            self.launcher_updates.error = Some(error);
         }
-        if self.launcher_update_busy() || self.launcher_updates.applying {
-            return;
-        }
-        if let Some(mut staged) = self.launcher_updates.staged.take() {
-            self.prefs.launch_engine = self.launch_path.clone();
-            self.prefs.projects = self.projects.clone();
-            match storage::save_preferences(&self.prefs).and_then(|()| staged.launch()) {
-                Ok(()) => {
-                    self.launcher_updates.applying = true;
-                    crate::window_frame::request_exit();
-                }
-                Err(error) => self.launcher_updates.error = Some(error),
-            }
+        if self.launcher_updates.flow.phase() == Phase::Ready {
+            self.launcher_updates.applying = true;
+            crate::window_frame::request_exit();
         }
     }
 
@@ -163,8 +139,7 @@ impl Workspace {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self.launcher_updates.download.is_none()
-            && self.launcher_updates.staged.is_none()
+        if !self.launcher_updates.flow.active()
             && self
                 .launcher_updates
                 .checked
@@ -182,8 +157,7 @@ impl Workspace {
         ));
         ui.label("Checks GitHub at startup and once a day while open. Downloads and installation are started by you.");
         let checking = self.launcher_updates.receiver.is_some();
-        let updating =
-            self.launcher_updates.download.is_some() || self.launcher_updates.staged.is_some();
+        let updating = self.launcher_updates.flow.active();
         if ui
             .add_enabled(
                 !checking && !updating,
@@ -249,12 +223,12 @@ impl Workspace {
             ui.label("You’re using the latest launcher version.");
         }
         if updating {
-            if self.launcher_updates.staged.is_some() {
+            if self.launcher_updates.flow.phase() == Phase::Waiting {
                 ui.label(
                     "Update verified. Waiting for active operations to finish before restarting...",
                 );
             } else {
-                let received = self.launcher_updates.downloaded.load(Ordering::Relaxed);
+                let received = self.launcher_updates.flow.received();
                 let total = self.launcher_updates.download_size.max(1);
                 ui.add(
                     egui::ProgressBar::new(received as f32 / total as f32).text(format!(
@@ -268,11 +242,7 @@ impl Workspace {
                 .add(buttons::secondary_button("Cancel launcher update"))
                 .clicked()
             {
-                self.launcher_updates
-                    .cancelled
-                    .store(true, Ordering::Relaxed);
-                self.launcher_updates.download = None;
-                self.launcher_updates.staged = None;
+                self.launcher_updates.flow.cancel();
             }
             ctx.request_repaint_after(Duration::from_millis(200));
         }

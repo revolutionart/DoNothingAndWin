@@ -11,8 +11,6 @@ enum Event {
 pub(super) struct PluginWork {
     rx: Option<Receiver<Event>>,
     pub mutating: bool,
-    pub checked: Vec<Checked>,
-    pub checks: std::collections::HashMap<String, (Instant, Vec<Checked>)>,
     pub status: String,
     check_done: usize,
     check_total: usize,
@@ -135,12 +133,14 @@ impl Workspace {
             }
             match event {
                 Event::CheckRow(path, started, row) => {
-                    self.record_plugin_check_row(path, started, row);
+                    self.library.catalogue.checked_row(path, started, row);
                     self.plugin_work.check_done += 1;
                     ctx.request_repaint();
                 }
                 Event::Updated(path, completed, plugin) => {
-                    self.record_completed_plugin_update(path.clone(), completed, plugin.clone());
+                    self.library
+                        .catalogue
+                        .installed(path.clone(), completed, plugin.clone());
                     if self
                         .plugin_engine
                         .is_some_and(|i| self.engines[i].path == path)
@@ -152,13 +152,14 @@ impl Workspace {
                         {
                             *local = plugin;
                         }
-                        self.plugin_work.checked = self.plugin_work.checks[&path].1.clone();
                     }
                     ctx.request_repaint();
                 }
                 Event::Checked(path, started, result) => {
                     if let Ok(items) = &result {
-                        self.record_plugin_check(path.clone(), started, items.clone());
+                        self.library
+                            .catalogue
+                            .checked(path.clone(), started, items.clone());
                     }
                     if self
                         .plugin_engine
@@ -167,7 +168,6 @@ impl Workspace {
                         match result {
                             Ok(items) => {
                                 self.plugin_work.status = plugins::check_summary(&items);
-                                self.plugin_work.checked = items;
                             }
                             Err(e) => self.plugin_work.status = e,
                         }
@@ -332,6 +332,7 @@ impl Workspace {
         };
         let t = self.theme.clone();
         let engine = self.engines[index].clone();
+        let checked = self.library.catalogue.rows(&engine.path).to_vec();
         for p in &self.plugins {
             let key = p.descriptor.to_string_lossy().into_owned();
             if self.plugin_work.icons_loaded.insert(key.clone()) {
@@ -355,9 +356,7 @@ impl Workspace {
         }
         let width = 1180f32.min(ctx.content_rect().width() - 96.);
         let busy = self.plugin_work.mutating || self.transfer.busy();
-        let updates: Vec<_> = self
-            .plugin_work
-            .checked
+        let updates: Vec<_> = checked
             .iter()
             .filter_map(|i| i.update.clone().map(|u| (i.plugin.clone(), u)))
             .collect();
@@ -442,11 +441,7 @@ impl Workspace {
                             true,
                             format!(
                                 "Updates ({})",
-                                self.plugin_work
-                                    .checked
-                                    .iter()
-                                    .filter(|row| row.has_update())
-                                    .count()
+                                checked.iter().filter(|row| row.has_update()).count()
                             ),
                             112.,
                         ),
@@ -563,9 +558,7 @@ impl Workspace {
                         ui.set_min_height(if self.plugin_work.mutating { 58. } else { 120. });
                         let mut row_borders = Vec::new();
                         for p in rows {
-                            let checked = self
-                                .plugin_work
-                                .checked
+                            let checked = checked
                                 .iter()
                                 .find(|i| i.plugin.descriptor == p.descriptor)
                                 .cloned();

@@ -8,6 +8,8 @@ Also run `cargo test --locked --features portable --bin engine-workspace` for th
 
 Keep disk and network work off the UI thread. Preserve download-safe single-instance behavior, streaming writes, path traversal checks, and installation rollback. Never commit local account state or downloaded marketplace content.
 
+For launcher updater changes, build the installed edition with `cargo build --release --locked --bin engine-workspace`, then run `scripts/test-update-supervisor.ps1`. It uses stand-in executables and an isolated data directory to check shutdown waiting, verified-file protection, successful restart, cancellation, setup failure and a missing launcher. Recovery dialogs belong to the fixture and are closed by the test. `scripts/test-launcher-update.ps1 -Iscc <path-to-ISCC.exe>` checks the production Inno Setup logic with an isolated AppId and payload, including supervisor-owned restart. `scripts/test-postinstall-launch.ps1 -TargetDir target` checks the Windows desktop handoff against a temporary cache junction. These scripts do not update the real launcher or its engines.
+
 ## Release
 
 1. Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and the README download links, then test and build with the lockfile.
