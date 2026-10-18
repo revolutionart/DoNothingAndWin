@@ -39,7 +39,7 @@ impl Workspace {
             || self.login
             || self.transfer.busy()
             || self.plugin_work.mutating
-            || self.library_transfer_status().is_some()
+            || self.library_work_pending()
             || self.cloning.busy()
             || self.scan.receiver.is_some()
             || self.project_finder.busy()

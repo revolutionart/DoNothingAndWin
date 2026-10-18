@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod plugin_install;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Version {
@@ -32,6 +34,14 @@ pub struct LibraryBuild {
     pub build_version: String,
 }
 impl Version {
+    pub fn supports_windows_engine(&self, engine: &str) -> bool {
+        (self.target_platforms.is_empty() || self.target_platforms.iter().any(|p| p == "Windows"))
+            && self.engine_versions.iter().any(|raw| {
+                EngineVersion::parse(raw)
+                    .zip(EngineVersion::parse(engine))
+                    .is_some_and(|(a, b)| a.branch() == b.branch())
+            })
+    }
     /// Library metadata is a visibility signal, not proof of publisher approval.
     pub fn require_listed_windows_build(&self, build: &str) -> Result<(), String> {
         if !build.is_empty()
@@ -90,12 +100,7 @@ impl Item {
         self.project_versions
             .iter()
             .rev()
-            .find(|v| {
-                (v.target_platforms.is_empty() || v.target_platforms.iter().any(|p| p == "Windows"))
-                    && v.engine_versions
-                        .iter()
-                        .any(|e| EngineVersion::parse(e).is_some_and(|e| e.branch() == branch))
-            })
+            .find(|v| v.supports_windows_engine(&branch))
             .cloned()
     }
     /// Explicitly selected package branch for asset imports into other/custom projects.
@@ -395,12 +400,52 @@ pub fn install(
     engine_version: &str,
     progress: impl Fn(String),
 ) -> Result<String, String> {
+    install_with_control(
+        session,
+        item,
+        version,
+        target,
+        engine_version,
+        &installer::Control::default(),
+        progress,
+    )
+}
+
+pub fn install_with_control(
+    session: &Session,
+    item: &Item,
+    version: &Version,
+    target: &Path,
+    engine_version: &str,
+    control: &installer::Control,
+    progress: impl Fn(String),
+) -> Result<String, String> {
+    install_package(
+        item,
+        version,
+        target,
+        engine_version,
+        || package(session, item, version),
+        control,
+        progress,
+    )
+}
+
+fn install_package(
+    item: &Item,
+    version: &Version,
+    target: &Path,
+    engine_version: &str,
+    package: impl FnOnce() -> Result<(buildpatch::Manifest, Vec<reqwest::Url>), String>,
+    control: &installer::Control,
+    progress: impl Fn(String),
+) -> Result<String, String> {
+    control.check()?;
     crate::download_policy::check_install_allowed()?;
     if item.compatible(engine_version).is_none()
-        || !version.engine_versions.iter().any(|e| {
-            EngineVersion::parse(e)
-                .zip(EngineVersion::parse(engine_version))
-                .is_some_and(|(a, b)| a.branch() == b.branch())
+        || !version.supports_windows_engine(engine_version)
+        || !item.project_versions.iter().any(|v| {
+            v.artifact_id == version.artifact_id && v.supports_windows_engine(engine_version)
         })
     {
         return Err("No compatible build for this engine".into());
@@ -412,7 +457,9 @@ pub fn install(
         crate::maintenance::ensure_closed(&target)?;
     }
     progress("Reading verified download manifest...".into());
-    let (manifest, bases) = package(session, item, version)?;
+    let package_result = package();
+    control.check()?;
+    let (manifest, bases) = package_result?;
     let prefix = if item.plugin() {
         let descriptors: Vec<_> = manifest
             .files
@@ -500,17 +547,19 @@ pub fn install(
         let mut prepared = 0u64;
         let mut downloaded = 0u64;
         for (i, (file, relative)) in files.iter().enumerate() {
+            control.check()?;
             progress(format!("Downloading {} / {} files", i + 1, files.len()));
             let path = stage.join(relative);
             fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
             let mut file_downloaded = 0;
             let mut last_report = std::time::Instant::now();
-            crate::plugins::payload_to_file_progress(
+            crate::plugins::payload_to_file_controlled(
                 &manifest,
                 &bases,
                 file,
                 &mut cache,
                 &path,
+                control,
                 &mut |written, received| {
                     file_downloaded = received;
                     if last_report.elapsed().as_millis() >= 150 || written == file.size() {
@@ -529,6 +578,7 @@ pub fn install(
             downloaded += file_downloaded;
         }
         progress("Installing verified files...".into());
+        control.check()?;
         if item.plugin() {
             crate::maintenance::ensure_closed(&target)?;
             crate::plugins::receipt::write(&stage, &manifest, &prefix)?;
@@ -537,11 +587,13 @@ pub fn install(
                 return Err("Plugin destination appeared during download".into());
             }
             fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
+            control.check()?;
             fs::rename(&stage, &destination).map_err(|e| e.to_string())?;
         } else {
             let mut created = Vec::new();
             let commit = (|| {
                 for (_, relative) in &files {
+                    control.check()?;
                     let dest = destination.join(relative);
                     installer::no_links(&dest)?;
                     fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -569,12 +621,71 @@ pub fn install(
     if stage.exists() {
         let _ = fs::remove_dir_all(&stage);
     }
-    result
+    transfer_result(result, control)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stop_before_activation_removes_staging_and_preserves_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "existing data").unwrap();
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"test", "assetNamespace":"test", "title":"Test", "distributionMethod":"ASSET_PACK",
+            "projectVersions":[{"artifactId":"test56", "engineVersions":["5.6"], "targetPlatforms":["Windows"]}]
+        })).unwrap();
+        let version = item.compatible("5.6.1").unwrap();
+        let control = installer::Control::default();
+        let manifest = buildpatch::Manifest {
+            files: vec![buildpatch::File {
+                name: "Content/Test.uasset".into(),
+                sha: buildpatch::digest(&[]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = install_package(
+            &item,
+            &version,
+            root.path(),
+            "5.6.1",
+            || Ok((manifest, vec![])),
+            &control,
+            |status| {
+                if status == "Installing verified files..." {
+                    control.stop();
+                }
+            },
+        );
+        assert!(result.unwrap_err().starts_with("Stopped."));
+        assert_eq!(
+            fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "existing data"
+        );
+        assert!(!root.path().join("Content/Test.uasset").exists());
+        assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".engine-workspace-fab-")
+        }));
+        let control = installer::Control::default();
+        let result = install_package(
+            &item,
+            &version,
+            root.path(),
+            "5.6.1",
+            || {
+                control.stop();
+                Err("request ended".into())
+            },
+            &control,
+            |_| {},
+        );
+        assert!(result.unwrap_err().starts_with("Stopped."));
+    }
     #[test]
     fn imports_content_only_and_rejects_traversal() {
         assert_eq!(
@@ -707,6 +818,29 @@ pub fn create_project(
     branch: &str,
     progress: impl Fn(String),
 ) -> Result<String, String> {
+    create_project_with_control(
+        session,
+        item,
+        version,
+        parent,
+        name,
+        branch,
+        &installer::Control::default(),
+        progress,
+    )
+}
+
+pub fn create_project_with_control(
+    session: &Session,
+    item: &Item,
+    version: &Version,
+    parent: &Path,
+    name: &str,
+    branch: &str,
+    control: &installer::Control,
+    progress: impl Fn(String),
+) -> Result<String, String> {
+    control.check()?;
     crate::download_policy::check_install_allowed()?;
     if item.distribution_method != "COMPLETE_PROJECT" {
         return Err("Not a project template".into());
@@ -730,7 +864,9 @@ pub fn create_project(
         return Err("Destination already exists. Choose a new folder name.".into());
     }
     progress("Reading project template manifest...".into());
-    let (manifest, bases) = package(session, item, version)?;
+    let package_result = package(session, item, version);
+    control.check()?;
+    let (manifest, bases) = package_result?;
     let files = template_files(&manifest)?;
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
     if fs2::available_space(&parent).map_err(|e| e.to_string())?
@@ -746,6 +882,7 @@ pub fn create_project(
         let mut downloaded = 0u64;
         let mut project = None;
         for (i, (file, relative)) in files.iter().enumerate() {
+            control.check()?;
             progress(format!(
                 "Downloading project file {} / {}",
                 i + 1,
@@ -756,12 +893,13 @@ pub fn create_project(
             fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
             let mut file_downloaded = 0;
             let mut last_report = std::time::Instant::now();
-            crate::plugins::payload_to_file_progress(
+            crate::plugins::payload_to_file_controlled(
                 &manifest,
                 &bases,
                 file,
                 &mut cache,
                 &path,
+                control,
                 &mut |written, received| {
                     file_downloaded = received;
                     if last_report.elapsed().as_millis() >= 150 || written == file.size() {
@@ -785,6 +923,7 @@ pub fn create_project(
                 project = Some(path);
             }
         }
+        control.check()?;
         let project = project.ok_or("No project descriptor installed")?;
         // Keep the publisher's descriptor/module names, including C++ module references.
         crate::platform::import_project(&project)?;
@@ -799,7 +938,7 @@ pub fn create_project(
     if result.is_err() {
         let _ = fs::remove_dir_all(&destination);
     }
-    result
+    transfer_result(result, control)
 }
 
 #[cfg(test)]
@@ -1033,5 +1172,16 @@ mod library_build_tests {
             assert!(version.require_listed_windows_build("new").is_err());
             assert!(version.require_listed_windows_build("").is_err());
         }
+    }
+}
+
+fn transfer_result(
+    result: Result<String, String>,
+    control: &installer::Control,
+) -> Result<String, String> {
+    if result.is_err() && control.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Err("Stopped. Completed installations are unchanged.".into())
+    } else {
+        result
     }
 }

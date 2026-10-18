@@ -190,7 +190,7 @@ impl Default for Preferences {
             engine_paths: vec![],
             pending_engines: vec![],
             check_minutes: 15,
-            wait_for_library_plugin_builds: false,
+            wait_for_library_plugin_builds: true,
             display_name: "Developer".into(),
             install_root: "C:/Program Files/Epic Games".into(),
             fab_cache: "C:/ProgramData/Epic/EpicGamesLauncher/VaultCache".into(),
@@ -372,17 +372,26 @@ mod hidden_project_tests {
 mod plugin_update_preferences_tests {
     use super::*;
     #[test]
-    fn old_preferences_keep_current_behavior_and_opt_in_survives_restart() {
+    fn new_and_legacy_preferences_wait_for_library_builds() {
+        assert!(Preferences::default().wait_for_library_plugin_builds);
         let old: Preferences =
             serde_json::from_str(r#"{"theme":"dark","check_minutes":30}"#).unwrap();
-        assert!(!old.wait_for_library_plugin_builds);
-        let opted_in = Preferences {
-            wait_for_library_plugin_builds: true,
-            ..old
-        };
-        let restored: Preferences =
-            serde_json::from_slice(&serde_json::to_vec(&opted_in).unwrap()).unwrap();
-        assert!(restored.wait_for_library_plugin_builds);
-        assert_eq!(restored.check_minutes, 30);
+        assert!(old.wait_for_library_plugin_builds);
+        assert_eq!(old.check_minutes, 30);
+    }
+
+    #[test]
+    fn saved_plugin_update_choice_survives_restart() {
+        for wait in [false, true] {
+            let saved = format!(
+                r#"{{"theme":"dark","check_minutes":30,"wait_for_library_plugin_builds":{wait}}}"#
+            );
+            let prefs: Preferences = serde_json::from_str(&saved).unwrap();
+            assert_eq!(prefs.wait_for_library_plugin_builds, wait);
+            let restored: Preferences =
+                serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+            assert_eq!(restored.wait_for_library_plugin_builds, wait);
+            assert_eq!(restored.check_minutes, 30);
+        }
     }
 }

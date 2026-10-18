@@ -447,7 +447,7 @@ mod status_presentation_tests {
 // Some publishers leave Version at 1 for every release (including PCGEx).
 // Use a numeric dotted VersionName only when the internal counters tie.
 // Arbitrary labels and prerelease suffixes are not safe to order by guesswork.
-fn compare_versions(
+pub(crate) fn compare_versions(
     number: i64,
     name: &str,
     other_number: i64,
@@ -772,12 +772,25 @@ fn stream_payload_io(
     output: &mut impl std::io::Write,
     progress: &mut impl FnMut(PayloadIo),
 ) -> Result<(), String> {
+    stream_payload_io_controlled(m, bases, file, cache, output, &Control::default(), progress)
+}
+fn stream_payload_io_controlled(
+    m: &Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    output: &mut impl std::io::Write,
+    control: &Control,
+    progress: &mut impl FnMut(PayloadIo),
+) -> Result<(), String> {
+    control.check()?;
     let mut written = 0u64;
     let mut io = PayloadIo::default();
     let client = installer::client()?;
     use sha1::{Digest, Sha1};
     let mut hash = Sha1::new();
     for p in &file.parts {
+        control.check()?;
         let chunk = m.chunks.get(&p.guid).ok_or("Missing plugin chunk")?;
         if !cache.contains_key(&p.guid) {
             if cache.len() >= 32 || cache.values().map(Vec::len).sum::<usize>() >= 64 * 1024 * 1024
@@ -796,7 +809,7 @@ fn stream_payload_io(
                     chunk,
                     bases,
                     m.feature,
-                    &Control::default(),
+                    control,
                     &mut |n| {
                         io.downloaded += n;
                         progress(io);
@@ -810,6 +823,7 @@ fn stream_payload_io(
             };
             cache.insert(p.guid.clone(), bytes);
         }
+        control.check()?;
         let bytes = &cache[&p.guid];
         let end = (p.offset as usize)
             .checked_add(p.size as usize)
@@ -826,6 +840,7 @@ fn stream_payload_io(
         io.written += part.len() as u64;
         progress(io);
     }
+    control.check()?;
     let actual: [u8; 20] = hash.finalize().into();
     if actual != file.sha {
         return Err(format!("File failed hash verification: {}", file.name));
@@ -842,6 +857,7 @@ pub(crate) fn payload_to_file(
 ) -> Result<(), String> {
     payload_to_file_progress(m, bases, file, cache, path, &mut |_, _| {})
 }
+#[cfg(test)]
 pub(crate) fn payload_to_file_progress(
     m: &Manifest,
     bases: &[reqwest::Url],
@@ -853,6 +869,33 @@ pub(crate) fn payload_to_file_progress(
     payload_to_file_io(m, bases, file, cache, path, &mut |p| {
         progress(p.prepared, p.downloaded)
     })
+}
+pub(crate) fn payload_to_file_controlled(
+    m: &Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    path: &Path,
+    control: &Control,
+    progress: &mut impl FnMut(u64, u64),
+) -> Result<(), String> {
+    control.check()?;
+    installer::no_links(path)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    let result =
+        stream_payload_io_controlled(m, bases, file, cache, &mut output, control, &mut |p| {
+            progress(p.prepared, p.downloaded)
+        })
+        .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
+    drop(output);
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
 }
 fn payload_to_file_io(
     m: &Manifest,
@@ -2054,6 +2097,46 @@ mod streaming_tests {
         let mut m = Manifest::default();
         m.chunks.insert(guid.clone(), buildpatch::Chunk::default());
         (m, file, HashMap::from([(guid, data)]))
+    }
+    #[test]
+    fn stopping_large_file_interrupts_stream_and_removes_partial_output() {
+        let (manifest, file, mut cache) = fixture(4);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.bin");
+        let control = Control::default();
+        let mut prepared = 0;
+        let result = payload_to_file_controlled(
+            &manifest,
+            &[],
+            &file,
+            &mut cache,
+            &path,
+            &control,
+            &mut |written, _| {
+                prepared = written;
+                if written > 0 {
+                    control.stop();
+                }
+            },
+        );
+        assert!(result.unwrap_err().starts_with("Stopped."));
+        assert_eq!(
+            prepared,
+            1024 * 1024,
+            "stop between chunks, not after the entire file"
+        );
+        assert!(!path.exists(), "incomplete output must be removed");
+        let result = payload_to_file_controlled(
+            &manifest,
+            &[],
+            &file,
+            &mut cache,
+            &path,
+            &control,
+            &mut |_, _| panic!("cancelled transfer must not write"),
+        );
+        assert!(result.is_err());
+        assert!(!path.exists());
     }
     #[test]
     fn update_progress_counts_cached_bytes_across_files_and_keeps_install_phase_separate() {

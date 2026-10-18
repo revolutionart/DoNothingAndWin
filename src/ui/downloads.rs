@@ -24,7 +24,7 @@ impl Downloads {
         }
     }
 }
-fn draw_icon(ui: &Ui, theme: &Theme, icon: Icon, rect: Rect, tint: [u8; 3]) {
+pub(super) fn draw_icon(ui: &Ui, theme: &Theme, icon: Icon, rect: Rect, tint: [u8; 3]) {
     let canvas = Canvas {
         origin: rect.min,
         width: rect.width(),
@@ -294,6 +294,7 @@ impl Workspace {
         }
     }
     fn download_main(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
+        let waiting = !self.library.install_queue.waiting().is_empty();
         if !self.downloads.recent {
             if self.plugin_work.mutating && self.plugin_work.progress.is_some() {
                 self.plugin_work.show_progress(ui, t, &self.textures, true);
@@ -340,7 +341,7 @@ impl Workspace {
                             draw_icon(
                                 ui,
                                 t,
-                                if active == 0 {
+                                if active == 0 && !waiting {
                                     Icon::Check
                                 } else {
                                     Icon::Download
@@ -351,7 +352,9 @@ impl Workspace {
                             ui.add_space(8.);
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new(if active == 0 {
+                                    RichText::new(if active == 0 && waiting {
+                                        "Waiting to install"
+                                    } else if active == 0 {
                                         "You're all caught up"
                                     } else {
                                         "Installation activity"
@@ -361,7 +364,7 @@ impl Workspace {
                                     .color(ui.visuals().text_color()),
                                 );
                                 if active == 0 {
-                                    ui.label("No downloads in progress.");
+                                    ui.label(if waiting { "Queued plugins will start when the current operation finishes." } else { "No downloads in progress." });
                                 }
                             });
                         });
@@ -421,6 +424,7 @@ impl Workspace {
                                 color(self.theme.text)
                             }));
                             ui.label(s);
+                            self.library.transfer_controls(ui);
                         }
                         if self.plugin_work.mutating {
                             ui.horizontal(|ui| {
@@ -718,11 +722,72 @@ impl Workspace {
                 .strong()
                 .color(ui.visuals().text_color()),
             );
-            ui.label(if active == 0 {
+            let waiting: Vec<_> = self
+                .library
+                .install_queue
+                .waiting()
+                .iter()
+                .cloned()
+                .collect();
+            ui.label(if !waiting.is_empty() {
+                "Waiting plugins start automatically in the order below."
+            } else if active == 0 {
                 "Your queue is empty."
             } else {
                 "Current installations are shown in the activity panel."
             });
+            if !waiting.is_empty() {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("{} waiting", waiting.len()))
+                        .strong()
+                        .color(color(t.text)),
+                );
+                let mut remove = None;
+                AppScrollArea::vertical(t)
+                    .id_salt("waiting-plugin-installs")
+                    .max_height(260.)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (index, job) in waiting.iter().enumerate() {
+                            ui.push_id(index, |ui| {
+                                ui.label(RichText::new(&job.item.title).color(color(t.text)))
+                                    .on_hover_text(&job.item.title);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "UE {}",
+                                        job.engines
+                                            .iter()
+                                            .map(|e| e.version.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ))
+                                    .color(color(t.muted)),
+                                );
+                                if ui
+                                    .add(buttons::secondary_button("Remove"))
+                                    .on_hover_text("Remove this waiting installation")
+                                    .clicked()
+                                {
+                                    remove = Some(index);
+                                }
+                                if index + 1 < waiting.len() {
+                                    ui.separator();
+                                }
+                            });
+                        }
+                    });
+                if let Some(index) = remove {
+                    self.library.install_queue.remove(index);
+                }
+                if waiting.len() > 1
+                    && ui
+                        .add(buttons::secondary_button("Clear waiting list"))
+                        .clicked()
+                {
+                    self.library.install_queue.clear_waiting();
+                }
+            }
         });
         panel(ui, t, "Storage", None, |ui| {
             let root = Path::new(&self.prefs.install_root);

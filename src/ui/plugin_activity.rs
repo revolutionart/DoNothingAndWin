@@ -139,9 +139,13 @@ impl Activity {
                 ui.style_mut().override_font_id = Some(FontId::proportional(14.));
                 let (header, _) = ui.allocate_exact_size(vec2(ui.available_width(), 66.), Sense::hover());
                 let icon = Rect::from_min_size(header.min, vec2(48., 58.));
-                ui.painter().rect_filled(icon, 6., color(t.background));
+                if p.fallback_icon != "UE" {
+                    ui.painter().rect_filled(icon, 6., color(t.background));
+                }
                 if let Some(texture) = textures.get(p.icon_key) {
                     ui.painter().image(texture.id(), icon.shrink2(vec2(4., 9.)), Rect::from_min_max(Pos2::ZERO, pos2(1.,1.)), Color32::WHITE);
+                } else if p.fallback_icon == "UE" {
+                    downloads::draw_icon(ui, t, Icon::Download, Rect::from_center_size(icon.center(), vec2(44., 44.)), t.accent);
                 } else {
                     ui.painter().text(icon.center(), Align2::CENTER_CENTER, p.fallback_icon, FontId::proportional(24.), color(t.muted));
                 }
@@ -188,9 +192,9 @@ impl Activity {
         let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 76.), Sense::hover());
         let label = ["Download", "Read", "Write"][index];
         let colors = [
-            Color32::from_rgb(112, 107, 224),
-            Color32::from_rgb(173, 94, 215),
-            Color32::from_rgb(220, 85, 163),
+            color(SIDEBAR_HIGHLIGHT),
+            Color32::from_rgb(184, 201, 99),
+            Color32::from_rgb(108, 207, 137),
         ];
         let accent = colors[index];
         let rate = self.samples.back().map(|p| p[index]).unwrap_or(0.);

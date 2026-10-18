@@ -10,6 +10,8 @@ enum Event {
     Status(String),
     Loaded(Result<Vec<Item>, String>),
     Installed(Result<String, String>),
+    PluginInstalled(Installation, Result<String, String>),
+    PluginBatchFinished(Result<String, String>),
 }
 enum UpdateEvent {
     Plugin(String, Instant, engine_workspace::plugins::Checked),
@@ -26,6 +28,7 @@ pub(super) struct Library {
     pub(super) catalogue: engine_workspace::plugins::catalogue::Catalogue,
     pub(super) organization: super::library_folders::FolderView,
     account: String,
+    pub(super) install_queue: super::library_queue::Queue,
     items: Vec<Item>,
     rx: Option<Receiver<Event>>,
     loading: bool,
@@ -33,6 +36,8 @@ pub(super) struct Library {
     installing: bool,
     install_item: String,
     install_engine: String,
+    install_results: usize,
+    install_control: Option<engine_workspace::installer::Control>,
     attempted: bool,
     status: String,
     search: String,
@@ -52,6 +57,7 @@ pub(super) struct Library {
     create_folder: String,
     selected: Option<Item>,
     target: usize,
+    engine_targets: std::collections::HashSet<String>,
     project_search: String,
     show_all_projects: bool,
     asset_version: String,
@@ -59,6 +65,27 @@ pub(super) struct Library {
     image_attempts: std::collections::HashSet<String>,
 }
 impl Library {
+    pub(super) fn transfer_controls(&self, ui: &mut Ui) {
+        if let Some(control) = &self.install_control {
+            let stopping = control.cancel.load(std::sync::atomic::Ordering::Relaxed);
+            if ui
+                .add_enabled(
+                    !stopping,
+                    buttons::secondary_button(if stopping {
+                        "Stopping..."
+                    } else {
+                        "Stop transfer"
+                    }),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Stop the current installation and its remaining engines. Other queued plugins stay in the waiting list.")
+                .clicked()
+            {
+                control.stop();
+            }
+        }
+    }
+
     pub(super) fn checking_updates(&self) -> bool {
         self.update_rx.is_some()
     }
@@ -168,10 +195,22 @@ impl Workspace {
         }
     }
 
+    pub(super) fn library_work_pending(&self) -> bool {
+        self.library.installing || !self.library.install_queue.waiting().is_empty()
+    }
     pub(super) fn library_transfer_status(&self) -> Option<&str> {
-        self.library
-            .installing
-            .then_some(self.library.status.as_str())
+        self.library.installing.then(|| {
+            if self
+                .library
+                .install_control
+                .as_ref()
+                .is_some_and(|control| control.cancel.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                "Stopping transfer... Finishing the current request and cleaning up."
+            } else {
+                self.library.status.as_str()
+            }
+        })
     }
     pub(super) fn refresh_library(&mut self, ctx: &Context) {
         if self.library.rx.is_some() {
@@ -245,6 +284,9 @@ impl Workspace {
             .map(|s| s.account_id.clone())
             .unwrap_or_default();
         if account != self.library.account {
+            if let Some(control) = &self.library.install_control {
+                control.stop();
+            }
             self.library.catalogue.clear();
             let (tx, rx) = mpsc::channel();
             let cached_account = account.clone();
@@ -260,7 +302,27 @@ impl Workspace {
             };
             self.textures.retain(|key, _| !key.starts_with("fab:"));
         }
-        while let Some(event) = self.library.rx.as_ref().and_then(|r| r.try_recv().ok()) {
+        loop {
+            let event = match self.library.rx.as_ref().map(|rx| rx.try_recv()) {
+                Some(Ok(event)) => event,
+                Some(Err(mpsc::TryRecvError::Disconnected)) if self.library.installing => {
+                    let result = Err("Installation worker stopped unexpectedly. Check the destination before retrying.".into());
+                    self.record_activity(
+                        self.library.install_item.clone(),
+                        self.library.install_engine.clone(),
+                        &result,
+                    );
+                    self.library.install_queue.finished();
+                    self.library.install_control = None;
+                    self.library.installing = false;
+                    self.library.rx = None;
+                    self.notify(
+                        "Installation worker stopped unexpectedly. Continuing the waiting list.",
+                    );
+                    break;
+                }
+                _ => break,
+            };
             match event {
                 Event::Cached(items) => {
                     self.library.rx = None;
@@ -351,6 +413,37 @@ impl Workspace {
                         }
                     }
                 }
+                Event::PluginInstalled(engine, result) => {
+                    self.library.install_results += 1;
+                    self.record_activity(
+                        self.library.install_item.clone(),
+                        engine.version,
+                        &result,
+                    );
+                    self.plugin_counts.clear();
+                    self.workspace_cache.invalidate();
+                }
+                Event::PluginBatchFinished(result) => {
+                    self.library.install_queue.finished();
+                    if self.library.install_results == 0 {
+                        self.record_activity(
+                            self.library.install_item.clone(),
+                            self.library.install_engine.clone(),
+                            &result,
+                        );
+                    }
+                    self.library.installing = false;
+                    self.library.install_control = None;
+                    self.library.rx = None;
+                    self.library.status = result.unwrap_or_else(|error| {
+                        if error.starts_with("Stopped.") {
+                            error
+                        } else {
+                            format!("Installation incomplete: {error}")
+                        }
+                    });
+                    self.notify(self.library.status.clone());
+                }
                 Event::Installed(result) => {
                     if let Ok(message) = &result {
                         if let Some(path) = message.strip_prefix("Created project: ") {
@@ -370,9 +463,15 @@ impl Workspace {
                         &result,
                     );
                     self.library.installing = false;
+                    self.library.install_control = None;
                     self.library.rx = None;
-                    self.library.status =
-                        result.unwrap_or_else(|e| format!("Installation failed: {e}"));
+                    self.library.status = result.unwrap_or_else(|e| {
+                        if e.starts_with("Stopped.") {
+                            e
+                        } else {
+                            format!("Installation failed: {e}")
+                        }
+                    });
                     self.plugin_counts.clear();
                     self.workspace_cache.invalidate();
                     self.notify(self.library.status.clone());
@@ -455,6 +554,20 @@ impl Workspace {
         for i in done.into_iter().rev() {
             self.library.images.remove(i);
         }
+        self.start_next_library_install(ctx);
+        // Sync once after startup/sign-in, regardless of the visible page. A successful
+        // sync checks installed plugins for every engine and updates their card badges.
+        // Let sign-in/token refresh and installations finish before starting this work.
+        if !self.demo
+            && self.session.is_some()
+            && self.pending.is_none()
+            && !self.library.attempted
+            && !self.library_work_pending()
+            && !self.transfer.busy()
+            && !self.plugin_work.busy()
+        {
+            self.refresh_library(ctx);
+        }
         if !crate::window_frame::is_backgrounded()
             && (self.library.rx.is_some()
                 || self.library.date_rx.is_some()
@@ -489,9 +602,6 @@ impl Workspace {
                 Label::new("Connect your Epic account in Settings to load your Fab library."),
             );
             return;
-        }
-        if !self.library.attempted {
-            self.refresh_library(ui.ctx());
         }
         let theme = self.theme.clone();
         let mut choose = None;
@@ -915,7 +1025,7 @@ impl Workspace {
                                     );
                                     if response.clicked()
                                         && !updating
-                                        && !self.library.installing
+                                        && (!self.library.installing || (item.plugin() && !has_update))
                                     {
                                         if has_update && item.plugin() {
                                             update_item = Some(item.clone());
@@ -977,6 +1087,15 @@ impl Workspace {
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .take(48)
                 .collect();
+            self.library.engine_targets.clear();
+            if item.plugin() {
+                if let Some(engine) = self.engines.iter().find(|engine| {
+                    item.compatible(&engine.version).is_some()
+                        && (self.demo || platform::engine_ready(engine))
+                }) {
+                    self.library.engine_targets.insert(engine.path.clone());
+                }
+            }
             self.library.selected = Some(item);
             self.library.target = if self.library.selected.as_ref().is_some_and(|i| i.plugin()) {
                 0
@@ -999,7 +1118,60 @@ impl Workspace {
         }
         self.library_folder_dialog(ui.ctx());
     }
-    fn library_install_dialog(&mut self, ctx: &Context) {
+    fn start_next_library_install(&mut self, ctx: &Context) {
+        let ready = !self.demo
+            && self.session.is_some()
+            && self.library.rx.is_none()
+            && !self.library.installing
+            && self.pending.is_none()
+            && !self.transfer.busy()
+            && !self.plugin_work.busy()
+            && !self.launcher_updates.blocks_work();
+        let Some(job) = self.library.install_queue.start_next(ready) else {
+            return;
+        };
+        let session = self
+            .session
+            .clone()
+            .expect("queue dispatch requires a session");
+        let item = job.item;
+        let engines = job.engines;
+        let (tx, rx) = mpsc::channel();
+        self.library.rx = Some(rx);
+        self.library.installing = true;
+        let control = engine_workspace::installer::Control::default();
+        self.library.install_control = Some(control.clone());
+        self.library.install_results = 0;
+        self.library.install_item = format!("Installation: {}", item.title);
+        self.library.install_engine = engines
+            .iter()
+            .map(|e| e.version.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.library.status = "Preparing plugin installations...".into();
+        let wait_for_library = self.prefs.wait_for_library_plugin_builds;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = fab::plugin_install::install_many(
+                &session,
+                &item,
+                &engines,
+                &control,
+                wait_for_library,
+                |status| {
+                    let _ = tx.send(Event::Status(status));
+                    crate::window_frame::progress_repaint(&ctx);
+                },
+                |engine, result| {
+                    let _ = tx.send(Event::PluginInstalled(engine.clone(), result.clone()));
+                    ctx.request_repaint();
+                },
+            );
+            let _ = tx.send(Event::PluginBatchFinished(result));
+            ctx.request_repaint();
+        });
+    }
+    pub(super) fn library_install_dialog(&mut self, ctx: &Context) {
         let Some(item) = self.library.selected.clone() else {
             return;
         };
@@ -1038,6 +1210,17 @@ impl Workspace {
                 })
                 .collect()
         };
+        if item.plugin() {
+            self.library
+                .engine_targets
+                .retain(|path| targets.iter().any(|t| &t.1 == path));
+        }
+        let waiting = self.pending.is_some()
+            || self.library.rx.is_some()
+            || self.library.installing
+            || self.transfer.busy()
+            || self.plugin_work.busy()
+            || !self.library.install_queue.waiting().is_empty();
         let mut open = true;
         let mut install = false;
         dialog::show(
@@ -1050,7 +1233,7 @@ impl Workspace {
                 "Add to project"
             },
             if item.plugin() {
-                "Choose an engine for this plugin."
+                "Choose one or more engines for this plugin."
             } else {
                 "Select a project for this asset."
             },
@@ -1064,7 +1247,7 @@ impl Workspace {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let size = if item.plugin() {
-                                vec2(88., 88.)
+                                vec2(64., 64.)
                             } else {
                                 vec2(135., 70.)
                             };
@@ -1095,7 +1278,7 @@ impl Workspace {
                         });
                     });
                 if item.plugin() {
-                    ui.label("Engine version");
+                    ui.label("Compatible engines");
                     if targets.is_empty() {
                         ui.add_enabled(
                             false,
@@ -1124,57 +1307,39 @@ impl Workspace {
                             self.library.selected = None;
                         }
                     } else {
-                        self.library.target = self.library.target.min(targets.len() - 1);
-                        let selector_open = ComboBox::is_open(
-                            ui.ctx(),
-                            ui.make_persistent_id("fab-install-target"),
-                        );
-                        let combo = AppComboBox::new(&self.theme, "fab-install-target")
-                            .width(ui.available_width())
-                            .selected_text(&targets[self.library.target].0)
-                            .show_ui(ui, |ui| {
-                                for (i, (name, path, _)) in targets.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.library.target,
-                                        i,
-                                        format!("{name}     Installed"),
-                                    )
-                                    .on_hover_text(path);
+                        AppScrollArea::vertical(&self.theme)
+                            .id_salt("fab-engine-picker")
+                            .max_height(180.)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                for (name, path, _) in &targets {
+                                    ui.push_id(path, |ui| {
+                                        let mut selected =
+                                            self.library.engine_targets.contains(path);
+                                        engine_install_row(
+                                            ui,
+                                            &self.theme,
+                                            name,
+                                            path,
+                                            &mut selected,
+                                        );
+                                        if selected {
+                                            self.library.engine_targets.insert(path.clone());
+                                        } else {
+                                            self.library.engine_targets.remove(path);
+                                        }
+                                    });
                                 }
                             });
-                        combo
-                            .response
-                            .clone()
-                            .on_hover_cursor(CursorIcon::PointingHand);
-                        let r = combo.response.rect;
-                        ui.painter().circle_filled(
-                            pos2(r.right() - 124., r.center().y),
-                            5.,
-                            color(self.theme.success),
-                        );
-                        ui.painter().text(
-                            pos2(r.right() - 112., r.center().y),
-                            Align2::LEFT_CENTER,
-                            "Installed",
-                            FontId::proportional(14.),
-                            if selector_open {
-                                ui.visuals().widgets.open.text_color()
-                            } else if combo.response.hovered()
-                                || combo.response.is_pointer_button_down_on()
-                            {
-                                ui.style().interact(&combo.response).text_color()
-                            } else {
-                                color(self.theme.muted)
-                            },
-                        );
+                        ui.label("Each selected engine receives its latest compatible plugin build. Versions may differ between engines.");
                         ui.label(
-                            RichText::new("Only compatible installed engines are listed.")
-                                .color(color(self.theme.muted)),
+                            RichText::new(if waiting {
+                                "Queued plugins start automatically after earlier jobs finish."
+                            } else {
+                                "Already installed plugins can be updated using Update."
+                            })
+                            .color(color(self.theme.muted)),
                         );
-                        ui.label(format!(
-                            "This plugin will be installed for {} only.",
-                            targets[self.library.target].0
-                        ));
                     }
                 } else {
                     ui.horizontal(|ui| {
@@ -1280,19 +1445,44 @@ impl Workspace {
                         ui.label("Choose a project to continue.");
                     }
                 }
-                let valid = targets.get(self.library.target).is_some_and(|t| {
-                    item.import_version(&t.2, &self.library.asset_version)
-                        .is_some()
-                });
+                let new_targets = targets
+                    .iter()
+                    .filter(|target| {
+                        self.library.engine_targets.contains(&target.1)
+                            && !self.library.install_queue.contains(&item, &target.1)
+                    })
+                    .count();
+                let valid = if item.plugin() {
+                    new_targets > 0
+                } else {
+                    targets.get(self.library.target).is_some_and(|t| {
+                        item.import_version(&t.2, &self.library.asset_version)
+                            .is_some()
+                    })
+                };
+                if item.plugin() && new_targets < self.library.engine_targets.len() {
+                    ui.label("Selections already installing or queued will not be added twice.");
+                }
+                let install_label = if item.plugin() {
+                    format!(
+                        "{} ({new_targets})",
+                        if waiting { "Add to queue" } else { "Install" }
+                    )
+                } else {
+                    "Add to project".into()
+                };
                 install = dialog::footer(
                     ui,
                     &self.theme,
-                    if item.plugin() {
-                        "Install"
-                    } else {
-                        "Add to project"
-                    },
-                    valid && !self.demo && self.library.rx.is_none() && !self.transfer.busy(),
+                    &install_label,
+                    valid
+                        && !self.demo
+                        && self.session.is_some()
+                        && (item.plugin()
+                            || (self.library.rx.is_none()
+                                && !self.transfer.busy()
+                                && !self.plugin_work.busy()))
+                        && !self.launcher_updates.blocks_work(),
                     false,
                 );
             },
@@ -1300,7 +1490,23 @@ impl Workspace {
         if !open {
             self.library.selected = None;
         }
-        if install {
+        if install && item.plugin() {
+            let engines = self
+                .engines
+                .iter()
+                .filter(|engine| self.library.engine_targets.contains(&engine.path))
+                .cloned()
+                .collect();
+            let title = item.title.clone();
+            let added = self.library.install_queue.enqueue(item, engines);
+            self.library.selected = None;
+            if added > 0 {
+                self.notify(format!(
+                    "Added {title} to the install queue for {added} engine(s)."
+                ));
+            }
+            self.start_next_library_install(ctx);
+        } else if install {
             let (_, target, engine) = targets[self.library.target].clone();
             let Some((version, engine)) = item.import_version(&engine, &self.library.asset_version)
             else {
@@ -1312,18 +1518,21 @@ impl Workspace {
             let (tx, rx) = mpsc::channel();
             self.library.rx = Some(rx);
             self.library.installing = true;
+            let control = engine_workspace::installer::Control::default();
+            self.library.install_control = Some(control.clone());
             self.library.install_item = format!("Installation: {}", item.title);
             self.library.install_engine = engine.clone();
             self.library.selected = None;
             self.library.status = "Preparing download...".into();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let result = fab::install(
+                let result = fab::install_with_control(
                     &session,
                     &item,
                     &version,
                     Path::new(&target),
                     &engine,
+                    &control,
                     |s| {
                         let _ = tx.send(Event::Status(s));
                         crate::window_frame::progress_repaint(&ctx);
@@ -1334,6 +1543,46 @@ impl Workspace {
             });
         }
     }
+}
+
+fn engine_install_row(
+    ui: &mut Ui,
+    theme: &Theme,
+    name: &str,
+    path: &str,
+    selected: &mut bool,
+) -> Response {
+    Frame::new()
+        .fill(color(theme.card))
+        .stroke(Stroke::new(
+            1.,
+            color(if *selected {
+                theme.accent
+            } else {
+                theme.border
+            }),
+        ))
+        .corner_radius(5.)
+        .inner_margin(6)
+        .show(ui, |ui| {
+            buttons::compact_style(ui);
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let response = ui
+                    .add(buttons::checkbox(selected, name, theme))
+                    .on_hover_text(path);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("Engine installed")
+                            .size(14.)
+                            .color(color(theme.muted)),
+                    );
+                });
+                response
+            })
+            .inner
+        })
+        .inner
 }
 
 fn library_kind(item: &Item, filter: usize) -> bool {
@@ -1484,19 +1733,22 @@ impl Workspace {
             let name = self.library.create_name.clone();
             self.library.selected = None;
             self.library.installing = true;
+            let control = engine_workspace::installer::Control::default();
+            self.library.install_control = Some(control.clone());
             self.library.install_item = format!("Project creation: {}", item.title);
             self.library.install_engine = branch.clone();
             let (tx, rx) = mpsc::channel();
             self.library.rx = Some(rx);
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let result = fab::create_project(
+                let result = fab::create_project_with_control(
                     &session,
                     &item,
                     &version,
                     Path::new(&folder),
                     &name,
                     &branch,
+                    &control,
                     |s| {
                         let _ = tx.send(Event::Status(s));
                         crate::window_frame::progress_repaint(&ctx);
@@ -1514,6 +1766,127 @@ mod update_state_tests {
     use super::*;
     fn item() -> Item {
         serde_json::from_value(serde_json::json!({"assetId":"example", "assetNamespace":"publisher", "title":"Example", "distributionMethod":"CODE_PLUGIN"})).unwrap()
+    }
+    #[test]
+    fn library_transfer_has_stop_button_and_keeps_busy_until_worker_finishes() {
+        let ctx = Context::default();
+        let control = engine_workspace::installer::Control::default();
+        let library = Library {
+            installing: true,
+            install_control: Some(control.clone()),
+            ..Default::default()
+        };
+        let mut button = Rect::NOTHING;
+        for frame in 0..3 {
+            let mut input = RawInput::default();
+            if frame > 0 {
+                let pos = button.center();
+                input.events.push(egui::Event::PointerMoved(pos));
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: frame == 1,
+                    modifiers: Modifiers::default(),
+                });
+            }
+            let output = ctx.run(input, |ctx| {
+                CentralPanel::default().show(ctx, |ui| library.transfer_controls(ui));
+            });
+            let text = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(t) if t.galley.job.text == "Stop transfer" => Some(t),
+                    _ => None,
+                })
+                .expect("active library installation must show Stop transfer");
+            button = Rect::from_min_size(text.pos, text.galley.size());
+        }
+        assert!(control.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            library.installing,
+            "busy protection must stay active during cleanup"
+        );
+        let output = ctx.run(RawInput::default(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| library.transfer_controls(ui));
+        });
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| matches!(&s.shape, Shape::Text(t) if t.galley.job.text == "Stopping..."))
+        );
+    }
+    #[test]
+    fn engine_picker_keeps_multiple_selections_and_readable_hover_status() {
+        let ctx = Context::default();
+        let theme = Theme::dark();
+        let mut selected = [false, false];
+        let mut rects = [Rect::NOTHING; 2];
+        // Select both engines, then unselect only the first. Hover and click each real checkbox.
+        for frame in 0..7 {
+            let mut input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(680., 400.))),
+                ..Default::default()
+            };
+            if frame > 0 {
+                let index = if frame <= 2 || frame >= 5 { 0 } else { 1 };
+                let pos = rects[index].center();
+                input.events.push(egui::Event::PointerMoved(pos));
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: frame % 2 == 1,
+                    modifiers: Modifiers::default(),
+                });
+            }
+            let output = ctx.run(input, |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    *ui.visuals_mut() = theme.visuals();
+                    // Reproduce the default open-widget black foreground that caused the bug.
+                    ui.visuals_mut().widgets.open.fg_stroke.color = Color32::BLACK;
+                    for index in 0..2 {
+                        ui.push_id(index, |ui| {
+                            rects[index] = engine_install_row(
+                                ui,
+                                &theme,
+                                if index == 0 {
+                                    "Unreal Engine 5.6.1"
+                                } else {
+                                    "Unreal Engine 5.8.3"
+                                },
+                                "test engine",
+                                &mut selected[index],
+                            )
+                            .rect;
+                        });
+                    }
+                });
+            });
+            let labels: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.job.text == "Engine installed" => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels.len(), 2);
+            for label in labels {
+                assert!(
+                    label
+                        .galley
+                        .job
+                        .sections
+                        .iter()
+                        .all(|section| section.format.color == color(theme.muted))
+                );
+            }
+            if frame == 4 {
+                assert_eq!(selected, [true, true]);
+            }
+        }
+        assert_eq!(selected, [false, true]);
     }
     #[test]
     fn available_updates_filter_matches_actual_updates_across_content_types() {
@@ -1609,5 +1982,71 @@ impl Workspace {
         self.prefs.library_organization.insert(account, org);
         self.library.organization.preview(step);
         self.rebuild_library_search();
+    }
+}
+
+impl Workspace {
+    // Render-only multi-engine fixture: no sign-in, network calls or installation.
+    pub(super) fn preview_plugin_install(&mut self) {
+        self.demo = true;
+        self.preview_library_organization(0);
+        self.engines = ["5.8.3", "5.7.4", "5.6.1"]
+            .into_iter()
+            .map(|version| Installation {
+                version: version.into(),
+                path: format!("C:/Preview/UE_{version}"),
+                association: version.into(),
+            })
+            .collect();
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"preview-plugin", "assetNamespace":"preview", "title":"Multi-engine plugin installation",
+            "distributionMethod":"CODE_PLUGIN", "projectVersions":[
+                {"artifactId":"preview58", "engineVersions":["5.8"], "targetPlatforms":["Windows"]},
+                {"artifactId":"preview57", "engineVersions":["5.7"], "targetPlatforms":["Windows"]},
+                {"artifactId":"preview56", "engineVersions":["5.6"], "targetPlatforms":["Windows"]}
+            ]
+        })).unwrap();
+        self.library.engine_targets = self
+            .engines
+            .iter()
+            .filter(|e| e.version != "5.7.4")
+            .map(|e| e.path.clone())
+            .collect();
+        self.library.selected = Some(item);
+    }
+}
+
+impl Workspace {
+    pub(super) fn preview_library_queue(&mut self) {
+        self.preview_plugin_install();
+        let mut first = self.library.selected.clone().unwrap();
+        first.asset_id = "active-preview".into();
+        first.title = "Installing example plugin".into();
+        self.library
+            .install_queue
+            .enqueue(first, vec![self.engines[0].clone()]);
+        self.library.install_queue.start_next(true);
+        for (id, title) in [
+            ("waiting-tools", "Editor workflow tools"),
+            (
+                "waiting-framework",
+                "Ascent Combat Framework Ultimate - C++ Complete Action RPG Creator",
+            ),
+        ] {
+            let mut item = self.library.selected.clone().unwrap();
+            item.asset_id = id.into();
+            item.title = title.into();
+            self.library
+                .install_queue
+                .enqueue(item, vec![self.engines[0].clone(), self.engines[2].clone()]);
+        }
+        self.library.installing = true;
+        self.library.install_control = Some(engine_workspace::installer::Control::default());
+        self.library.status = "Example plugin - UE 5.8.3 - Downloading verified files...".into();
+    }
+    pub(super) fn finish_library_preview(&mut self) {
+        self.library.installing = false;
+        self.library.install_control = None;
+        self.library.install_queue = Default::default();
     }
 }

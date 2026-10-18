@@ -189,13 +189,13 @@ impl Workspace {
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Plugin updates");
-                let busy = self.plugin_work.busy() || self.library.checking_updates() || self.library_transfer_status().is_some();
+                let busy = self.plugin_work.busy() || self.library.checking_updates() || self.library_work_pending();
                 if ui.add_enabled(!busy, buttons::checkbox(&mut self.prefs.wait_for_library_plugin_builds, "Wait for builds listed in the Fab library", &self.theme)).on_disabled_hover_text("Wait for the current plugin check or installation to finish.").changed() {
                     self.persist();
                     self.library.catalogue.clear();
                     self.refresh_library(ctx);
                 }
-                ui.label("Off (default): offer the latest compatible package available from Fab. On: wait until that package matches the build listed in your Fab library.");
+                ui.label("On (default): wait until the compatible package matches the build listed in your Fab library. Off: offer the latest compatible package available from Fab.");
                 ui.label("This checks library availability, not publisher approval. If build information is missing, updates wait until it becomes available. Existing installations are unchanged.");
                 });
                 settings_section(ui,&theme,|ui|{

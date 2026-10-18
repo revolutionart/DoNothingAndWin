@@ -162,26 +162,67 @@ impl Workspace {
             Align2::LEFT_CENTER,
         );
         let action_y = y + h - 46.;
+        let has_plugin_updates = self
+            .library
+            .catalogue
+            .rows(&engine.path)
+            .iter()
+            .any(|row| row.has_update());
         let menu_rect = [x + w - 46., action_y, 30., 32.];
         let launch_rect = [menu_rect[0] - 92., action_y, 86., 32.];
         let link = c.rect([tx - 4., action_y, launch_rect[0] - tx - 8., 32.]);
         let response = ui
             .interact(link, Id::new(("manage", i)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let link_color = if response.hovered() {
+            [255, 255, 255]
+        } else if has_plugin_updates {
+            [255, 153, 0]
+        } else {
+            t.accent_hover
+        };
         c.text(
             ui,
             x + 20.,
             action_y + 16.,
-            "Manage plugins  →",
+            if has_plugin_updates {
+                "Manage plugins"
+            } else {
+                "Manage plugins  →"
+            },
             14.,
             false,
-            if response.hovered() {
-                [255, 255, 255]
-            } else {
-                t.accent_hover
-            },
+            link_color,
             Align2::LEFT_CENTER,
         );
+        if has_plugin_updates {
+            let label_width = ui
+                .painter()
+                .layout_no_wrap(
+                    "Manage plugins".into(),
+                    FontId::proportional(14. * c.scale()),
+                    color(link_color),
+                )
+                .size()
+                .x
+                / c.scale();
+            let badge_x = x + 20. + label_width + 16.;
+            ui.painter().circle_stroke(
+                c.point(badge_x, action_y + 16.),
+                8. * c.scale(),
+                Stroke::new(1.5, color(link_color)),
+            );
+            c.text(
+                ui,
+                badge_x,
+                action_y + 16.,
+                "!",
+                13.,
+                true,
+                link_color,
+                Align2::CENTER_CENTER,
+            );
+        }
         if response
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)

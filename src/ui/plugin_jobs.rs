@@ -232,7 +232,7 @@ impl Workspace {
     ) -> bool {
         if self.plugin_work.rx.is_some()
             || self.transfer.busy()
-            || self.library_transfer_status().is_some()
+            || self.library_work_pending()
             || self.launcher_updates.blocks_work()
             || self.demo
             || items.is_empty()

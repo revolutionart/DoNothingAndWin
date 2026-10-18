@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.4 - 2026-10-18
+
+### Plugin installation and downloads
+
+- Select multiple engines in **Install to engine**. Resolve the latest eligible compatible plugin package independently for each engine, respecting the Fab library build setting and preserving existing installations.
+- Queue additional plugins while another installation is running. Show waiting jobs in Downloads with **Remove** and **Clear waiting list**, and prevent duplicate plugin/engine targets.
+- Restore **Stop transfer** for Library installations. Stop the current job and its remaining engines, clean up partial files, and retain completed installations. Other queued jobs continue.
+- Record per-engine installation outcomes and recover the waiting queue if an installation worker stops unexpectedly. Keep launcher updates and account changes protected while installation jobs are pending.
+
+### Plugin updates and interface
+
+- Check plugin updates automatically after startup/sign-in without opening Library. Show an orange **Manage plugins** link and circled exclamation on each engine with an available update.
+- Enable **Wait for builds listed in the Fab library** by default for new settings and older settings without a saved choice. Preserve explicitly saved choices. This checks library availability, not publisher approval.
+- Show engine installation status immediately after the local executable check, without waiting for plugin counting and project history.
+- Use gold Download, yellow-green Read and green Write graphs, and restore the blue download icon on engine installation activity.
+- Replace the single-engine dropdown with readable multi-engine selection rows.
+
+### Known limitations
+
+- Waiting plugin jobs are kept for the current session only and are not restored after exiting the launcher.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.2.3 - 2026-10-18
 
 ### Library organization

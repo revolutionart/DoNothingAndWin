@@ -58,7 +58,7 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.2.3** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/DoNothingAndWin-Setup-1.2.3.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/DoNothingAndWin-Portable-1.2.3.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/SHA256SUMS.txt)
+Current release: **1.2.4** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.4/DoNothingAndWin-Setup-1.2.4.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.4/DoNothingAndWin-Portable-1.2.4.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.4/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
@@ -109,13 +109,14 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 - Organize items into local folders with the thumbnail's folder icon or right-click menu. Use **Manage folders** to create, rename or delete folders; installed files are not moved.
 - Use the eye icon to hide or restore an item. **Show hidden** displays only hidden items. Folder assignments and visibility are saved separately for each Epic account on this PC.
 - Click **Update** on a Library plugin to start its update directly. The button shows **Updating** with a spinner; detailed progress appears on Downloads.
-- Optionally enable **Wait for builds listed in the Fab library** in Settings to wait for matching Windows build metadata. It is off by default and does not verify publisher approval.
+- **Wait for builds listed in the Fab library** is on by default for new settings. Existing saved choices are preserved. It waits for matching Windows build metadata and does not verify publisher approval.
 - Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update** (the default) or by name. Fab listing dates load in the background and are cached; items without a date appear last.
 - Search titles, descriptions, tags, and publisher names. Title matches appear first, followed by metadata matches, with the chosen sort order applied within each group. Listing details are cached for responsive searches.
-- Add assets to an existing project, create projects from supported library templates, and install compatible plugins into a selected engine.
+- Add assets to an existing project, create projects from supported library templates, and install plugins into multiple selected engines. Each engine gets its latest eligible compatible package.
 - Enable **Show all projects** when choosing an asset destination. Projects too old for every available asset version are greyed out, with a reason on hover.
 - Manage plugins separately for each engine: search installed plugins, see installed and available versions, check for updates, update, or remove them.
-- Sidebar indicators highlight available plugin updates beside Library and Engine versions.
+- Plugin updates are checked automatically after startup/sign-in. Each affected engine card shows an orange **Manage plugins** link with a circled exclamation; the Library badge covers updates across engines.
+- During a plugin installation, open **Install to engine** for another plugin and use **Add to queue**. Manage waiting jobs in Downloads. The queue lasts for the current session; Stop transfer stops the active job and its remaining engines, while other queued jobs continue.
 - Click a library item's title to open its Fab listing in your default browser. Details sit at the top-right of each thumbnail, and compact cards fit more items per row.
 
 ### Downloads and activity

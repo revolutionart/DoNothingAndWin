@@ -8,6 +8,7 @@ mod launcher_updates;
 mod layout_probe;
 mod library;
 mod library_folders;
+mod library_queue;
 mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
@@ -971,7 +972,7 @@ impl Workspace {
             if page == Page::Downloads
                 && (self.transfer.busy()
                     || self.plugin_work.mutating
-                    || self.library_transfer_status().is_some())
+                    || self.library_work_pending())
             {
                 let rect = c.rect([200., y + 14., 20., 20.]);
                 let mut indicator = ui.new_child(UiBuilder::new().max_rect(rect));
@@ -2236,6 +2237,10 @@ impl Workspace {
         self.settings_flow(ui, c, ctx);
     }
     fn sign_out_account(&mut self) {
+        if self.library_work_pending() {
+            self.notify("Finish or stop the current installation and clear the waiting list before signing out.");
+            return;
+        }
         match storage::sign_out() {
             Ok(()) => {
                 self.session = None;
@@ -2423,10 +2428,7 @@ impl eframe::App for Workspace {
             self.project_finder_dialog(ctx);
         }
         if crate::window_frame::take_replace_request() {
-            if self.transfer.busy()
-                || self.library_transfer_status().is_some()
-                || self.plugin_work.mutating
-            {
+            if self.transfer.busy() || self.library_work_pending() || self.plugin_work.mutating {
                 self.notify("An operation is running. Finish it before switching launcher builds.");
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2438,7 +2440,7 @@ impl eframe::App for Workspace {
             || self.transfer.busy()
             || self.scan.receiver.is_some()
             || self.project_finder.busy()
-            || self.library_transfer_status().is_some()
+            || self.library_work_pending()
             || self.plugin_work.mutating;
         ctx.request_repaint_after(idle_frame_interval(backgrounded, busy));
     }

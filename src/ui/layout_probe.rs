@@ -12,6 +12,8 @@ pub(super) struct LayoutProbe {
     plugin_design: bool,
     project_finder: bool,
     library_organization: bool,
+    plugin_install: bool,
+    library_queue: bool,
     empty_projects: bool,
     page: Option<Page>,
 }
@@ -43,12 +45,18 @@ impl LayoutProbe {
             engine_activity: std::env::args().any(|a| a == "--engine-activity-preview"),
             plugin_design: std::env::args().any(|a| a == "--plugin-design-preview"),
             project_finder: std::env::args().any(|a| a == "--project-finder-preview"),
+            plugin_install: std::env::args()
+                .any(|a| a == "--plugin-install-preview" || a == "--queued-install-preview"),
+            library_queue: std::env::args()
+                .any(|a| a == "--library-queue-preview" || a == "--queued-install-preview"),
             library_organization: std::env::args().any(|a| a == "--library-organization-preview"),
             empty_projects: std::env::args().any(|a| a == "--empty-projects-preview"),
             page: std::env::args().find_map(|a| match a.as_str() {
                 "--settings-preview" => Some(Page::Settings),
-                "--library-organization-preview" => Some(Page::Library),
-                "--page-preview=downloads" => Some(Page::Downloads),
+                "--library-organization-preview"
+                | "--plugin-install-preview"
+                | "--queued-install-preview" => Some(Page::Library),
+                "--page-preview=downloads" | "--library-queue-preview" => Some(Page::Downloads),
                 "--page-preview=library" => Some(Page::Library),
                 "--page-preview=engines" => Some(Page::Engines),
                 "--page-preview=projects" => Some(Page::Projects),
@@ -64,6 +72,9 @@ impl Workspace {
             return;
         };
         if probe.step >= if probe.page.is_some() { 5 } else { CASES.len() } {
+            if probe.library_queue {
+                self.finish_library_preview();
+            }
             self.plugin_work.mutating = false;
             self.transfer.operation = Default::default();
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -158,6 +169,12 @@ impl Workspace {
             if probe.library_organization {
                 self.preview_library_organization(probe.step);
             }
+            if probe.plugin_install {
+                self.preview_plugin_install();
+            }
+            if probe.library_queue {
+                self.preview_library_queue();
+            }
             if let Some(page) = probe.page {
                 self.page = page;
             }
@@ -221,6 +238,9 @@ impl Workspace {
                 probe.step += 1;
                 probe.phase = 0;
             }
+        }
+        if probe.plugin_install {
+            self.library_install_dialog(ctx);
         }
         self.layout_probe = Some(probe);
         ctx.request_repaint_after(Duration::from_millis(40));

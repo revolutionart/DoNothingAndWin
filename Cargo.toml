@@ -1,6 +1,6 @@
 [package]
 name = "engine-workspace"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2024"
 description = "A developer-only Unreal Engine workspace and release monitor"
 license = "MIT"
