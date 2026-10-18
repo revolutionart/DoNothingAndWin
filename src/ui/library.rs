@@ -24,6 +24,7 @@ enum UpdateEvent {
 #[derive(Default)]
 pub(super) struct Library {
     pub(super) catalogue: engine_workspace::plugins::catalogue::Catalogue,
+    pub(super) organization: super::library_folders::FolderView,
     account: String,
     items: Vec<Item>,
     rx: Option<Receiver<Event>>,
@@ -58,6 +59,9 @@ pub(super) struct Library {
     image_attempts: std::collections::HashSet<String>,
 }
 impl Library {
+    pub(super) fn checking_updates(&self) -> bool {
+        self.update_rx.is_some()
+    }
     fn item_updates(&self, item: &Item) -> Vec<(String, String)> {
         let mut updates = self.catalogue.for_item(item);
         updates.extend(self.updates.get(&item.key()).into_iter().flatten().cloned());
@@ -169,7 +173,7 @@ impl Workspace {
             .installing
             .then_some(self.library.status.as_str())
     }
-    fn refresh_library(&mut self, ctx: &Context) {
+    pub(super) fn refresh_library(&mut self, ctx: &Context) {
         if self.library.rx.is_some() {
             return;
         }
@@ -295,6 +299,8 @@ impl Workspace {
                                 self.library.update_rx = Some(rx);
                                 let ctx = ctx.clone();
                                 let started = Instant::now();
+                                let wait_for_library_builds =
+                                    self.prefs.wait_for_library_plugin_builds;
                                 std::thread::spawn(move || {
                                     let owned = Ok(items);
                                     for engine in engines {
@@ -303,6 +309,7 @@ impl Workspace {
                                                 &engine,
                                                 &session,
                                                 &owned,
+                                                wait_for_library_builds,
                                                 |row| {
                                                     let _ = tx.send(UpdateEvent::Plugin(
                                                         engine.path.clone(),
@@ -488,15 +495,19 @@ impl Workspace {
         }
         let theme = self.theme.clone();
         let mut choose = None;
-        let mut update_engine = None;
+        let mut update_item = None;
         let rect = c.rect([271., top, c.width - 297., c.height - top - 72.]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.style_mut().override_font_id = Some(FontId::proportional(16.));
             ui.spacing_mut().button_padding = vec2(14., 8.);
             ui.spacing_mut().item_spacing = vec2(16., FILTER_ROW_GAP);
             ui.spacing_mut().interact_size.y = FILTER_ROW_HEIGHT;
-            let visible_items: Vec<_> = self.library.items.iter().enumerate()
+            let mut visible_items: Vec<_> = self.library.items.iter().enumerate()
                 .filter_map(|(index, item)| fab_listing::visible_in_library(item).then_some(index)).collect();
+            let keys: Vec<_> = visible_items.iter().map(|&index| self.library.items[index].key()).collect();
+            self.library_folder_toolbar(ui, &keys);
+            let organization = self.library_organization();
+            visible_items.retain(|&index| organization.matches(&self.library.items[index].key(), &self.library.organization.filter, self.library.organization.show_hidden));
             let branches = fab_listing::engine_branches(visible_items.iter().map(|&index| &self.library.items[index]));
             ui.horizontal_wrapped(|ui| {
                 ui.style_mut().override_font_id = Some(FontId::proportional(14. * c.scale()));
@@ -648,6 +659,8 @@ impl Workspace {
                 .inner_margin(scrollbar::GRID_MARGIN)
                 .id_salt((
                     "fab-owned-items",
+                    self.library.organization.filter.clone(),
+                    self.library.organization.show_hidden,
                     self.library.filter,
                     self.library.search.clone(),
                     self.library.sort,
@@ -658,7 +671,7 @@ impl Workspace {
                 .auto_shrink([false, false])
                 .show_rows(
                     ui,
-                    if list { 96. } else { thumbnail_height + 84. },
+                    if list { 124. } else { thumbnail_height + 84. },
                     items.len().div_ceil(if list { 1 } else { columns }),
                     |ui, range| {
                         for row in items
@@ -677,7 +690,7 @@ impl Workspace {
                                     } else {
                                         card_width
                                     };
-                                    let height = if list { 92. } else { thumbnail_height + 84. };
+                                    let height = if list { 120. } else { thumbnail_height + 84. };
                                     let (r, _) =
                                         ui.allocate_exact_size(vec2(width, height), Sense::hover());
                                     let mut card_ui = ui.new_child(UiBuilder::new().max_rect(r));
@@ -685,6 +698,9 @@ impl Workspace {
                                     let item_updates = self.library.item_updates(item);
                                     let updates = (!item_updates.is_empty()).then_some(&item_updates);
                                     let has_update = updates.is_some_and(|u| !u.is_empty());
+                                    let updating = self.library.catalogue.rows_for_item(item)
+                                        .into_iter()
+                                        .any(|(path, row)| self.plugin_work.is_updating(path, &row.plugin));
                                     let update_color = Color32::from_rgb(255, 153, 0);
                                     ui.painter().rect_filled(r, 6., color(theme.card));
                                     ui.painter().rect_stroke(
@@ -694,13 +710,14 @@ impl Workspace {
                                         StrokeKind::Inside,
                                     );
                                     let picture = if list {
-                                        Rect::from_min_size(r.min + vec2(8., 8.), vec2(116., 76.))
+                                        Rect::from_min_size(r.min + vec2(8., 8.), vec2(116., 104.))
                                     } else {
                                         Rect::from_min_size(
                                             r.min + vec2(1., 1.),
                                             vec2(width - 2., thumbnail_height),
                                         )
                                     };
+                                    let thumbnail = ui.interact(picture, ui.id().with((&key, "thumbnail")), Sense::click());
                                     let picture_corners = if list { CornerRadius::same(5) } else { thumbnail_top_corners(5.) };
                                     if let Some(tex) = self.textures.get(&key) {
                                         let size = tex.size_vec2();
@@ -850,7 +867,9 @@ impl Workspace {
                                         Sense::click(),
                                     )
                                     .on_hover_text(tooltip);
-                                    let label = if has_update && item.plugin() {
+                                    let label = if updating {
+                                        "Updating"
+                                    } else if has_update && item.plugin() {
                                         "Update"
                                     } else if item.plugin() {
                                         "Install to engine"
@@ -861,43 +880,50 @@ impl Workspace {
                                     };
                                     let text = ui.painter().layout_no_wrap(label.into(),
                                         buttons::primary_font(1.), color(theme.on_accent));
+                                    let spinner_space = if updating { 22. } else { 0. };
                                     let action_width = (if list { 146_f32 } else { 126_f32 })
-                                        .max(text.size().x + 2. * buttons::HORIZONTAL_PADDING);
+                                        .max(text.size().x + spinner_space + 2. * buttons::HORIZONTAL_PADDING);
                                     let action = Rect::from_min_size(
                                         pos2(r.right() - if list { 12. } else { 10. } - action_width,
                                             y - COMPACT_BUTTON_HEIGHT / 2.),
                                         vec2(action_width, COMPACT_BUTTON_HEIGHT),
                                     );
                                     let response = ui
-                                        .interact(action, ui.id().with((&key, "install")), Sense::click())
-                                        .on_hover_cursor(CursorIcon::PointingHand);
+                                        .interact(action, ui.id().with((&key, "install")),
+                                            if updating { Sense::hover() } else { Sense::click() })
+                                        .on_hover_cursor(if updating { CursorIcon::Default } else { CursorIcon::PointingHand });
                                     response.widget_info(|| WidgetInfo::labeled(
-                                        WidgetType::Button, response.enabled(), label));
+                                        WidgetType::Button, response.enabled() && !updating, label));
                                     let update_action = has_update && item.plugin();
                                     let fill = if update_action {
-                                        if response.hovered() { Color32::from_rgb(255, 173, 51) } else { update_color }
+                                        if response.hovered() && !updating { Color32::from_rgb(255, 173, 51) } else { update_color }
                                     } else {
                                         buttons::primary_fill(&theme, &response)
                                     };
                                     ui.painter().rect_filled(action, BUTTON_RADIUS, fill);
+                                    let text_color = if update_action { Color32::BLACK } else { color(theme.on_accent) };
+                                    let content_left = action.center().x - (text.size().x + spinner_space) / 2.;
+                                    if updating {
+                                        ui.put(
+                                            Rect::from_center_size(pos2(content_left + 8., action.center().y), vec2(16., 16.)),
+                                            egui::Spinner::new().size(16.).color(text_color),
+                                        );
+                                    }
                                     ui.painter().galley_with_override_text_color(
-                                        action.center() - text.size() / 2., text,
-                                        if update_action { Color32::BLACK } else { color(theme.on_accent) },
+                                        pos2(content_left + spinner_space, action.center().y - text.size().y / 2.), text,
+                                        text_color,
                                     );
-                                    if response
-                                        .clone()
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .clicked()
+                                    if response.clicked()
+                                        && !updating
                                         && !self.library.installing
                                     {
                                         if has_update && item.plugin() {
-                                            update_engine = updates
-                                                .and_then(|u| u.first())
-                                                .map(|u| u.0.clone());
+                                            update_item = Some(item.clone());
                                         } else {
                                             choose = Some(item.clone());
                                         }
                                     }
+                                    self.library_item_menu(ui, picture, &thumbnail, item, &organization);
                                 }
                             });
                             if list { ui.add_space(4.); }
@@ -905,10 +931,10 @@ impl Workspace {
                         if items.is_empty() && !self.library.loading {
                             ui.label(if self.library.filter == AVAILABLE_UPDATES_FILTER {
                                 "No available updates match the current filters."
-                            } else if self.library.status.contains("items from") {
-                                "No matching library items."
+                            } else if self.library.organization.show_hidden {
+                                "No hidden items match the current filters."
                             } else {
-                                &self.library.status
+                                "No matching Library items. Try another folder or search, or enable Show hidden."
                             });
                         }
                     },
@@ -920,10 +946,28 @@ impl Workspace {
             [c.width - 26., c.height - 57.],
             theme.border,
         );
-        if let Some(path) = update_engine {
-            if let Some(i) = self.engines.iter().position(|e| e.path == path) {
-                self.show_plugins(i);
-                self.check_plugins(ui.ctx().clone());
+        if let Some(item) = update_item {
+            let pending = self
+                .library
+                .catalogue
+                .rows_for_item(&item)
+                .into_iter()
+                .find_map(|(path, row)| {
+                    let update = row.update.as_ref()?;
+                    let engine = self.engines.iter().find(|e| e.path == path)?;
+                    Some((engine.clone(), row.plugin.clone(), update.clone()))
+                });
+            if let Some((engine, plugin, update)) = pending {
+                if self.start_plugin_updates(engine, vec![(plugin, update)], ui.ctx().clone()) {
+                    self.page = Page::Downloads;
+                    self.downloads.show_overview();
+                } else {
+                    self.notify("Finish the current operation before updating this plugin.");
+                }
+            } else {
+                self.notify(
+                    "No direct update is available. Check the plugin's update notice for details.",
+                );
             }
         }
         if let Some(item) = choose {
@@ -953,6 +997,7 @@ impl Workspace {
         } else {
             self.library_install_dialog(ui.ctx());
         }
+        self.library_folder_dialog(ui.ctx());
     }
     fn library_install_dialog(&mut self, ctx: &Context) {
         let Some(item) = self.library.selected.clone() else {
@@ -1141,10 +1186,11 @@ impl Workspace {
                             &self.theme,
                             1.,
                         );
-                        ui.checkbox(
+                        ui.add(buttons::checkbox(
                             &mut self.library.show_all_projects,
-                            RichText::new("Show all projects").color(color(self.theme.text)),
-                        )
+                            "Show all projects",
+                            &self.theme,
+                        ))
                         .on_hover_cursor(CursorIcon::PointingHand);
                     });
                     ui.label(
@@ -1518,5 +1564,50 @@ mod update_state_tests {
                 .description,
             "monster"
         );
+    }
+}
+
+impl Workspace {
+    // Explicit render-only fixture; no credentials, requests or installed content.
+    pub(super) fn preview_library_organization(&mut self, step: usize) {
+        let account = "library-organization-preview".to_owned();
+        self.session = Some(engine_workspace::epic::Session {
+            account_id: account.clone(),
+            display_name: "Preview".into(),
+            refresh_token: String::new(),
+        });
+        self.library = Library {
+            account: account.clone(),
+            attempted: true,
+            list_view: step == 2,
+            ..Default::default()
+        };
+        for (index, (title, kind)) in [
+            ("Forest environment collection", "ASSET_PACK"),
+            ("Editor workflow tools", "CODE_PLUGIN"),
+            ("Adventure game starter", "COMPLETE_PROJECT"),
+            ("Hidden material library", "ASSET_PACK"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.library.items.push(serde_json::from_value(serde_json::json!({
+                "assetId":format!("item-{index}"), "assetNamespace":"preview", "title":title,
+                "distributionMethod":kind,
+                "url":format!("https://www.fab.com/listings/00000000-0000-0000-0000-{index:012}"),
+                "projectVersions":[{"artifactId":"preview", "engineVersions":["5.8"], "targetPlatforms":["Windows"]}]
+            })).unwrap());
+        }
+        let mut org = engine_workspace::library_organization::Organization::default();
+        org.create_folder("Environments").unwrap();
+        org.create_folder("Tools and plugins").unwrap();
+        org.move_item("preview:item-0", Some("Environments"))
+            .unwrap();
+        org.move_item("preview:item-1", Some("Tools and plugins"))
+            .unwrap();
+        org.set_hidden("preview:item-3", true);
+        self.prefs.library_organization.insert(account, org);
+        self.library.organization.preview(step);
+        self.rebuild_library_search();
     }
 }

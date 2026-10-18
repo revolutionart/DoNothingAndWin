@@ -1,5 +1,6 @@
 use super::*;
 use engine_workspace::plugins::{self, Checked, Plugin, Update};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 enum Event {
     CheckRow(String, Instant, Checked),
@@ -16,6 +17,7 @@ pub(super) struct PluginWork {
     check_total: usize,
     pub progress: Option<Arc<Mutex<PluginProgress>>>,
     operation: String,
+    updating: std::collections::HashSet<(String, PathBuf)>,
     activity: super::plugin_activity::Activity,
     pub icons_loaded: std::collections::HashSet<String>,
     confirm: Option<(Installation, Plugin)>,
@@ -27,6 +29,13 @@ pub(super) struct PluginProgress {
     pub state: plugins::UpdateProgress,
 }
 impl PluginWork {
+    pub(super) fn busy(&self) -> bool {
+        self.rx.is_some() || self.mutating
+    }
+    pub(super) fn is_updating(&self, engine: &str, plugin: &Plugin) -> bool {
+        self.updating
+            .contains(&(engine.to_owned(), plugin.descriptor.clone()))
+    }
     // Explicit render-probe fixture. Never starts a transfer or changes installed files.
     pub(super) fn preview_activity(&mut self) {
         let now = Instant::now();
@@ -99,11 +108,18 @@ impl Workspace {
         self.plugin_work.check_total = self.plugins.len();
         self.plugin_work.status = "Checking compatible plugin builds…".into();
         let started = Instant::now();
+        let wait_for_library_builds = self.prefs.wait_for_library_plugin_builds;
         std::thread::spawn(move || {
-            let result = plugins::check_cached_with_progress(&engine, &session, force, |row| {
-                let _ = tx.send(Event::CheckRow(engine.path.clone(), started, row.clone()));
-                ctx.request_repaint();
-            });
+            let result = plugins::check_cached_with_progress(
+                &engine,
+                &session,
+                force,
+                wait_for_library_builds,
+                |row| {
+                    let _ = tx.send(Event::CheckRow(engine.path.clone(), started, row.clone()));
+                    ctx.request_repaint();
+                },
+            );
             let _ = tx.send(Event::Checked(engine.path, started, result));
             ctx.request_repaint();
         });
@@ -130,6 +146,7 @@ impl Workspace {
                 self.plugin_work.rx = None;
                 self.plugin_work.mutating = false;
                 self.plugin_work.progress = None;
+                self.plugin_work.updating.clear();
             }
             match event {
                 Event::CheckRow(path, started, row) => {
@@ -138,6 +155,9 @@ impl Workspace {
                     ctx.request_repaint();
                 }
                 Event::Updated(path, completed, plugin) => {
+                    self.plugin_work
+                        .updating
+                        .remove(&(path.clone(), plugin.descriptor.clone()));
                     self.library
                         .catalogue
                         .installed(path.clone(), completed, plugin.clone());
@@ -199,17 +219,34 @@ impl Workspace {
         }
     }
     pub(super) fn run_plugin_updates(&mut self, items: Vec<(Plugin, Update)>, ctx: Context) {
-        if self.plugin_work.rx.is_some() || self.transfer.busy() || self.demo {
-            return;
-        }
         let Some(i) = self.plugin_engine else {
             return;
         };
-        let engine = self.engines[i].clone();
+        self.start_plugin_updates(self.engines[i].clone(), items, ctx);
+    }
+    pub(super) fn start_plugin_updates(
+        &mut self,
+        engine: Installation,
+        items: Vec<(Plugin, Update)>,
+        ctx: Context,
+    ) -> bool {
+        if self.plugin_work.rx.is_some()
+            || self.transfer.busy()
+            || self.library_transfer_status().is_some()
+            || self.launcher_updates.blocks_work()
+            || self.demo
+            || items.is_empty()
+        {
+            return false;
+        }
         let (tx, rx) = mpsc::channel();
         self.plugin_work.rx = Some(rx);
         self.plugin_work.mutating = true;
         let count = items.len();
+        self.plugin_work.updating = items
+            .iter()
+            .map(|(plugin, _)| (engine.path.clone(), plugin.descriptor.clone()))
+            .collect();
         self.plugin_work.operation = format!(
             "Update {}",
             items
@@ -276,6 +313,7 @@ impl Workspace {
             let _ = tx.send(Event::Finished(engine.path, result));
             ctx.request_repaint();
         });
+        true
     }
     pub(super) fn plugin_confirmation(&mut self, ctx: &Context) {
         let Some((engine, plugin)) = self.plugin_work.confirm.clone() else {

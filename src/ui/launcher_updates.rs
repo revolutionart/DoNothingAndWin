@@ -42,6 +42,7 @@ impl Workspace {
             || self.library_transfer_status().is_some()
             || self.cloning.busy()
             || self.scan.receiver.is_some()
+            || self.project_finder.busy()
     }
 
     fn start_launcher_download(&mut self, update: Update, ctx: &Context) {

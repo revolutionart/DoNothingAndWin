@@ -350,6 +350,7 @@ impl Checked {
             return "Update available";
         }
         match self.status.as_str() {
+            s if s.starts_with("Waiting for Fab library:") => "Waiting for Fab library",
             s if s.starts_with("Package identity could not be verified") => "Identity unverified",
             s if s.starts_with("Could not match this plugin to the signed-in account") => {
                 "Not available through Fab"
@@ -1189,19 +1190,26 @@ pub fn check_cached(
     session: &Session,
     force: bool,
 ) -> Result<Vec<Checked>, String> {
-    check_cached_with_progress(engine, session, force, |_| {})
+    check_cached_with_progress(engine, session, force, false, |_| {})
 }
 pub fn check_cached_with_progress(
     engine: &Installation,
     session: &Session,
     force: bool,
+    wait_for_library_builds: bool,
     mut ready: impl FnMut(&Checked),
 ) -> Result<Vec<Checked>, String> {
     let local = installed(Path::new(&engine.path));
     let mut rows = Vec::new();
     let mut pending = Vec::new();
     for plugin in local {
-        if let Some(row) = check_cache::get(&session.account_id, engine, &plugin, force) {
+        if let Some(row) = check_cache::get(
+            &session.account_id,
+            engine,
+            &plugin,
+            force,
+            wait_for_library_builds,
+        ) {
             ready(&row);
             rows.push(row);
         } else {
@@ -1211,7 +1219,12 @@ pub fn check_cached_with_progress(
     if !pending.is_empty() {
         let items = crate::fab::library_cached(session, force);
         rows.extend(check_selected(
-            engine, session, &items, pending, &mut ready,
+            engine,
+            session,
+            &items,
+            pending,
+            wait_for_library_builds,
+            &mut ready,
         )?);
     }
     rows.sort_by_key(|r| r.plugin.name.to_lowercase());
@@ -1223,12 +1236,13 @@ pub fn check_with_library(
     session: &Session,
     fab_items: &Result<Vec<crate::fab::Item>, String>,
 ) -> Result<Vec<Checked>, String> {
-    check_with_library_progress(engine, session, fab_items, |_| {})
+    check_with_library_progress(engine, session, fab_items, false, |_| {})
 }
 pub fn check_with_library_progress(
     engine: &Installation,
     session: &Session,
     fab_items: &Result<Vec<crate::fab::Item>, String>,
+    wait_for_library_builds: bool,
     ready: impl FnMut(&Checked),
 ) -> Result<Vec<Checked>, String> {
     check_selected(
@@ -1236,6 +1250,7 @@ pub fn check_with_library_progress(
         session,
         fab_items,
         installed(Path::new(&engine.path)),
+        wait_for_library_builds,
         ready,
     )
 }
@@ -1244,14 +1259,21 @@ fn check_selected(
     session: &Session,
     fab_items: &Result<Vec<crate::fab::Item>, String>,
     plugins: Vec<Plugin>,
+    wait_for_library_builds: bool,
     ready: impl FnMut(&Checked),
 ) -> Result<Vec<Checked>, String> {
     Ok(parallel_checks::run(
         plugins,
         |plugin| {
             let fingerprint = check_cache::fingerprint(&plugin);
-            let row = check_one(engine, session, fab_items, plugin);
-            check_cache::remember(&session.account_id, engine, &row, fingerprint);
+            let row = check_one(engine, session, fab_items, plugin, wait_for_library_builds);
+            check_cache::remember(
+                &session.account_id,
+                engine,
+                &row,
+                fingerprint,
+                wait_for_library_builds,
+            );
             row
         },
         ready,
@@ -1262,6 +1284,7 @@ fn check_one(
     session: &Session,
     fab_items: &Result<Vec<crate::fab::Item>, String>,
     plugin: Plugin,
+    wait_for_library_builds: bool,
 ) -> Checked {
     let link = fab_listing_id(&plugin);
     if crate::storage::read_json::<serde_json::Value>(&plugin.descriptor)
@@ -1299,6 +1322,9 @@ fn check_one(
         }) {
             return check_owned_plugin(&plugin, engine, items, |item, version, fallback| {
                 let (manifest, bases) = crate::fab::package(session, item, version)?;
+                if wait_for_library_builds {
+                    version.require_listed_windows_build(&manifest.build)?;
+                }
                 candidate_package(manifest, bases, &plugin, engine, fallback, None)
             });
         }
@@ -1307,6 +1333,9 @@ fn check_one(
         match &fab_items {
             Ok(items) => check_fab_plugin(&plugin, engine, &id, items, |item, version| {
                 let (manifest, bases) = crate::fab::package(session, item, version)?;
+                if wait_for_library_builds {
+                    version.require_listed_windows_build(&manifest.build)?;
+                }
                 candidate_package(manifest, bases, &plugin, engine, false, Some(&id))
             }),
             Err(error) => Checked {
@@ -1320,6 +1349,9 @@ fn check_one(
         match &fab_items {
             Ok(items) => check_owned_plugin(&plugin, engine, items, |item, version, fallback| {
                 let (manifest, bases) = crate::fab::package(session, item, version)?;
+                if wait_for_library_builds {
+                    version.require_listed_windows_build(&manifest.build)?;
+                }
                 candidate_package(manifest, bases, &plugin, engine, fallback, None)
             }),
             Err(error) => Checked {
@@ -2291,6 +2323,32 @@ mod catalog_identity_tests {
         assert!(checked.update.is_none());
         assert!(checked.status.contains("Multiple catalog items"));
     }
+    #[test]
+    fn unlisted_package_waits_without_exposing_an_update_then_becomes_available() {
+        let (p, e) = fixture();
+        let assets = [asset(OLD, "PivotTool_build", "5.4.0")];
+        let mut version: crate::fab::Version = serde_json::from_value(serde_json::json!({
+            "artifactId": "PivotTool_build",
+            "buildVersions": [{"platform":"Windows", "buildVersion":"older"}]
+        }))
+        .unwrap();
+        let waiting = check_plugin(&p, &e, &assets, |_, _| {
+            version.require_listed_windows_build("newer")?;
+            Ok(update(2))
+        });
+        assert_eq!(waiting.status_label(), "Waiting for Fab library");
+        assert!(!waiting.has_update());
+        assert!(waiting.available_version.is_none());
+        // The existing path still offers this package when the optional gate is off.
+        assert!(check_plugin(&p, &e, &assets, |_, _| Ok(update(2))).has_update());
+        version.build_versions[0].build_version = "newer".into();
+        let listed = check_plugin(&p, &e, &assets, |_, _| {
+            version.require_listed_windows_build("newer")?;
+            Ok(update(2))
+        });
+        assert!(listed.has_update());
+    }
+
     #[test]
     fn repeated_builds_choose_highest_version_without_downgrading() {
         let (mut p, e) = fixture();

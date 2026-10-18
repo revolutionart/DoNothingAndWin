@@ -657,10 +657,11 @@ impl Workspace {
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked();
                 }
-                ui.checkbox(
+                ui.add(buttons::checkbox(
                     &mut self.transfer.shortcut,
-                    RichText::new("Create desktop shortcut").color(color(self.theme.text)),
-                );
+                    "Create desktop shortcut",
+                    &self.theme,
+                ));
                 if !self.transfer.state.is_empty() {
                     ui.label(&self.transfer.state);
                 }

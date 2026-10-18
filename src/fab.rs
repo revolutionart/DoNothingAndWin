@@ -20,6 +20,31 @@ pub struct Version {
     pub engine_versions: Vec<String>,
     #[serde(default)]
     pub target_platforms: Vec<String>,
+    #[serde(default)]
+    pub build_versions: Vec<LibraryBuild>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBuild {
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub build_version: String,
+}
+impl Version {
+    /// Library metadata is a visibility signal, not proof of publisher approval.
+    pub fn require_listed_windows_build(&self, build: &str) -> Result<(), String> {
+        if !build.is_empty()
+            && self
+                .build_versions
+                .iter()
+                .any(|listed| listed.platform == "Windows" && listed.build_version == build)
+        {
+            Ok(())
+        } else {
+            Err("Waiting for Fab library: the downloadable Windows build is not listed for this artifact yet. Check again later, or turn off 'Wait for builds listed in the Fab library' in Settings.".into())
+        }
+    }
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SearchMetadata {
@@ -961,4 +986,52 @@ fn transfer_status(
         total as f64 / mib,
         downloaded as f64 / mib
     )
+}
+
+#[cfg(test)]
+mod library_build_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_windows_build_of_this_artifact_is_listed() {
+        let version: Version = serde_json::from_value(serde_json::json!({
+            "artifactId": "PCGEx_UE58",
+            "buildVersions": [
+                {"platform": "Windows", "buildVersion": "5.8.0-59163432+++UE5+Dev-Marketplace-Windows"},
+                {"platform": "Mac", "buildVersion": "5.8.0-59395599+++UE5+Dev-Marketplace-Windows"}
+            ]
+        })).unwrap();
+        assert!(
+            version
+                .require_listed_windows_build("5.8.0-59163432+++UE5+Dev-Marketplace-Windows")
+                .is_ok()
+        );
+        assert!(
+            version
+                .require_listed_windows_build("5.8.0-59395599+++UE5+Dev-Marketplace-Windows")
+                .is_err()
+        );
+        let cached: Version =
+            serde_json::from_slice(&serde_json::to_vec(&version).unwrap()).unwrap();
+        assert!(
+            cached
+                .require_listed_windows_build("5.8.0-59163432+++UE5+Dev-Marketplace-Windows")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn old_library_caches_and_incomplete_metadata_cannot_confirm_a_build() {
+        for fields in [
+            serde_json::json!({}),
+            serde_json::json!({"buildVersions": []}),
+            serde_json::json!({"buildVersions": [{"platform": "Windows"}, {"buildVersion":"new"}]}),
+        ] {
+            let mut value = fields;
+            value["artifactId"] = "artifact".into();
+            let version: Version = serde_json::from_value(value).unwrap();
+            assert!(version.require_listed_windows_build("new").is_err());
+            assert!(version.require_listed_windows_build("").is_err());
+        }
+    }
 }

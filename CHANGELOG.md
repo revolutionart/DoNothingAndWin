@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.3 - 2026-10-18
+
+### Library organization
+
+- Organize Fab Library items into folders with create, rename, move and delete controls. Organization is saved locally for each Epic account without moving installed files.
+- Hide or restore items with the eye icon. **Show hidden** displays only hidden items matching the current filters.
+- Move items using the circular folder icon beneath the eye, or right-click a thumbnail for folder actions. Align the folder manager's names, fields and buttons.
+
+### Project discovery
+
+- Add **Find projects** to Workspace, Projects and the empty state. Review suggested folders and project counts before adding them to Settings; one folder can contain multiple projects.
+- Search Unreal/Epic history and likely locations first with a bounded **Quick search**. Use **Full scan** for deeper locations or choose a folder directly. Show results during scanning, allow cancellation, and skip asset/source folders inside recognized projects.
+
+### Plugin updates
+
+- Start updates directly from Library cards and list rows. Update the selected plugin for its targeted engine while keeping other engine updates available.
+- Show **Updating** with a spinner on the active plugin button and prevent repeated clicks. Follow transfer progress on Downloads.
+- Add the optional **Wait for builds listed in the Fab library** setting. It waits for the exact Windows package build to appear in library metadata; this is not a publisher-approval check. The setting is off by default, preserving existing behavior.
+
+### Interface fixes
+
+- Keep dropdowns in the selected launcher theme when Windows uses a different appearance.
+- Use larger, squarer checkboxes with blue checked states, lighter hover feedback and readable labels.
+- Show tooltips immediately throughout the launcher.
+
+### Known limitations
+
+- Windows 10/11 x64 only. Linux and macOS support are not included.
+- Installer and portable builds remain unsigned. Windows may show security prompts.
+
 ## 1.2.2 - 2026-10-17
 
 ### Launcher updates

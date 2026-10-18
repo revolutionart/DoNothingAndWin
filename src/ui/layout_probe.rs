@@ -10,6 +10,9 @@ pub(super) struct LayoutProbe {
     activity: bool,
     engine_activity: bool,
     plugin_design: bool,
+    project_finder: bool,
+    library_organization: bool,
+    empty_projects: bool,
     page: Option<Page>,
 }
 const CASES: &[(f32, f32, bool)] = &[
@@ -39,12 +42,17 @@ impl LayoutProbe {
             activity: std::env::args().any(|a| a == "--plugin-activity-preview"),
             engine_activity: std::env::args().any(|a| a == "--engine-activity-preview"),
             plugin_design: std::env::args().any(|a| a == "--plugin-design-preview"),
+            project_finder: std::env::args().any(|a| a == "--project-finder-preview"),
+            library_organization: std::env::args().any(|a| a == "--library-organization-preview"),
+            empty_projects: std::env::args().any(|a| a == "--empty-projects-preview"),
             page: std::env::args().find_map(|a| match a.as_str() {
                 "--settings-preview" => Some(Page::Settings),
+                "--library-organization-preview" => Some(Page::Library),
                 "--page-preview=downloads" => Some(Page::Downloads),
                 "--page-preview=library" => Some(Page::Library),
                 "--page-preview=engines" => Some(Page::Engines),
                 "--page-preview=projects" => Some(Page::Projects),
+                "--page-preview=workspace" => Some(Page::Workspace),
                 _ => None,
             }),
         })
@@ -147,8 +155,17 @@ impl Workspace {
                         ..Default::default()
                     });
             }
+            if probe.library_organization {
+                self.preview_library_organization(probe.step);
+            }
             if let Some(page) = probe.page {
                 self.page = page;
+            }
+            if probe.empty_projects {
+                self.projects.clear();
+            }
+            if probe.project_finder {
+                self.project_finder.preview();
             }
             probe.phase = 1;
             probe.deadline = Instant::now() + Duration::from_millis(700);

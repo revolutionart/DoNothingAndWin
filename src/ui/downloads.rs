@@ -13,6 +13,9 @@ pub(super) struct Downloads {
     saved_at: Option<Instant>,
 }
 impl Downloads {
+    pub(super) fn show_overview(&mut self) {
+        self.recent = false;
+    }
     pub fn load() -> Self {
         Self {
             history: storage::read_json(&storage::data_dir().join("download-history.json"))

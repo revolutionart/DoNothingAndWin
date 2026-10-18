@@ -33,6 +33,20 @@ pub fn color(v: [u8; 3]) -> Color32 {
     Color32::from_rgb(v[0], v[1], v[2])
 }
 impl Theme {
+    pub fn apply(&self, ctx: &eframe::egui::Context) {
+        // The app has an explicit appearance preference; OS theme events must not
+        // switch native egui controls while our painted surfaces keep this theme.
+        ctx.set_theme(if self.dark {
+            eframe::egui::Theme::Dark
+        } else {
+            eframe::egui::Theme::Light
+        });
+        ctx.set_visuals(self.visuals());
+        ctx.style_mut(|style| {
+            style.interaction.tooltip_delay = 0.;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+    }
     pub fn dark() -> Self {
         serde_json::from_str(include_str!("../themes/dark.json")).expect("bundled dark theme")
     }

@@ -9,24 +9,33 @@ pub(super) struct EngineSpace {
 }
 impl Workspace {
     pub(super) fn add_project_root(&mut self, path: std::path::PathBuf, ctx: &Context) {
-        if !path.is_dir() {
-            self.notify("Choose an existing project folder.");
+        self.add_project_roots(vec![path], ctx);
+    }
+    pub(super) fn add_project_roots(&mut self, paths: Vec<std::path::PathBuf>, ctx: &Context) {
+        let mut added = 0;
+        for path in paths {
+            if !path.is_dir() {
+                continue;
+            }
+            if discovery::project_roots(&self.prefs.project_roots)
+                .iter()
+                .any(|root| discovery::inside(&path, Path::new(root)))
+            {
+                continue;
+            }
+            self.prefs
+                .project_roots
+                .push(dialog::display_path(&path.to_string_lossy()));
+            added += 1;
+        }
+        if added == 0 {
+            self.notify("These folders are already tracked or are no longer accessible.");
             return;
         }
-        let key = discovery::path_key(&path);
-        if discovery::project_roots(&self.prefs.project_roots)
-            .iter()
-            .any(|p| discovery::path_key(Path::new(p)) == key)
-        {
-            self.notify("This project folder is already configured.");
-            return;
-        }
-        self.prefs.project_roots.push(
-            path.to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .to_owned(),
-        );
         self.reconcile_project_roots(ctx);
+        self.notify(format!(
+            "Added {added} project folders to Settings. Finding their projects…"
+        ));
     }
     fn reconcile_project_roots(&mut self, ctx: &Context) {
         self.scan
@@ -142,7 +151,7 @@ impl Workspace {
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Project folders");
-                ui.label("Projects in these folders and their subfolders appear in Projects. Removing a folder only removes its projects from this launcher; files stay on disk.");
+                ui.label("Add a single project's folder or a parent folder containing many projects. Projects in all subfolders appear automatically. Removing a folder only removes its projects from this launcher; files stay on disk.");
                 ui.separator();
                 ui.label(RichText::new("Epic default project folder (fixed)").strong().color(ui.visuals().text_color()));
                 ui.label(discovery::default_project_root().to_string_lossy().as_ref());
@@ -158,7 +167,8 @@ impl Workspace {
                     if ui.put(button_rect,buttons::secondary_button("Remove")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){remove=Some(i);}
                 }
                 ui.horizontal_wrapped(|ui|{
-                    if ui.add(buttons::secondary_button("Add project folder")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){if let Some(p)=rfd::FileDialog::new().pick_folder(){self.add_project_root(p,ctx);}}
+                    if ui.add(buttons::secondary_button("Add project folder")).on_hover_text("Choose a folder containing one or many projects, including projects in subfolders.").on_hover_cursor(CursorIcon::PointingHand).clicked(){if let Some(p)=rfd::FileDialog::new().set_title("Choose a folder containing one or more Unreal projects").pick_folder(){self.add_project_root(p,ctx);}}
+                    if ui.add(buttons::secondary_button("Find projects on this PC")).clicked(){self.open_project_finder();}
                     if ui.add_enabled(self.scan.receiver.is_none(),buttons::secondary_button("Rescan folders")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.start_scan(ctx.clone(),None);}
                     if self.scan.receiver.is_some(){ui.spinner();ui.label("Scanning project folders…");}
                 });
@@ -166,8 +176,8 @@ impl Workspace {
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Appearance");
                 ui.horizontal_wrapped(|ui|{
-                    if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();ctx.set_visuals(self.theme.visuals());self.persist();}
-                    if ui.add(buttons::secondary_button("Daylight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();ctx.set_visuals(self.theme.visuals());self.persist();}
+                    if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();self.theme.apply(ctx);self.persist();}
+                    if ui.add(buttons::secondary_button("Daylight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();self.theme.apply(ctx);self.persist();}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
@@ -176,6 +186,17 @@ impl Workspace {
                     ui.label("Check every");if ui.scope(|ui| { buttons::compact_style(ui); ui.add(DragValue::new(&mut self.prefs.check_minutes).range(5..=1440).suffix(" minutes")) }).inner.changed(){self.persist();}
                     if ui.add(buttons::secondary_button("Check now")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.check(ctx.clone());}
                 });
+                });
+                settings_section(ui,&theme,|ui|{
+                ui.heading("Plugin updates");
+                let busy = self.plugin_work.busy() || self.library.checking_updates() || self.library_transfer_status().is_some();
+                if ui.add_enabled(!busy, buttons::checkbox(&mut self.prefs.wait_for_library_plugin_builds, "Wait for builds listed in the Fab library", &self.theme)).on_disabled_hover_text("Wait for the current plugin check or installation to finish.").changed() {
+                    self.persist();
+                    self.library.catalogue.clear();
+                    self.refresh_library(ctx);
+                }
+                ui.label("Off (default): offer the latest compatible package available from Fab. On: wait until that package matches the build listed in your Fab library.");
+                ui.label("This checks library availability, not publisher approval. If build information is missing, updates wait until it becomes available. Existing installations are unchanged.");
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Workspace");ui.horizontal_wrapped(|ui|{

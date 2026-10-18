@@ -175,6 +175,45 @@ pub(super) fn thumb_length(track: f32, visible: f32, content: f32) -> f32 {
 mod tests {
     use super::*;
     #[test]
+    fn dropdowns_keep_launcher_colors_when_windows_uses_the_other_theme() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let ctx = Context::default();
+            theme.apply(&ctx);
+            for system_theme in [egui::Theme::Light, egui::Theme::Dark] {
+                let mut bounds = Rect::NOTHING;
+                let output = ctx.run(
+                    RawInput {
+                        system_theme: Some(system_theme),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        CentralPanel::default().show(ctx, |ui| {
+                            bounds = AppComboBox::new(&theme, "project-filter-colors")
+                                .selected_text("All versions")
+                                .show_ui(ui, |_| {})
+                                .response
+                                .rect;
+                        });
+                    },
+                );
+                let fill = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        Shape::Rect(rect) if rect.rect == bounds => Some(rect.fill),
+                        _ => None,
+                    })
+                    .expect("dropdown background rendered");
+                assert_eq!(
+                    fill,
+                    color(theme.card),
+                    "launcher {} on Windows {system_theme:?}",
+                    theme.name
+                );
+            }
+        }
+    }
+    #[test]
     fn dropdown_buttons_keep_compact_metrics_in_larger_layouts() {
         for scale in [1., 1.25, 1.5] {
             for height in [32., 40., 48.] {

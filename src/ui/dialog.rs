@@ -258,7 +258,7 @@ pub(super) fn folder(ui: &mut Ui, value: &mut String) {
 }
 
 // Keep canonical paths for filesystem operations; remove Windows device syntax only in UI.
-fn display_path(value: &str) -> String {
+pub(super) fn display_path(value: &str) -> String {
     if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{}", unc)
     } else {

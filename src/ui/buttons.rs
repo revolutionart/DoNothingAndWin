@@ -2,6 +2,122 @@ use super::*;
 
 // All action buttons share these metrics in both egui layouts and painted cards.
 pub(super) const HORIZONTAL_PADDING: f32 = 14.;
+
+const CHECKBOX_SIZE: f32 = 18.;
+const CHECKBOX_RADIUS: u8 = 3;
+
+pub(super) struct AppCheckbox<'a> {
+    checked: &'a mut bool,
+    label: String,
+    theme: &'a Theme,
+}
+
+pub(super) fn checkbox<'a>(
+    checked: &'a mut bool,
+    label: impl Into<String>,
+    theme: &'a Theme,
+) -> AppCheckbox<'a> {
+    AppCheckbox {
+        checked,
+        label: label.into(),
+        theme,
+    }
+}
+
+impl Widget for AppCheckbox<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let gap = if self.label.is_empty() { 0. } else { 8. };
+        let text: WidgetText = RichText::new(&self.label)
+            .color(color(self.theme.text))
+            .into();
+        let galley = text.into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
+            (ui.available_width() - CHECKBOX_SIZE - gap).max(0.),
+            TextStyle::Button,
+        );
+        let size = vec2(
+            CHECKBOX_SIZE + gap + galley.size().x,
+            CHECKBOX_SIZE
+                .max(galley.size().y)
+                .max(ui.spacing().interact_size.y),
+        );
+        let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+        if response.clicked() {
+            *self.checked = !*self.checked;
+            response.mark_changed();
+        }
+        response.widget_info(|| {
+            WidgetInfo::selected(
+                WidgetType::Checkbox,
+                ui.is_enabled(),
+                *self.checked,
+                &self.label,
+            )
+        });
+        if ui.is_rect_visible(rect) {
+            let indicator = Rect::from_center_size(
+                pos2(rect.left() + CHECKBOX_SIZE / 2., rect.center().y),
+                Vec2::splat(CHECKBOX_SIZE),
+            );
+            let highlighted = response.hovered() || response.is_pointer_button_down_on();
+            let fill = color(if *self.checked {
+                if highlighted {
+                    self.theme.accent_hover
+                } else {
+                    self.theme.accent
+                }
+            } else {
+                self.theme.card
+            });
+            let border = if *self.checked {
+                fill
+            } else {
+                color(if highlighted || response.has_focus() {
+                    self.theme.accent
+                } else {
+                    self.theme.border
+                })
+            };
+            ui.painter().rect(
+                indicator,
+                CornerRadius::same(CHECKBOX_RADIUS),
+                fill,
+                Stroke::new(1., border),
+                StrokeKind::Inside,
+            );
+            if *self.checked {
+                ui.painter().add(Shape::line(
+                    vec![
+                        indicator.min + vec2(4., 9.),
+                        indicator.min + vec2(8., 13.),
+                        indicator.min + vec2(14., 5.),
+                    ],
+                    Stroke::new(2., color(self.theme.on_accent)),
+                ));
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    indicator.expand(2.),
+                    CornerRadius::same(CHECKBOX_RADIUS + 1),
+                    Stroke::new(1., color(self.theme.accent)),
+                    StrokeKind::Outside,
+                );
+            }
+            // Labels remain on the page surface and never inherit indicator colors.
+            ui.painter().galley(
+                pos2(
+                    indicator.right() + gap,
+                    rect.center().y - galley.size().y / 2.,
+                ),
+                galley,
+                color(self.theme.text),
+            );
+        }
+        response
+    }
+}
+
 pub(super) fn compact_style(ui: &mut Ui) {
     ui.spacing_mut().button_padding = vec2(HORIZONTAL_PADDING, 5.);
     ui.spacing_mut().interact_size.y = COMPACT_BUTTON_HEIGHT;
@@ -161,6 +277,96 @@ mod tests {
         );
         ctx.set_fonts(fonts);
         ctx
+    }
+
+    #[test]
+    fn checkbox_labels_keep_surface_text_color_when_hovered_and_pressed() {
+        for theme in [Theme::dark(), Theme::light()] {
+            for initial in [false, true] {
+                let ctx = context();
+                theme.apply(&ctx);
+                let mut checked = initial;
+                let mut bounds = Rect::NOTHING;
+                for frame in 0..4 {
+                    let mut input = RawInput::default();
+                    if frame > 0 {
+                        input.events.push(Event::PointerMoved(bounds.center()));
+                    }
+                    if frame >= 2 {
+                        input.events.push(Event::PointerButton {
+                            pos: bounds.center(),
+                            button: PointerButton::Primary,
+                            pressed: frame == 2,
+                            modifiers: Modifiers::NONE,
+                        });
+                    }
+                    let output = ctx.run(input, |ctx| {
+                        CentralPanel::default().show(ctx, |ui| {
+                            let response =
+                                ui.add(checkbox(&mut checked, "Show hidden (11)", &theme));
+                            bounds = response.rect;
+                            if frame > 0 {
+                                assert!(response.hovered());
+                            }
+                            if frame == 2 {
+                                assert!(response.is_pointer_button_down_on());
+                            }
+                        });
+                    });
+                    let indicator = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            Shape::Rect(shape) if shape.rect.size() == Vec2::splat(18.) => {
+                                Some(shape)
+                            }
+                            _ => None,
+                        })
+                        .expect("larger checkbox indicator rendered");
+                    assert_eq!(indicator.corner_radius, CornerRadius::same(3));
+                    assert_eq!(
+                        indicator.fill,
+                        color(if checked {
+                            if frame > 0 {
+                                theme.accent_hover
+                            } else {
+                                theme.accent
+                            }
+                        } else {
+                            theme.card
+                        })
+                    );
+                    if checked {
+                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                            Shape::Path(path) if path.points.len() == 3 && path.stroke.color == egui::epaint::ColorMode::Solid(color(theme.on_accent)))));
+                    }
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            Shape::Text(text) if text.galley.text() == "Show hidden (11)" => {
+                                Some(text)
+                            }
+                            _ => None,
+                        })
+                        .expect("checkbox label rendered");
+                    let section_color = text.galley.job.sections[0].format.color;
+                    let actual = text.override_text_color.unwrap_or(
+                        if section_color == Color32::PLACEHOLDER {
+                            text.fallback_color
+                        } else {
+                            section_color
+                        },
+                    );
+                    assert_eq!(
+                        actual,
+                        color(theme.text),
+                        "label must contrast with the surface on frame {frame}"
+                    );
+                }
+                assert_eq!(checked, !initial, "click must still toggle the checkbox");
+            }
+        }
     }
 
     #[test]

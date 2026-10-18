@@ -1,4 +1,6 @@
 use crate::{model::Project, platform};
+pub mod quick;
+pub mod suggestions;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -13,6 +15,7 @@ pub struct Report {
     pub directories: usize,
     pub skipped: usize,
     pub cancelled: bool,
+    pub limited: bool,
 }
 pub fn roots() -> Vec<PathBuf> {
     let mut result = Vec::new();
@@ -61,14 +64,64 @@ pub fn scan_stream(
     roots: &[PathBuf],
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicUsize>,
+    found: impl FnMut(Project),
+) -> Report {
+    scan_excluding(roots, &[], cancel, progress, found)
+}
+pub fn scan_excluding(
+    roots: &[PathBuf],
+    excluded_roots: &[PathBuf],
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicUsize>,
+    found: impl FnMut(Project),
+) -> Report {
+    walk(roots, excluded_roots, cancel, progress, None, found)
+}
+
+pub fn scan_quick(
+    roots: &[PathBuf],
+    excluded_roots: &[PathBuf],
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicUsize>,
+    found: impl FnMut(Project),
+) -> Report {
+    walk(
+        roots,
+        excluded_roots,
+        cancel,
+        progress,
+        Some((4, 3000, std::time::Duration::from_secs(8))),
+        found,
+    )
+}
+
+fn walk(
+    roots: &[PathBuf],
+    excluded_roots: &[PathBuf],
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicUsize>,
+    limits: Option<(usize, usize, std::time::Duration)>,
     mut found: impl FnMut(Project),
 ) -> Report {
+    let started = std::time::Instant::now();
+    let excluded_roots: HashSet<_> = excluded_roots.iter().map(|p| path_key(p)).collect();
     let mut report = Report::default();
-    let mut stack: Vec<_> = roots.iter().rev().cloned().collect();
+    let mut stack: std::collections::VecDeque<_> = roots.iter().cloned().map(|p| (p, 0)).collect();
     let mut seen = HashSet::new();
-    while let Some(dir) = stack.pop() {
+    let mut visited = HashSet::new();
+    while let Some((dir, depth)) = if limits.is_some() {
+        stack.pop_front()
+    } else {
+        stack.pop_back()
+    } {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
+            break;
+        }
+        if limits
+            .is_some_and(|(_, max, time)| report.directories >= max || started.elapsed() >= time)
+        {
+            report.limited = true;
             break;
         }
         let Ok(meta) = std::fs::symlink_metadata(&dir) else {
@@ -91,6 +144,16 @@ pub fn scan_stream(
         {
             continue;
         }
+        // Resolve only after rejecting folder links. Hinted paths can be inside
+        // a configured root, rather than equal to it.
+        let key = path_key(&dir);
+        if excluded_roots
+            .iter()
+            .any(|root| key == *root || key.starts_with(&format!("{root}/")))
+            || !visited.insert(key)
+        {
+            continue;
+        }
         if dir
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with("UE_"))
@@ -104,7 +167,17 @@ pub fn scan_stream(
         };
         report.directories += 1;
         progress.store(report.directories, Ordering::Relaxed);
+        let mut children = vec![];
+        let mut project_folder = false;
         for entry in entries.flatten() {
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                return report;
+            }
+            if limits.is_some_and(|(_, _, time)| started.elapsed() >= time) {
+                report.limited = true;
+                return report;
+            }
             let path = entry.path();
             let Ok(kind) = entry.file_type() else {
                 continue;
@@ -113,17 +186,37 @@ pub fn scan_stream(
                 continue;
             }
             if kind.is_dir() {
-                stack.push(path);
+                children.push(path);
             } else if path
                 .extension()
                 .is_some_and(|s| s.eq_ignore_ascii_case("uproject"))
             {
                 if let Ok(p) = platform::import_project(&path) {
+                    project_folder = true;
                     if seen.insert(p.path.to_ascii_lowercase()) {
                         found(p.clone());
                         report.projects.push(p);
                     }
                 }
+            }
+        }
+        for child in children {
+            // Only prune these names after finding a valid descriptor. A user's
+            // custom project collection can legitimately be named Content or Source.
+            if project_folder
+                && child.file_name().is_some_and(|n| {
+                    matches!(
+                        n.to_string_lossy().to_ascii_lowercase().as_str(),
+                        "content" | "plugins" | "source" | "config"
+                    )
+                })
+            {
+                continue;
+            }
+            if limits.is_some_and(|(max_depth, _, _)| depth >= max_depth) {
+                report.limited = true;
+            } else {
+                stack.push_back((child, depth + 1));
             }
         }
     }
@@ -145,6 +238,78 @@ pub fn merge(existing: &mut Vec<Project>, found: Vec<Project>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quick_search_prioritizes_hints_and_respects_work_limits_without_losing_full_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let known = temp.path().join("Deep/A/B/C/D/Game");
+        let other = temp.path().join("Content/Collection/Other");
+        for dir in [&known, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("Game.uproject"), r#"{"FileVersion":3}"#).unwrap();
+        }
+        let roots = [known.clone(), temp.path().into()];
+        let progress = Arc::new(AtomicUsize::new(0));
+        let mut streamed = vec![];
+        let quick = walk(
+            &roots,
+            &[],
+            Arc::default(),
+            progress.clone(),
+            Some((1, 3, std::time::Duration::from_secs(5))),
+            |p| streamed.push(p),
+        );
+        assert!(quick.limited);
+        assert!(quick.directories <= 3);
+        assert_eq!(progress.load(Ordering::Relaxed), quick.directories);
+        assert_eq!(quick.projects.len(), 1);
+        assert_eq!(streamed[0].path, quick.projects[0].path);
+        let full = scan_excluding(&roots, &[], Arc::default(), Arc::default(), |_| {});
+        assert_eq!(full.projects.len(), 2);
+        assert!(!full.limited);
+        // Deep hints cannot bypass a configured root exclusion.
+        let excluded = scan_quick(
+            &roots,
+            &[temp.path().join("Deep")],
+            Arc::default(),
+            Arc::default(),
+            |_| {},
+        );
+        assert_eq!(excluded.projects.len(), 1);
+        assert!(excluded.projects[0].path.contains("Other"));
+        let timed = walk(
+            &roots,
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Some((4, 3000, std::time::Duration::ZERO)),
+            |_| panic!("deadline exceeded"),
+        );
+        assert!(timed.limited);
+        assert_eq!(timed.directories, 0);
+    }
+    #[test]
+    fn discovery_does_not_walk_assets_inside_a_recognized_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path().join("Studio/Game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("Game.uproject"), r#"{"FileVersion":3}"#).unwrap();
+        for n in 0..200 {
+            std::fs::create_dir_all(game.join(format!("Content/Assets/{n}/Textures"))).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let report = scan(&[temp.path().into()], Arc::default(), Arc::default());
+        eprintln!(
+            "{} directories in {:?}",
+            report.directories,
+            started.elapsed()
+        );
+        assert_eq!(report.projects.len(), 1);
+        assert!(
+            report.directories <= 3,
+            "walked {} folders inside project assets",
+            report.directories
+        );
+    }
     #[test]
     fn finds_nested_projects_preserves_pins_and_skips_generated() {
         let d = tempfile::tempdir().unwrap();

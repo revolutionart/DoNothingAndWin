@@ -58,6 +58,8 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
+Current release: **1.2.3** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/DoNothingAndWin-Setup-1.2.3.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/DoNothingAndWin-Portable-1.2.3.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.3/SHA256SUMS.txt)
+
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
 - **Launch after setup** is checked by default.
@@ -76,6 +78,7 @@ This release is unsigned; Windows may display an unknown-publisher/SmartScreen p
 ### Projects and Workspace
 
 - Discover projects in configured folders, import an existing `.uproject`, or create a blank project.
+- Use **Find projects → Quick search** on Workspace or Projects to locate custom project folders. It checks Unreal/Epic project history first, then local drives up to four folders deep, with a 3,000-folder / roughly eight-second search limit. Results appear during the search. Use **Full scan** for deeper locations or **Choose a folder** for a specific location, including network drives. Review suggestions before saving them under **Settings → Project folders**. Both scans can be stopped and skip asset/source folders inside recognized projects.
 - Double-click a project to open it with its associated engine. Missing-engine indicators help identify projects that need another engine installed.
 - Switch between grid and list views, search with a clear button, filter by engine version, and sort by name or recently opened.
 - Browse **All projects**, **Pinned**, and your own category tabs.
@@ -103,6 +106,10 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 
 ### Fab library and plugins
 
+- Organize items into local folders with the thumbnail's folder icon or right-click menu. Use **Manage folders** to create, rename or delete folders; installed files are not moved.
+- Use the eye icon to hide or restore an item. **Show hidden** displays only hidden items. Folder assignments and visibility are saved separately for each Epic account on this PC.
+- Click **Update** on a Library plugin to start its update directly. The button shows **Updating** with a spinner; detailed progress appears on Downloads.
+- Optionally enable **Wait for builds listed in the Fab library** in Settings to wait for matching Windows build metadata. It is off by default and does not verify publisher approval.
 - Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update** (the default) or by name. Fab listing dates load in the background and are cached; items without a date appear last.
 - Search titles, descriptions, tags, and publisher names. Title matches appear first, followed by metadata matches, with the chosen sort order applied within each group. Listing details are cached for responsive searches.
 - Add assets to an existing project, create projects from supported library templates, and install compatible plugins into a selected engine.

@@ -149,6 +149,8 @@ mod activity_tests {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub library_organization:
+        std::collections::HashMap<String, crate::library_organization::Organization>,
     pub hidden_projects: std::collections::HashSet<String>,
     pub project_categories: Vec<String>,
     pub project_category_assignments: std::collections::HashMap<String, String>,
@@ -163,6 +165,7 @@ pub struct Preferences {
     pub engine_paths: Vec<String>,
     pub pending_engines: Vec<String>,
     pub check_minutes: u64,
+    pub wait_for_library_plugin_builds: bool,
     pub display_name: String,
     pub install_root: String,
     pub fab_cache: String,
@@ -172,6 +175,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            library_organization: Default::default(),
             hidden_projects: Default::default(),
             project_categories: vec![],
             project_category_assignments: Default::default(),
@@ -186,6 +190,7 @@ impl Default for Preferences {
             engine_paths: vec![],
             pending_engines: vec![],
             check_minutes: 15,
+            wait_for_library_plugin_builds: false,
             display_name: "Developer".into(),
             install_root: "C:/Program Files/Epic Games".into(),
             fab_cache: "C:/ProgramData/Epic/EpicGamesLauncher/VaultCache".into(),
@@ -360,5 +365,24 @@ mod hidden_project_tests {
         let restored: Preferences =
             serde_json::from_slice(&serde_json::to_vec(&restarted).unwrap()).unwrap();
         assert!(restored.hidden_projects.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod plugin_update_preferences_tests {
+    use super::*;
+    #[test]
+    fn old_preferences_keep_current_behavior_and_opt_in_survives_restart() {
+        let old: Preferences =
+            serde_json::from_str(r#"{"theme":"dark","check_minutes":30}"#).unwrap();
+        assert!(!old.wait_for_library_plugin_builds);
+        let opted_in = Preferences {
+            wait_for_library_plugin_builds: true,
+            ..old
+        };
+        let restored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&opted_in).unwrap()).unwrap();
+        assert!(restored.wait_for_library_plugin_builds);
+        assert_eq!(restored.check_minutes, 30);
     }
 }

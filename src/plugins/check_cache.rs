@@ -8,19 +8,25 @@ use std::{
 };
 
 const TTL: Duration = Duration::from_secs(300);
-type Key = (String, String, String, std::path::PathBuf);
+type Key = (String, String, String, std::path::PathBuf, bool);
 struct Entry {
     at: Instant,
     fingerprint: [u8; 20],
     row: Checked,
 }
 static CACHE: OnceLock<Mutex<HashMap<Key, Entry>>> = OnceLock::new();
-fn key(account: &str, engine: &Installation, plugin: &Plugin) -> Key {
+fn key(
+    account: &str,
+    engine: &Installation,
+    plugin: &Plugin,
+    wait_for_library_builds: bool,
+) -> Key {
     (
         account.into(),
         engine.path.clone(),
         engine.version.clone(),
         plugin.descriptor.clone(),
+        wait_for_library_builds,
     )
 }
 pub(super) fn fingerprint(plugin: &Plugin) -> Option<[u8; 20]> {
@@ -48,13 +54,14 @@ pub(super) fn get(
     engine: &Installation,
     plugin: &Plugin,
     force: bool,
+    wait_for_library_builds: bool,
 ) -> Option<Checked> {
     if force {
         return None;
     }
     let fingerprint = fingerprint(plugin)?;
     let cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    let entry = cache.get(&key(account, engine, plugin))?;
+    let entry = cache.get(&key(account, engine, plugin, wait_for_library_builds))?;
     reusable(entry, fingerprint, force, Instant::now()).then(|| entry.row.clone())
 }
 pub(super) fn remember(
@@ -62,6 +69,7 @@ pub(super) fn remember(
     engine: &Installation,
     row: &Checked,
     fingerprint: Option<[u8; 20]>,
+    wait_for_library_builds: bool,
 ) {
     // Network/authentication failures must never turn into a fresh successful result.
     let Some(fingerprint) = fingerprint.filter(|_| row.available_version.is_some()) else {
@@ -73,7 +81,7 @@ pub(super) fn remember(
         cache.clear();
     }
     cache.insert(
-        key(account, engine, &row.plugin),
+        key(account, engine, &row.plugin, wait_for_library_builds),
         Entry {
             at: Instant::now(),
             fingerprint,
@@ -128,19 +136,20 @@ mod tests {
             version: "5.6.1".into(),
             association: "5.6".into(),
         };
-        remember("account-a", &engine, &row, fingerprint(&plugin));
-        assert!(get("account-a", &engine, &plugin, false).is_some());
-        assert!(get("account-b", &engine, &plugin, false).is_none());
+        remember("account-a", &engine, &row, fingerprint(&plugin), false);
+        assert!(get("account-a", &engine, &plugin, false, false).is_some());
+        assert!(get("account-b", &engine, &plugin, false, false).is_none());
+        assert!(get("account-a", &engine, &plugin, false, true).is_none());
         let other = Installation {
             path: "engine-two".into(),
             ..engine.clone()
         };
-        assert!(get("account-a", &other, &plugin, false).is_none());
+        assert!(get("account-a", &other, &plugin, false, false).is_none());
         fs::write(
             dir.path().join(".dnw-plugin-install.json"),
             b"changed receipt",
         )
         .unwrap();
-        assert!(get("account-a", &engine, &plugin, false).is_none());
+        assert!(get("account-a", &engine, &plugin, false, false).is_none());
     }
 }

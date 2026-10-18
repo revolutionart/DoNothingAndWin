@@ -37,7 +37,7 @@ fn collect_from(root: &Path, projects: &[String]) -> HashMap<String, u64> {
         .collect()
 }
 
-fn read_settings(path: &Path) -> Option<String> {
+pub(crate) fn read_settings(path: &Path) -> Option<String> {
     const LIMIT: u64 = 2 * 1024 * 1024;
     let mut bytes = Vec::new();
     fs::File::open(path)

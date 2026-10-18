@@ -7,10 +7,12 @@ mod engine_options;
 mod launcher_updates;
 mod layout_probe;
 mod library;
+mod library_folders;
 mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
 mod project_cards;
+mod project_finder;
 mod project_visibility;
 mod scrollbar;
 mod settings_flow;
@@ -130,6 +132,7 @@ pub struct Workspace {
     layout_probe: Option<layout_probe::LayoutProbe>,
     transfer: transfers::Transfers,
     scan: transfers::Scan,
+    project_finder: project_finder::Finder,
     engine_space: settings_flow::EngineSpace,
     plugin_engine: Option<usize>,
     plugin_work: plugin_jobs::PluginWork,
@@ -484,7 +487,7 @@ impl Workspace {
         } else {
             Theme::dark()
         };
-        cc.egui_ctx.set_visuals(theme.visuals());
+        theme.apply(&cc.egui_ctx);
         let engines = platform::display_engines();
         let session = storage::load_session();
         let account = session
@@ -546,6 +549,7 @@ impl Workspace {
             layout_probe: layout_probe::LayoutProbe::from_args(),
             transfer: transfers::Transfers::default(),
             scan: transfers::Scan::default(),
+            project_finder: Default::default(),
             engine_space: settings_flow::EngineSpace::default(),
             plugin_engine: None,
             plugin_work: Default::default(),
@@ -1869,12 +1873,13 @@ impl Workspace {
             (bottom - content_top).max(1.),
         ]);
         if indices.is_empty() {
+            let empty_y = (content_top + (bottom - content_top) / 2. - 48.).max(content_top + 16.);
             c.text(
                 ui,
                 (271. + c.width - 26.) / 2.,
-                y + 240.,
+                empty_y,
                 if self.projects.is_empty() {
-                    "Your next project starts here"
+                    "Find your Unreal projects"
                 } else {
                     "No matching projects"
                 },
@@ -1886,13 +1891,45 @@ impl Workspace {
             c.text(
                 ui,
                 (271. + c.width - 26.) / 2.,
-                y + 282.,
-                "Import an existing .uproject or create a blank Unreal project.",
+                empty_y + 42.,
+                if self.projects.is_empty() {
+                    "Add a folder with one or many projects. Subfolders are included."
+                } else {
+                    "Try another search, engine version or category."
+                },
                 17.,
                 false,
                 self.theme.muted,
                 Align2::CENTER_CENTER,
             );
+            if self.projects.is_empty() {
+                let center = (271. + c.width - 26.) / 2.;
+                if c.button(
+                    ui,
+                    "empty-find-projects",
+                    [center - 166., empty_y + 76., 156., 32.],
+                    "Find projects",
+                    Some(Icon::Search),
+                    true,
+                ) {
+                    self.open_project_finder();
+                }
+                if c.button(
+                    ui,
+                    "empty-project-folders",
+                    [center + 6., empty_y + 76., 160., 32.],
+                    "Add project folder",
+                    Some(Icon::Folder),
+                    false,
+                ) {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Choose a folder containing one or more Unreal projects")
+                        .pick_folder()
+                    {
+                        self.add_project_root(path, ctx);
+                    }
+                }
+            }
             return;
         }
         let row_h = if self.list_view {
@@ -2364,6 +2401,7 @@ impl eframe::App for Workspace {
         self.poll_plugins(ctx);
         self.poll_library(ctx);
         self.poll_clone(ctx);
+        self.poll_project_finder();
         self.poll_launcher_updates(ctx);
         if self.launcher_updates.blocks_work() {
             self.show_update_preparation(ctx, backgrounded);
@@ -2382,6 +2420,7 @@ impl eframe::App for Workspace {
             self.category_dialog(ctx);
             self.dialogs(ctx);
             self.install_dialog(ctx);
+            self.project_finder_dialog(ctx);
         }
         if crate::window_frame::take_replace_request() {
             if self.transfer.busy()
@@ -2398,6 +2437,7 @@ impl eframe::App for Workspace {
             || self.pending.is_some()
             || self.transfer.busy()
             || self.scan.receiver.is_some()
+            || self.project_finder.busy()
             || self.library_transfer_status().is_some()
             || self.plugin_work.mutating;
         ctx.request_repaint_after(idle_frame_interval(backgrounded, busy));

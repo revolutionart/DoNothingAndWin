@@ -125,7 +125,7 @@ impl Workspace {
         let rect = c.rect([271., y, c.width - 303., FILTER_ROW_HEIGHT]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal(|ui| {
-                let tab_width = ui.available_width().max(150.);
+                let tab_width = (ui.available_width() - 150.).max(150.);
                 ui.allocate_ui_with_layout(
                     vec2(tab_width, FILTER_ROW_HEIGHT),
                     Layout::left_to_right(Align::Center),
@@ -214,6 +214,11 @@ impl Workspace {
                             });
                     },
                 );
+                if ui.add_sized([138., COMPACT_BUTTON_HEIGHT], buttons::secondary_button("Find projects"))
+                    .on_hover_text("Find projects on this PC and add their folders to Settings")
+                    .clicked() {
+                    self.open_project_finder();
+                }
             });
         });
     }

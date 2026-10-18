@@ -57,6 +57,18 @@ impl Catalogue {
         }
     }
     pub fn for_item(&self, item: &Item) -> Vec<(String, String)> {
+        self.rows_for_item(item)
+            .into_iter()
+            .map(|(engine, row)| {
+                (
+                    engine.to_owned(),
+                    format!("{}: {}", row.plugin.name, row.status_label()),
+                )
+            })
+            .collect()
+    }
+    /// Matching pending comparisons, including notices that require Epic's launcher.
+    pub fn rows_for_item(&self, item: &Item) -> Vec<(&str, &Checked)> {
         if !item.plugin() {
             return vec![];
         }
@@ -74,14 +86,14 @@ impl Catalogue {
                         .as_ref()
                         .is_some_and(|id| fab_listing::listing_id(item).as_ref() == Some(id))
                 {
-                    result.push((
-                        engine.clone(),
-                        format!("{}: {}", row.plugin.name, row.status_label()),
-                    ));
+                    result.push((engine.as_str(), row));
                 }
             }
         }
-        result.sort();
+        result.sort_by(|(a, row_a), (b, row_b)| {
+            a.cmp(b)
+                .then_with(|| row_a.plugin.name.cmp(&row_b.plugin.name))
+        });
         result
     }
 }
@@ -106,6 +118,36 @@ mod tests {
             update: None,
             status: "Epic integration update available; update through Epic".into(),
         }
+    }
+    #[test]
+    fn direct_update_keeps_the_clicked_plugin_and_engine_paired_with_its_payload() {
+        let mut c = Catalogue::default();
+        let now = Instant::now();
+        let mut first = update("one");
+        first.update = Some(super::super::Update {
+            version: "2".into(),
+            number: 2,
+            manifest: crate::buildpatch::Manifest::default(),
+            bases: vec![],
+            prefix: "one".into(),
+        });
+        let mut second = first.clone();
+        second.update.as_mut().unwrap().version = "3".into();
+        c.checked("b".into(), now, vec![second]);
+        c.checked("a".into(), now, vec![update("unrelated"), first.clone()]);
+        let rows = c.rows_for_item(&item("one"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "a");
+        assert_eq!(rows[0].1.plugin.name, "one");
+        assert_eq!(rows[0].1.update.as_ref().unwrap().version, "2");
+        assert_eq!(rows[1].0, "b");
+        assert_eq!(rows[1].1.update.as_ref().unwrap().version, "3");
+        c.installed("a".into(), now, first.plugin);
+        let remaining = c.rows_for_item(&item("one"));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "b");
+        // An Epic-only notice must never become a runnable update for another plugin.
+        assert!(c.rows_for_item(&item("unrelated"))[0].1.update.is_none());
     }
     #[test]
     fn completion_clears_all_projections_without_hiding_other_engines_or_pending_rows() {
