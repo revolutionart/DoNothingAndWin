@@ -14,6 +14,7 @@ mod plugin_jobs;
 mod plugins_view;
 mod project_cards;
 mod project_finder;
+mod project_thumbnails;
 mod project_visibility;
 mod scrollbar;
 mod settings_flow;
@@ -103,6 +104,7 @@ pub struct Workspace {
     status: String,
     error: Option<String>,
     textures: HashMap<String, TextureHandle>,
+    project_thumbnails: project_thumbnails::Thumbnails,
     search: String,
     pinned_only: bool,
     category_filter: Option<String>,
@@ -479,7 +481,11 @@ impl Workspace {
             );
         });
         let mut prefs = storage::load_preferences();
-        prefs.run_at_startup = engine_workspace::download_policy::startup_enabled();
+        let startup = engine_workspace::download_policy::startup_settings();
+        prefs.run_at_startup = startup.is_some();
+        if let Some(in_tray) = startup {
+            prefs.startup_in_tray = in_tray;
+        }
         if light {
             prefs.theme = "light".into();
         }
@@ -515,6 +521,7 @@ impl Workspace {
             status: "Checking engine releases…".into(),
             error: None,
             textures: HashMap::new(),
+            project_thumbnails: Default::default(),
             search: String::new(),
             pinned_only: false,
             category_filter: None,
@@ -610,10 +617,12 @@ impl Workspace {
                 ),
             );
         }
+        if !self.demo {
+            self.project_thumbnails.invalidate();
+            self.poll_project_thumbnails(ctx);
+            return;
+        }
         for p in &mut self.projects {
-            if !self.demo {
-                p.artwork = platform::project_thumbnail(Path::new(&p.path));
-            }
             if let Some(path) = &p.artwork {
                 if self.textures.contains_key(path) {
                     continue;
@@ -2416,6 +2425,7 @@ impl eframe::App for Workspace {
         // but do not build invisible widgets, animate spinners or start UI-only scans.
         if !backgrounded {
             self.poll_workspace_cache(ctx);
+            self.poll_project_thumbnails(ctx);
             egui::CentralPanel::default()
                 .frame(Frame::NONE)
                 .show(ctx, |ui| {

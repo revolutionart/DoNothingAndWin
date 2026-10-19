@@ -139,20 +139,32 @@ pub fn editors_running() -> Result<bool, String> {
     }
 }
 /// Read actual Windows startup registration, including choices made by Setup.
-pub fn startup_enabled() -> bool {
+pub fn startup_settings() -> Option<bool> {
     #[cfg(windows)]
     {
         use winreg::{RegKey, enums::*};
-        return RegKey::predef(HKEY_CURRENT_USER)
+        let value = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
             .and_then(|key| key.get_value::<String, _>("EngineWorkspace"))
-            .is_ok_and(|value| !value.is_empty());
+            .ok()?;
+        if value.is_empty() {
+            return None;
+        }
+        Some(value.split_whitespace().any(|arg| arg == "--minimized"))
     }
     #[cfg(not(windows))]
-    false
+    None
 }
 
-pub fn set_startup(enabled: bool) -> Result<(), String> {
+fn startup_command(exe: &std::path::Path, in_tray: bool) -> String {
+    format!(
+        "\"{}\" --no-scan{}",
+        exe.display(),
+        if in_tray { " --minimized" } else { "" }
+    )
+}
+
+pub fn set_startup(enabled: bool, in_tray: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         use winreg::{RegKey, enums::*};
@@ -164,11 +176,8 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
             // Point at the stable launcher copy so updates do not strand startup on an old version.
             let stable = exe.parent().unwrap().join("DoNothingAndWinLauncher.exe");
             let exe = if stable.is_file() { stable } else { exe };
-            key.set_value(
-                "EngineWorkspace",
-                &format!("\"{}\" --no-scan --minimized", exe.display()),
-            )
-            .map_err(|e| e.to_string())?;
+            key.set_value("EngineWorkspace", &startup_command(&exe, in_tray))
+                .map_err(|e| e.to_string())?;
         } else {
             match key.delete_value("EngineWorkspace") {
                 Ok(()) => {}
@@ -180,7 +189,7 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = enabled;
+        let _ = (enabled, in_tray);
         Err("Startup integration requires Windows".into())
     }
 }
@@ -188,6 +197,24 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_defaults_to_tray_but_can_show_the_window() {
+        let prefs: crate::storage::Preferences = serde_json::from_str("{}").unwrap();
+        assert!(prefs.startup_in_tray);
+        let exe = std::path::Path::new("C:/Program Files/Launcher.exe");
+        assert_eq!(
+            startup_command(exe, true),
+            "\"C:/Program Files/Launcher.exe\" --no-scan --minimized"
+        );
+        assert_eq!(
+            startup_command(exe, false),
+            "\"C:/Program Files/Launcher.exe\" --no-scan"
+        );
+        let prefs: crate::storage::Preferences =
+            serde_json::from_str(r#"{"startup_in_tray":false}"#).unwrap();
+        assert!(!prefs.startup_in_tray);
+    }
+
     #[test]
     fn cached_chunks_reject_damage_and_accept_verified_replacement() {
         let dir = tempfile::tempdir().unwrap();

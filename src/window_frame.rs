@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 static TRAY_PRESENT: AtomicBool = AtomicBool::new(false);
+static START_IN_TRAY: AtomicBool = AtomicBool::new(false);
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static UI_CONTEXT: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::new();
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -66,7 +67,19 @@ pub fn progress_repaint(ctx: &eframe::egui::Context) {
         ctx.request_repaint();
     }
 }
-// Only the close button hides the window. Ordinary minimization stays on the taskbar.
+/// Start hidden only after a usable tray icon has been created.
+/// eframe shows its first rendered frame automatically; the native hook suppresses
+/// that show until the user restores the launcher.
+pub fn start_in_tray() -> bool {
+    if hide_to_tray() {
+        START_IN_TRAY.store(true, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+// Close and tray startup hide the window. Ordinary minimization stays on the taskbar.
 pub fn hide_to_tray() -> bool {
     if !tray_enabled() {
         return false;
@@ -190,6 +203,13 @@ unsafe extern "system" fn frame_proc(
         },
     };
     unsafe {
+        if message == WM_WINDOWPOSCHANGED && START_IN_TRAY.load(Ordering::Relaxed) {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if IsWindowVisible(hwnd) != 0 {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+            return result;
+        }
         if message == WM_SHOWWINDOW || message == WM_SIZE {
             if let Some(ctx) = UI_CONTEXT.get() {
                 ctx.request_repaint();
@@ -199,6 +219,7 @@ unsafe extern "system" fn frame_proc(
             if wparam == 1 {
                 REPLACE_REQUESTED.store(true, Ordering::SeqCst);
             }
+            START_IN_TRAY.store(false, Ordering::Relaxed);
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
             tray(hwnd, false);
@@ -215,6 +236,7 @@ unsafe extern "system" fn frame_proc(
                 || event == WM_LBUTTONDBLCLK
                 || event == windows_sys::Win32::UI::Shell::NIN_BALLOONUSERCLICK
             {
+                START_IN_TRAY.store(false, Ordering::Relaxed);
                 ShowWindow(hwnd, SW_RESTORE);
                 SetForegroundWindow(hwnd);
                 tray(hwnd, false);
@@ -242,6 +264,7 @@ unsafe extern "system" fn frame_proc(
                 // Finish the native popup's message sequence before returning.
                 PostMessageW(hwnd, WM_NULL, 0, 0);
                 if choice == 1 {
+                    START_IN_TRAY.store(false, Ordering::Relaxed);
                     ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                     tray(hwnd, false);

@@ -140,7 +140,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             window_frame::install(cc);
             let app = ui::Workspace::new(cc, demo, light);
-            if minimized {
+            if minimized && !window_frame::start_in_tray() {
                 cc.egui_ctx
                     .send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(true));
             }

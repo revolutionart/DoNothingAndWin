@@ -32,7 +32,7 @@ SetupLogging=yes
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 Name: "startup"; Description: "Start with Windows"; GroupDescription: "Startup:"; Flags: unchecked
-Name: "startup\minimized"; Description: "Start minimized"
+Name: "startup\minimized"; Description: "Start in the system tray (no taskbar button)"
 
 [Files]
 Source: "..\dist\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

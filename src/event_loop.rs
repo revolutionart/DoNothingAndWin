@@ -39,6 +39,7 @@ mod tests {
             hidden_frames: Arc<AtomicUsize>,
             observed: Arc<AtomicBool>,
             exited: Arc<AtomicBool>,
+            hwnd: isize,
         }
         impl eframe::App for Probe {
             fn on_exit(&mut self) {
@@ -49,7 +50,7 @@ mod tests {
                     self.hidden_frames.fetch_add(1, Ordering::Relaxed);
                 } else {
                     if crate::window_frame::tray_enabled() {
-                        assert!(crate::window_frame::hide_to_tray());
+                        panic!("tray startup unexpectedly showed the window");
                     } else {
                         assert!(!crate::window_frame::hide_to_tray());
                         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(true));
@@ -58,7 +59,14 @@ mod tests {
                 if self.completed.load(Ordering::Acquire) {
                     self.observed.store(true, Ordering::Release);
                     if crate::window_frame::tray_enabled() {
-                        // The same exit path used by the native tray menu.
+                        // Exercise the actual tray click handler before hiding and exiting.
+                        unsafe {
+                            use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                            SendMessageW(self.hwnd as _, WM_APP + 77, 0, WM_LBUTTONUP as isize);
+                        }
+                        assert!(!crate::window_frame::is_backgrounded());
+                        assert!(!crate::window_frame::tray_present());
+                        assert!(crate::window_frame::hide_to_tray());
                         crate::window_frame::request_exit();
                     } else {
                         crate::window_frame::completion_notice("Portable completion test");
@@ -120,11 +128,12 @@ mod tests {
         let observed = Arc::new(AtomicBool::new(false));
         let hidden_frames = Arc::new(AtomicUsize::new(0));
         let exited = Arc::new(AtomicBool::new(false));
-        let probe = Probe {
+        let mut probe = Probe {
             completed: completed.clone(),
             observed: observed.clone(),
             hidden_frames: hidden_frames.clone(),
             exited: exited.clone(),
+            hwnd: 0,
         };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let inner = eframe::create_native(
@@ -132,6 +141,14 @@ mod tests {
             eframe::NativeOptions::default(),
             Box::new(move |cc| {
                 crate::window_frame::install(cc);
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let RawWindowHandle::Win32(window) = cc.window_handle().unwrap().as_raw() {
+                    probe.hwnd = window.hwnd.get();
+                }
+                assert_eq!(
+                    crate::window_frame::start_in_tray(),
+                    crate::window_frame::tray_enabled()
+                );
                 let ctx = cc.egui_ctx.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(800));

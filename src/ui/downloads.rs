@@ -984,18 +984,31 @@ impl Workspace {
         ui.add_space(12.);
         self.hidden_project_preferences(ui);
         ui.add_space(12.);
-        let old = self.prefs.run_at_startup;
-        if toggle(
+        let old = (self.prefs.run_at_startup, self.prefs.startup_in_tray);
+        let mut changed = toggle(
             ui,
             &t,
             &mut self.prefs.run_at_startup,
-            "Run when my computer starts",
+            "Start with Windows",
             "Start DoNothing&Win Launcher when you sign in to Windows.",
-        ) {
-            match download_policy::set_startup(self.prefs.run_at_startup) {
+        );
+        if crate::window_frame::tray_enabled() {
+            changed |= toggle(
+                ui,
+                &t,
+                &mut self.prefs.startup_in_tray,
+                "Start in system tray",
+                "When starting with Windows, keep the launcher in the tray without a taskbar button. Turn off to show the window.",
+            );
+        }
+        if changed {
+            match download_policy::set_startup(
+                self.prefs.run_at_startup,
+                self.prefs.startup_in_tray && crate::window_frame::tray_enabled(),
+            ) {
                 Ok(()) => self.persist(),
                 Err(e) => {
-                    self.prefs.run_at_startup = old;
+                    (self.prefs.run_at_startup, self.prefs.startup_in_tray) = old;
                     self.notify(e);
                 }
             }
