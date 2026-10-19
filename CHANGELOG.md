@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.5 - 2026-10-19
 
 - Start in the system tray by default when Windows startup is enabled, without a taskbar button. Add a separate **Start in system tray** setting and update the installer option; turn it off to show the window at sign-in.
 - Refresh project thumbnails automatically when their screenshot changes. Read and decode images in the background, retry incomplete writes, and preserve custom project artwork priority.
