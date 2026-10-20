@@ -982,8 +982,16 @@ impl Workspace {
                 .size(23.),
         );
         if crate::window_frame::tray_enabled() {
-            ui.label("Minimize keeps the launcher in the taskbar. Close (X) hides it in the system tray.");
-            ui.label("Use the tray icon to restore the launcher, or right-click it and choose Exit to quit.");
+            ui.label("Minimize keeps the launcher in the taskbar.");
+            if toggle(
+                ui,
+                &t,
+                &mut self.prefs.close_to_tray,
+                "Close to system tray",
+                "When enabled, X keeps the launcher running in the tray. Turn off to quit when pressing X.",
+            ) {
+                self.persist();
+            }
         } else {
             ui.label("Minimize keeps the portable launcher in the taskbar. Close (X) exits the application.");
         }

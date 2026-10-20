@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod acquisition;
 pub mod plugin_install;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -87,6 +88,10 @@ pub struct Item {
     pub url: Option<String>,
     #[serde(default)]
     pub listing_updated_at: Option<i64>,
+    #[serde(default)]
+    pub acquired_at: Option<i64>,
+    #[serde(default)]
+    pub legacy_item_id: Option<String>,
 }
 impl Item {
     pub fn key(&self) -> String {

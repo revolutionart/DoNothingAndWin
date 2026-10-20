@@ -67,11 +67,11 @@ mod tests {
                         assert!(!crate::window_frame::is_backgrounded());
                         assert!(!crate::window_frame::tray_present());
                         assert!(crate::window_frame::hide_to_tray());
-                        crate::window_frame::request_exit();
+                        assert!(crate::window_frame::close_button(false));
                     } else {
                         crate::window_frame::completion_notice("Portable completion test");
                         assert!(!crate::window_frame::tray_present());
-                        assert!(crate::window_frame::close_button());
+                        assert!(crate::window_frame::close_button(true));
                     }
                 }
                 // After periodic hidden frames succeed, only the worker should

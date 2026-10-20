@@ -4,6 +4,7 @@ mod clone_project;
 mod dialog;
 mod downloads;
 mod engine_options;
+mod engine_order;
 mod launcher_updates;
 mod layout_probe;
 mod library;
@@ -131,7 +132,6 @@ pub struct Workspace {
     toast: Option<(String, Instant)>,
     free: Option<u64>,
     project_scroll: f32,
-    engine_page: usize,
     layout_probe: Option<layout_probe::LayoutProbe>,
     transfer: transfers::Transfers,
     scan: transfers::Scan,
@@ -342,7 +342,7 @@ impl Workspace {
         let label = chosen
             .map(|i| {
                 format!(
-                    "Launch UE{}",
+                    "Launch UE {}",
                     EngineVersion::parse(&self.engines[i].version)
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| self.engines[i].version.clone())
@@ -553,7 +553,6 @@ impl Workspace {
             toast: None,
             free: platform::free_space(),
             project_scroll: 0.0,
-            engine_page: 0,
             layout_probe: layout_probe::LayoutProbe::from_args(),
             transfer: transfers::Transfers::default(),
             scan: transfers::Scan::default(),
@@ -1156,7 +1155,7 @@ impl Workspace {
         }
         if c.window_button(ui, c.width - 21., "×") {
             self.persist();
-            if !crate::window_frame::close_button() {
+            if !crate::window_frame::close_button(self.prefs.close_to_tray) {
                 self.notify("Could not create the tray icon. The launcher is still open.");
             }
         }
@@ -1248,8 +1247,7 @@ impl Workspace {
         }
         match self.page {
             Page::Workspace => {
-                let projects_divider = self.engine_section(ui, &c, ctx);
-                self.project_section(ui, &c, ctx, projects_divider);
+                self.workspace_body(ui, &c, ctx);
             }
             Page::Projects => {
                 self.project_section(ui, &c, ctx, header.divider_y);
@@ -1479,8 +1477,56 @@ impl Workspace {
             }
         }
     }
-    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, _ctx: &Context) -> f32 {
-        let short = c.height < 800.;
+    fn workspace_body(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
+        let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
+        let rows = (self.engines.len() + self.prefs.pending_engines.len())
+            .div_ceil(columns)
+            .max(1);
+        let extra = (rows - 1) as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP);
+        let top = PageHeaderLayout::new(c.width).divider_y + 1.;
+        let viewport = c.rect([271., top, c.width - 277., (c.height - top - 50.).max(1.)]);
+        let theme = self.theme.clone();
+        ui.scope_builder(UiBuilder::new().max_rect(viewport), |ui| {
+            AppScrollArea::vertical(&theme)
+                .id_salt("workspace-body")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let local = Canvas {
+                        origin: pos2(c.origin.x, ui.cursor().top() - top),
+                        width: c.width,
+                        height: c.height + extra,
+                        sx: c.sx,
+                        sy: c.sy,
+                        theme: c.theme.clone(),
+                    };
+                    ui.set_min_height(viewport.height() + extra);
+                    let divider = self.engine_section(ui, &local, c.height < 800.);
+                    self.project_section(ui, &local, ctx, divider);
+                    if DragAndDrop::payload::<engine_order::EngineCardDrag>(ui.ctx()).is_some() {
+                        if let Some(pointer) = ui
+                            .ctx()
+                            .pointer_latest_pos()
+                            .filter(|p| viewport.contains(*p))
+                        {
+                            let direction = if pointer.y < viewport.top() + 32. {
+                                1.
+                            } else if pointer.y > viewport.bottom() - 32. {
+                                -1.
+                            } else {
+                                0.
+                            };
+                            ui.scroll_with_delta(vec2(
+                                0.,
+                                direction * 480. * ui.input(|i| i.stable_dt).min(0.05),
+                            ));
+                        }
+                        ui.ctx().request_repaint();
+                    }
+                });
+        });
+        engine_order::paint_drag_label(ctx, &self.engines, &self.theme);
+    }
+    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, short: bool) -> f32 {
         let offset = PageHeaderLayout::new(c.width).divider_y
             - PAGE_HEADER_DIVIDER_Y
             - if short { 16. } else { 0. };
@@ -1493,7 +1539,13 @@ impl Workspace {
             theme: c.theme.clone(),
         };
         let c = &local;
-        let divider = ENGINE_CARDS_TOP + ENGINE_CARD_HEIGHT + if short { 12. } else { 24. };
+        let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
+        let rows = (self.engines.len() + self.prefs.pending_engines.len())
+            .div_ceil(columns)
+            .max(1);
+        let divider = ENGINE_CARDS_TOP + rows as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP)
+            - ENGINE_CARD_GAP
+            + if short { 12. } else { 24. };
         c.line(
             ui,
             [271., divider],
@@ -1521,8 +1573,6 @@ impl Workspace {
             false,
         ) {
             self.prefs.pending_engines.push(String::new());
-            self.engine_page = (self.engines.len() + self.prefs.pending_engines.len() - 1)
-                / card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
             self.persist();
         }
         if self.engines.is_empty() && self.prefs.pending_engines.is_empty() {
@@ -1557,25 +1607,11 @@ impl Workspace {
                 self.add_engine();
             }
         }
-        let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
-        let pages = (self.engines.len() + self.prefs.pending_engines.len())
-            .div_ceil(columns)
-            .max(1);
-        self.engine_page = self.engine_page.min(pages - 1);
-        if pages > 1
-            && c.button(
-                ui,
-                "more-engines",
-                [c.width - 390., 126., 220., 39.],
-                &format!("More engines  {}/{}", self.engine_page + 1, pages),
-                None,
-                false,
-            )
-        {
-            self.engine_page = (self.engine_page + 1) % pages;
-        }
-        for slot in 0..columns {
-            let i = self.engine_page * columns + slot;
+        let order = engine_order::indices(&self.engines, &self.prefs.engine_card_order);
+        for position in 0..self.engines.len() + self.prefs.pending_engines.len() {
+            let slot = position % columns;
+            let row = position / columns;
+            let i = order.get(position).copied().unwrap_or(position);
             if i >= self.engines.len() {
                 let draft = i - self.engines.len();
                 if draft >= self.prefs.pending_engines.len() {
@@ -1587,7 +1623,7 @@ impl Workspace {
                     draft,
                     [
                         271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
-                        ENGINE_CARDS_TOP,
+                        ENGINE_CARDS_TOP + row as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP),
                         ENGINE_CARD_WIDTH,
                         ENGINE_CARD_HEIGHT,
                     ],
@@ -1600,7 +1636,7 @@ impl Workspace {
                 i,
                 [
                     271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
-                    ENGINE_CARDS_TOP,
+                    ENGINE_CARDS_TOP + row as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP),
                     ENGINE_CARD_WIDTH,
                     ENGINE_CARD_HEIGHT,
                 ],
@@ -1752,7 +1788,11 @@ impl Workspace {
                             .filter(|p| self.project_visible(&p.path))
                             .map(|p| p.engine.clone())
                             .collect();
-                        versions.sort();
+                        versions.sort_by(|a, b| {
+                            EngineVersion::parse(b)
+                                .cmp(&EngineVersion::parse(a))
+                                .then_with(|| a.cmp(b))
+                        });
                         versions.dedup();
                         for version in versions {
                             let label = if version.trim().is_empty() {
@@ -1961,9 +2001,15 @@ impl Workspace {
         };
         let max_scroll = (rows as f32 * row_h - (bottom - content_top).max(1.)).max(0.);
         if ui.rect_contains_pointer(content) {
+            let previous = self.project_scroll;
             self.project_scroll = (self.project_scroll
                 - ui.input(|i| i.smooth_scroll_delta.y) / c.sy)
                 .clamp(0., max_scroll);
+            if self.page == Page::Workspace && self.project_scroll != previous {
+                // Let the outer workspace scroll only when the project list
+                // reaches an edge, rather than moving both views at once.
+                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.);
+            }
         }
         self.project_scroll = self.project_scroll.min(max_scroll);
         if max_scroll > 0. {

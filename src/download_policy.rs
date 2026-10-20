@@ -201,6 +201,20 @@ mod tests {
     fn startup_defaults_to_tray_but_can_show_the_window() {
         let prefs: crate::storage::Preferences = serde_json::from_str("{}").unwrap();
         assert!(prefs.startup_in_tray);
+        assert!(prefs.close_to_tray);
+        let close_prefs: crate::storage::Preferences =
+            serde_json::from_str(r#"{"close_to_tray":false}"#).unwrap();
+        assert!(!close_prefs.close_to_tray);
+        assert!(
+            close_prefs.startup_in_tray,
+            "Closing and Windows startup are independent"
+        );
+        let saved = serde_json::to_string(&close_prefs).unwrap();
+        assert!(
+            !serde_json::from_str::<crate::storage::Preferences>(&saved)
+                .unwrap()
+                .close_to_tray
+        );
         let exe = std::path::Path::new("C:/Program Files/Launcher.exe");
         assert_eq!(
             startup_command(exe, true),

@@ -88,26 +88,31 @@ impl Workspace {
         thumbnail: &Response,
         item: &engine_workspace::fab::Item,
         org: &Organization,
+        show_controls: bool,
     ) {
         let key = item.key();
         let hidden = org.is_hidden(&key);
+        Popup::context_menu(thumbnail)
+            .frame(menu_frame(&self.theme))
+            .show(|ui| {
+                self.library_item_options(ui, &key, org);
+            });
+        if !show_controls {
+            return;
+        }
         let folder_rect = Rect::from_center_size(
             pos2(picture.right() - 20., picture.top() + 88.),
             Vec2::splat(28.),
         );
         let response = folder_button(ui, folder_rect, ui.id().with((&key, "folder")), &self.theme);
         Popup::menu(&response)
+            .id(ui.id().with((&key, "folder-menu")))
             .frame(menu_frame(&self.theme))
             .show(|ui| {
                 style_menu(ui, &self.theme);
                 ui.label("Move to folder");
                 ui.separator();
                 self.library_folder_destinations(ui, &key, org);
-            });
-        Popup::context_menu(thumbnail)
-            .frame(menu_frame(&self.theme))
-            .show(|ui| {
-                self.library_item_options(ui, &key, org);
             });
         let eye_rect = Rect::from_center_size(
             pos2(picture.right() - 20., picture.top() + 54.),

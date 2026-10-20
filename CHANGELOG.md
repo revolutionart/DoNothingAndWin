@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.8 - 2026-10-21
+
+### Library and plugin checks
+
+- Improve matching of owned plugins when their Fab listing link is missing or stale. Verify candidate packages using listing identity or publisher, name and module metadata; keep engine compatibility and ambiguity checks.
+- Distinguish an unresolved plugin match from a failed update request, with more useful status details.
+- Add **Latest added** sorting using Epic entitlement acquisition dates, newest first. Show date coverage and place items without a recorded date last.
+- Show Library card information, hide and folder icons on hover or keyboard focus. Keep folder controls visible while their menu is open.
+- Remove the redundant **All categories** dropdown; use the existing category buttons to filter the Library.
+
+### Workspace and preferences
+
+- Show all engine cards in wrapping rows instead of hiding additional engines behind **More engines**.
+- Drag engine cards to rearrange them, including between rows. Remember the order across restarts without changing the default engine.
+- Sort the project engine-version filter numerically, newest first, with **All versions** at the top.
+- Add a space to the main launch label, such as **Launch UE 5.8.4**.
+- Add **Close to system tray** in Settings. Turn it off to quit the installed launcher when pressing X; Windows startup behavior remains separately configurable. Portable builds continue to exit on X.
+
+### Known limitations
+
+- Epic does not provide usable acquisition dates for every library item. **Latest added** orders items with available dates first and reports coverage.
+- Plugin matching still requires a unique, verified owned package. Unresolved identity or incompatible builds cannot be updated automatically.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.2.7 - 2026-10-20
 
 ### Engine updates

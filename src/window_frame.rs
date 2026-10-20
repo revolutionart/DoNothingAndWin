@@ -38,8 +38,8 @@ pub fn remove_tray_icon() {
     TRAY_PRESENT.store(false, Ordering::Relaxed);
 }
 
-pub fn close_button() -> bool {
-    if tray_enabled() {
+pub fn close_button(close_to_tray: bool) -> bool {
+    if tray_enabled() && close_to_tray {
         hide_to_tray()
     } else {
         request_exit();

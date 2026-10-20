@@ -1202,7 +1202,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "engine-workspace"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "eframe",
  "flate2",

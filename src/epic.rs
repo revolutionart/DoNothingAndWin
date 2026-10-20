@@ -220,6 +220,25 @@ impl Epic {
         }
         Err("Epic sign-in expired. Please reconnect your account.".into())
     }
+    pub fn entitlement_page(&self, session: &Session, start: usize) -> Result<Vec<Value>, String> {
+        let token = self.fab_access_token(session)?;
+        let url = format!(
+            "https://entitlement-public-service-prod08.ol.epicgames.com/entitlement/api/account/{}/entitlements",
+            session.account_id
+        );
+        let value = Self::decode(
+            self.client
+                .get(url)
+                .bearer_auth(token)
+                .query(&[("start", start), ("count", 1000)])
+                .send()
+                .map_err(|_| "Could not load library acquisition dates")?,
+        )?;
+        value
+            .as_array()
+            .cloned()
+            .ok_or_else(|| "Invalid entitlement response".into())
+    }
     pub fn owned_assets(&self, session: &Session) -> Result<Vec<Value>, String> {
         let _lock = session_lock()?;
         let current = crate::storage::load_session()

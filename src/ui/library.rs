@@ -109,6 +109,9 @@ impl Library {
                 if item.listing_updated_at.is_none() {
                     item.listing_updated_at = old.listing_updated_at;
                 }
+                if item.acquired_at.is_none() {
+                    item.acquired_at = old.acquired_at;
+                }
                 if item.listing_search.is_none() {
                     item.listing_search = old.listing_search.clone();
                 }
@@ -232,11 +235,22 @@ impl Workspace {
         self.library.rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = fab::library_pages(&session, |items| {
+            let mut result = fab::library_pages(&session, |items| {
                 let _ = tx.send(Event::Page(items.to_vec()));
                 crate::window_frame::progress_repaint(&ctx);
             });
-            if let Ok(items) = &result {
+            if let Ok(items) = &mut result {
+                // Preserve recorded dates if this optional service is temporarily unavailable.
+                let cached: std::collections::HashMap<_, _> =
+                    fab::load_library_cache(&session.account_id)
+                        .into_iter()
+                        .map(|item| (item.key(), item.acquired_at))
+                        .collect();
+                for item in items.iter_mut() {
+                    item.acquired_at = cached.get(&item.key()).copied().flatten();
+                }
+                let _ = tx.send(Event::Status("Loading library acquisition dates…".into()));
+                let _ = fab::acquisition::refresh(&session, items);
                 let _ = fab::save_library_cache(&session.account_id, items);
             }
             let _ = tx.send(Event::Loaded(result));
@@ -640,7 +654,7 @@ impl Workspace {
                         self.library.filter = index;
                     }
                 }
-                let fixed_controls_width = (170. + 140. + 140. + 32. + 32. + 5. * 8.) * c.scale();
+                let fixed_controls_width = (140. + 140. + 32. + 32. + 4. * 8.) * c.scale();
                 let search_width = (rect.width() - fixed_controls_width).clamp(140. * c.scale(), 258. * c.scale());
                 let controls_width = search_width + fixed_controls_width;
                 if rect.right() - ui.cursor().left() < controls_width {
@@ -655,20 +669,6 @@ impl Workspace {
                     &theme,
                     c.scale(),
                 ).on_hover_text("Search titles, descriptions, tags, and publishers. Title matches appear first; your chosen sort applies within each group.");
-                AppComboBox::new(&self.theme, "library-category")
-                    .width(170. * c.scale())
-                    .selected_text(
-                        ["All categories", "Asset packs", "Plugins", "Projects", "Available Updates"][self.library.filter],
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, label) in [(0, "All categories"), (1, "Asset packs"), (3, "Projects"), (2, "Plugins"), (AVAILABLE_UPDATES_FILTER, "Available Updates")]
-                        {
-                            ui.selectable_value(&mut self.library.filter, i, label)
-                                .on_hover_cursor(CursorIcon::PointingHand);
-                        }
-                    })
-                    .response
-                    .on_hover_cursor(CursorIcon::PointingHand);
                 AppComboBox::new(&self.theme, "library-engine")
                     .width(140. * c.scale())
                     .selected_text(if self.library.engine_filter.is_empty() {"All engines".into()} else {format!("UE {}",self.library.engine_filter)})
@@ -683,11 +683,11 @@ impl Workspace {
                     .width(140. * c.scale())
                     .selected_text(self.library.sort.label())
                     .show_ui(ui, |ui| {
-                        for sort in [Sort::LatestUpdate,Sort::NameAscending,Sort::NameDescending] {
+                        for sort in [Sort::LatestUpdate,Sort::LatestAdded,Sort::NameAscending,Sort::NameDescending] {
                             ui.selectable_value(&mut self.library.sort,sort,sort.label()).on_hover_cursor(CursorIcon::PointingHand);
                         }
                     }).response.on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text("Latest update uses Fab listing update dates, newest first. Dates are cached for up to 6 hours; unavailable dates appear last.");
+                    .on_hover_text("Latest added uses Epic's recorded acquisition dates, newest first. Latest update uses listing update dates. Unavailable dates appear last.");
                 for (list, icon) in [(false, Icon::Grid), (true, Icon::List)] {
                     let (r, response) =
                         ui.allocate_exact_size(Vec2::splat(COMPACT_BUTTON_HEIGHT) * c.scale(), Sense::click());
@@ -743,6 +743,10 @@ impl Workspace {
                 }
             });
             self.plugin_update_links(ui);
+            if self.library.sort == Sort::LatestAdded {
+                let dated = visible_items.iter().filter(|&&i| self.library.items[i].acquired_at.is_some()).count();
+                ui.label(RichText::new(format!("Acquisition dates available for {dated} of {} items. Items without a date appear last.", visible_items.len())).color(color(theme.muted)));
+            }
             if self.library.sync_error { ui.colored_label(color(theme.warning), &self.library.status); }
             let query = SearchQuery::new(&self.library.search);
             let mut items: Vec<_> = visible_items
@@ -828,6 +832,8 @@ impl Workspace {
                                         )
                                     };
                                     let thumbnail = ui.interact(picture, ui.id().with((&key, "thumbnail")), Sense::click());
+                                    let show_controls = ui.rect_contains_pointer(r) || thumbnail.has_focus()
+                                        || Popup::is_id_open(ui.ctx(), ui.id().with((&key, "folder-menu")));
                                     let picture_corners = if list { CornerRadius::same(5) } else { thumbnail_top_corners(5.) };
                                     if let Some(tex) = self.textures.get(&key) {
                                         let size = tex.size_vec2();
@@ -885,7 +891,7 @@ impl Workspace {
                                     );
                                     let listing = fab_listing::listing_id(item);
                                     let action = if listing.is_some() { "Open listing on Fab" } else { "Search for this title on Fab" };
-                                    if title_response.on_hover_text(format!("{}\n{action}\nLast updated: {} (Fab listing)", item.title, fab_listing::date_label(item.listing_updated_at))).clicked() {
+                                    if title_response.on_hover_text(format!("{}\n{action}\nLast updated: {} (Fab listing)\nAcquired: {} (Epic entitlement)", item.title, fab_listing::date_label(item.listing_updated_at), fab_listing::date_label(item.acquired_at))).clicked() {
                                         let url = if let Some(id) = listing {
                                             format!("https://www.fab.com/listings/{id}")
                                         } else {
@@ -933,6 +939,7 @@ impl Workspace {
                                         FontId::proportional(14.),
                                         color(theme.text),
                                     );
+                                    if show_controls {
                                     let info = Rect::from_center_size(
                                         pos2(picture.right() - 20., picture.top() + 20.),
                                         vec2(28., 28.),
@@ -977,6 +984,7 @@ impl Workspace {
                                         Sense::click(),
                                     )
                                     .on_hover_text(tooltip);
+                                    }
                                     let label = if updating {
                                         "Updating"
                                     } else if has_update && item.plugin() {
@@ -1034,7 +1042,7 @@ impl Workspace {
                                             choose = Some(item.clone());
                                         }
                                     }
-                                    self.library_item_menu(ui, picture, &thumbnail, item, &organization);
+                                    self.library_item_menu(ui, picture, &thumbnail, item, &organization, show_controls);
                                 }
                             });
                             if list { ui.add_space(4.); }
@@ -1917,6 +1925,7 @@ mod update_state_tests {
     fn sync_keeps_loaded_search_details_and_removes_unowned_items() {
         let mut old = item();
         old.listing_updated_at = Some(123);
+        old.acquired_at = Some(42);
         old.listing_search = Some(fab::SearchMetadata {
             description: "monster".into(),
             ..Default::default()
@@ -1930,6 +1939,7 @@ mod update_state_tests {
         library.replace_items(vec![item()]);
         assert_eq!(library.items.len(), 1);
         assert_eq!(library.items[0].listing_updated_at, Some(123));
+        assert_eq!(library.items[0].acquired_at, Some(42));
         assert_eq!(
             library.items[0]
                 .listing_search
@@ -1982,6 +1992,11 @@ impl Workspace {
         org.set_hidden("preview:item-3", true);
         self.prefs.library_organization.insert(account, org);
         self.library.organization.preview(step);
+        if std::env::args().any(|a| a == "--library-acquisition-preview") {
+            self.library.sort = Sort::LatestAdded;
+            self.library.items[0].acquired_at = Some(1704067200);
+            self.library.items[1].acquired_at = Some(1735689600);
+        }
         self.rebuild_library_search();
     }
 }

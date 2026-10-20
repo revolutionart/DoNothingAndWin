@@ -20,6 +20,7 @@ use std::{
 pub enum Sort {
     #[default]
     LatestUpdate,
+    LatestAdded,
     NameAscending,
     NameDescending,
 }
@@ -27,6 +28,7 @@ impl Sort {
     pub fn label(self) -> &'static str {
         match self {
             Self::LatestUpdate => "Latest update",
+            Self::LatestAdded => "Latest added",
             Self::NameAscending => "Name A - Z",
             Self::NameDescending => "Name Z - A",
         }
@@ -41,6 +43,7 @@ pub fn sort(items: &mut [Item], order: Sort) {
             .then_with(|| a.key().cmp(&b.key()));
         match order {
             Sort::LatestUpdate => b.listing_updated_at.cmp(&a.listing_updated_at).then(name),
+            Sort::LatestAdded => b.acquired_at.cmp(&a.acquired_at).then(name),
             Sort::NameAscending => name,
             Sort::NameDescending => name.reverse(),
         }
@@ -379,6 +382,22 @@ pub fn refresh_dates(items: &[Item], retry: bool, notify: impl Fn(DateEvent)) {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn latest_added_uses_acquisition_not_publication_and_puts_unknown_dates_last() {
+        let mut old = item("Old acquisition", Some(999));
+        old.acquired_at = Some(10);
+        let mut newer = item("New acquisition", Some(1));
+        newer.acquired_at = Some(20);
+        let unknown = item("A missing date", Some(1000));
+        let mut items = vec![unknown, old, newer];
+        sort(&mut items, Sort::LatestAdded);
+        assert_eq!(
+            items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            ["New acquisition", "Old acquisition", "A missing date"]
+        );
+        sort(&mut items, Sort::LatestUpdate);
+        assert_eq!(items[0].title, "A missing date");
+    }
     #[test]
     fn library_visibility_keeps_fab_listings_and_only_the_official_integration() {
         let mut legacy = item("Legacy plugin", None);

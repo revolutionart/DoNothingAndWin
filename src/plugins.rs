@@ -336,6 +336,9 @@ impl Checked {
                 .starts_with("Epic integration update available;")
     }
     pub fn status_detail(&self) -> &str {
+        if self.status == "No owned Fab listing matches this plugin" {
+            return "The Fab listing ID in this installed plugin does not match a plugin listing returned by your connected account's library. Sync the library and confirm this plugin appears there. If it does, its .uplugin listing link needs investigation. Update availability is unknown.";
+        }
         match self.status_label() {
             "Up to date" => {
                 "The installed version matches the latest compatible version. No update is available."
@@ -366,7 +369,9 @@ impl Checked {
                 "Update through Epic"
             }
             "Managed by its publisher" => "Not available through Fab",
-            "No verified Fab match" => "No verified Fab match",
+            "No verified Fab match" | "No owned Fab listing matches this plugin" => {
+                "No verified Fab match"
+            }
             "No entitled compatible build" => "No compatible build",
             "Version labels differ; cannot determine which is newer" => "Version unclear",
             _ => "Check failed",
@@ -699,7 +704,7 @@ fn verify_unlinked_identity(plugin: &Plugin, remote: &serde_json::Value) -> Resu
         || !local_modules.contains(stem)
         || !local_modules.is_subset(&remote_modules)
     {
-        return Err("Package identity could not be verified: the descriptor has no Marketplace URL and its publisher, name, or module identity is missing or differs. Automatic updates are unavailable; check the publisher.".into());
+        return Err("Package identity could not be verified: no matching listing identity was confirmed, and publisher, name, or module metadata is missing or differs. Automatic updates are unavailable; check the publisher.".into());
     }
     Ok(())
 }
@@ -989,9 +994,12 @@ fn candidate_package(
     let v: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid plugin descriptor")?;
     if let Some(id) = fab_id {
-        verify_fab_identity(&v, id)?;
+        verify_fab_candidate_identity(plugin, &v, id, legacy)?;
     }
-    if legacy && !receipt::read(plugin).is_some_and(|r| r.artifact == manifest.app) {
+    if fab_id.is_none()
+        && legacy
+        && !receipt::read(plugin).is_some_and(|r| r.artifact == manifest.app)
+    {
         if plugin.catalog_id.is_some() {
             verify_legacy_identity(plugin, &v)?;
         } else {
@@ -1060,12 +1068,27 @@ fn verify_fab_identity(value: &serde_json::Value, expected: &str) -> Result<(), 
     }
     Ok(())
 }
+fn verify_fab_candidate_identity(
+    plugin: &Plugin,
+    value: &serde_json::Value,
+    expected: &str,
+    allow_metadata: bool,
+) -> Result<(), String> {
+    if descriptor_fab_ids(value).len() > 1 {
+        return Err("Conflicting Fab listing IDs in package descriptor".into());
+    }
+    match verify_fab_identity(value, expected) {
+        Ok(()) => Ok(()),
+        Err(_) if allow_metadata => verify_unlinked_identity(plugin, value),
+        Err(error) => Err(error),
+    }
+}
 fn check_fab_plugin(
     plugin: &Plugin,
     engine: &Installation,
     listing_id: &str,
     items: &[crate::fab::Item],
-    mut fetch: impl FnMut(&crate::fab::Item, &crate::fab::Version) -> Result<Update, String>,
+    mut fetch: impl FnMut(&crate::fab::Item, &crate::fab::Version, bool) -> Result<Update, String>,
 ) -> Checked {
     let matches: Vec<_> = items
         .iter()
@@ -1079,17 +1102,27 @@ fn check_fab_plugin(
                     == Some(listing_id)
         })
         .collect();
+    if matches.is_empty() {
+        // Public listing links can be absent or stale even for owned plugins.
+        // Names/artifacts only discover candidates. The fetcher must verify the
+        // package's listing ID or the installed publisher/name/module identity.
+        let mut checked = check_owned_plugin(plugin, engine, items, |item, version, _| {
+            fetch(item, version, true)
+        });
+        if checked
+            .status
+            .starts_with("Could not match this plugin to the signed-in account")
+        {
+            checked.status = "No owned Fab listing matches this plugin".into();
+        }
+        return checked;
+    }
     if matches.len() != 1 {
         return Checked {
             plugin: plugin.clone(),
             update: None,
             available_version: None,
-            status: if matches.is_empty() {
-                "No owned Fab listing matches this plugin"
-            } else {
-                "Multiple owned Fab items match; automatic update unavailable"
-            }
-            .into(),
+            status: "Multiple owned Fab items match; automatic update unavailable".into(),
         };
     }
     let item = matches[0];
@@ -1115,7 +1148,7 @@ fn check_fab_plugin(
             .iter()
             .find(|v| Some(v.artifact_id.as_str()) == asset["appName"].as_str())
             .ok_or("Fab artifact missing")?;
-        fetch(item, version)
+        fetch(item, version, false)
     });
     checked.plugin = plugin.clone();
     checked
@@ -1375,13 +1408,15 @@ fn check_one(
     }
     if let Some(id) = link {
         match &fab_items {
-            Ok(items) => check_fab_plugin(&plugin, engine, &id, items, |item, version| {
-                let (manifest, bases) = crate::fab::package(session, item, version)?;
-                if wait_for_library_builds {
-                    version.require_listed_windows_build(&manifest.build)?;
-                }
-                candidate_package(manifest, bases, &plugin, engine, false, Some(&id))
-            }),
+            Ok(items) => {
+                check_fab_plugin(&plugin, engine, &id, items, |item, version, fallback| {
+                    let (manifest, bases) = crate::fab::package(session, item, version)?;
+                    if wait_for_library_builds {
+                        version.require_listed_windows_build(&manifest.build)?;
+                    }
+                    candidate_package(manifest, bases, &plugin, engine, fallback, Some(&id))
+                })
+            }
             Err(error) => Checked {
                 plugin,
                 update: None,
@@ -1458,12 +1493,13 @@ fn check_plugin_candidates(
     }) {
         match fetch(asset, legacy) {
             Ok(update) => {
-                verified_catalogs.insert(
+                verified_catalogs.insert((
+                    asset["namespace"].as_str().unwrap_or("").to_owned(),
                     asset["catalogItemId"]
                         .as_str()
                         .unwrap_or("")
                         .to_ascii_lowercase(),
-                );
+                ));
                 if let Some(previous) = &best {
                     if update.number > previous.number {
                         ambiguous_versions = false;
@@ -2788,9 +2824,129 @@ mod fab_listing_update_tests {
         }
     }
     #[test]
+    fn owned_plugin_with_missing_public_link_still_checks_verified_package() {
+        let (plugin, engine, mut item) = fixture();
+        item.title = plugin.name.clone();
+        item.url = None;
+        let remote = serde_json::json!({"MarketplaceURL":format!("com.epicgames.launcher://ue/Fab/product/{ID}")});
+        let row = check_fab_plugin(&plugin, &engine, ID, &[item], |_, version, fallback| {
+            assert_eq!(version.artifact_id, "ACFUAsce5ab7c1439afbV5");
+            assert!(fallback);
+            verify_fab_candidate_identity(&plugin, &remote, ID, fallback)?;
+            Ok(update())
+        });
+        assert_eq!(row.status_label(), "Update available");
+        assert_eq!(row.available_version.as_deref(), Some("4.5"));
+    }
+    #[test]
+    fn stale_fab_link_fallback_verifies_metadata_and_rejects_ambiguous_products() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plugin, engine, mut item) = fixture();
+        plugin.descriptor = dir.path().join("AscentCombatFramework.uplugin");
+        let local = serde_json::json!({
+            "FriendlyName":plugin.name, "CreatedBy":"Fixture publisher",
+            "CreatedByURL":"https://example.com/publisher", "Version":44,"VersionName":"4.4",
+            "MarketplaceURL":format!("https://www.fab.com/listings/{ID}"),
+            "Modules":[{"Name":"AscentCombatFramework"}]
+        });
+        fs::write(&plugin.descriptor, serde_json::to_vec(&local).unwrap()).unwrap();
+        let original = fs::read(&plugin.descriptor).unwrap();
+        let mut remote = local.clone();
+        remote["MarketplaceURL"] =
+            "https://www.fab.com/listings/a5061972-6875-4052-a7fd-7c33f6531ec3".into();
+        remote["Version"] = 45.into();
+        remote["VersionName"] = "4.5".into();
+        item.title = plugin.name.clone();
+        item.url = remote["MarketplaceURL"].as_str().map(str::to_owned);
+        let check = |items: &[crate::fab::Item], descriptor: &serde_json::Value| {
+            check_fab_plugin(&plugin, &engine, ID, items, |_, _, fallback| {
+                assert!(fallback);
+                verify_fab_candidate_identity(&plugin, descriptor, ID, fallback)?;
+                Ok(update())
+            })
+        };
+        assert!(check(&[item.clone()], &remote).has_update());
+        for (field, bad) in [
+            ("CreatedBy", serde_json::json!("Other publisher")),
+            ("CreatedByURL", serde_json::json!("")),
+            ("FriendlyName", serde_json::json!("Other plugin")),
+            ("Modules", serde_json::json!([{"Name":"DifferentModule"}])),
+            (
+                "FabURL",
+                serde_json::json!(format!("https://www.fab.com/listings/{ID}")),
+            ),
+        ] {
+            let mut wrong = remote.clone();
+            wrong[field] = bad;
+            let row = check(&[item.clone()], &wrong);
+            assert!(!row.has_update(), "{field}");
+            assert!(row.available_version.is_none(), "{field}");
+        }
+        let mut other = item.clone();
+        other.asset_namespace = "another-publisher-namespace".into();
+        let ambiguous = check(&[item.clone(), other], &remote);
+        assert!(!ambiguous.has_update());
+        assert!(ambiguous.status.starts_with("Multiple catalog"));
+        let mut wrong_engine = item.clone();
+        wrong_engine
+            .project_versions
+            .iter_mut()
+            .for_each(|v| v.engine_versions = vec!["UE_5.6".into()]);
+        let mut mac = item.clone();
+        mac.project_versions
+            .iter_mut()
+            .for_each(|v| v.target_platforms = vec!["Mac".into()]);
+        for items in [vec![], vec![wrong_engine], vec![mac]] {
+            let row = check_fab_plugin(&plugin, &engine, ID, &items, |_, _, _| {
+                panic!("Must not fetch unavailable builds")
+            });
+            assert!(!row.has_update());
+            assert!(row.available_version.is_none());
+        }
+        // An exact listing is authoritative: do not mask a bad package or an
+        // incompatible exact listing by switching to another owned product.
+        let mut exact = item.clone();
+        exact.url = Some(format!("https://www.fab.com/listings/{ID}"));
+        let row = check_fab_plugin(
+            &plugin,
+            &engine,
+            ID,
+            &[exact.clone(), item.clone()],
+            |_, _, fallback| {
+                assert!(!fallback);
+                verify_fab_candidate_identity(&plugin, &remote, ID, fallback)?;
+                Ok(update())
+            },
+        );
+        assert!(!row.has_update());
+        exact.project_versions.clear();
+        let row = check_fab_plugin(&plugin, &engine, ID, &[exact, item], |_, _, _| {
+            panic!("Exact identity must take precedence")
+        });
+        assert!(!row.has_update());
+        assert_eq!(fs::read(&plugin.descriptor).unwrap(), original);
+    }
+    #[test]
+    fn missing_owned_fab_listing_is_unresolved_not_a_request_failure() {
+        let (plugin, engine, mut other) = fixture();
+        other.url =
+            Some("https://www.fab.com/listings/a5061972-6875-4052-a7fd-7c33f6531ec3".into());
+        for items in [vec![], vec![other]] {
+            let row = check_fab_plugin(&plugin, &engine, ID, &items, |_, _, _| {
+                panic!("An unmatched listing must not fetch a package")
+            });
+            assert_eq!(row.status, "No owned Fab listing matches this plugin");
+            assert_eq!(row.status_label(), "No verified Fab match");
+            assert!(row.available_version.is_none());
+            assert!(!row.has_update());
+            assert!(row.status_detail().contains("listing ID"));
+        }
+    }
+    #[test]
     fn fab_only_acf_detects_45_for_58_without_legacy_catalog() {
         let (plugin, engine, item) = fixture();
-        let row = check_fab_plugin(&plugin, &engine, ID, &[item], |_, version| {
+        let row = check_fab_plugin(&plugin, &engine, ID, &[item], |_, version, fallback| {
+            assert!(!fallback);
             assert_eq!(version.artifact_id, "ACFUAsce5ab7c1439afbV5");
             Ok(update())
         });
@@ -2812,7 +2968,7 @@ mod fab_listing_update_tests {
             let (mut plugin, engine, item) = fixture();
             plugin.number = number;
             plugin.version = name.into();
-            let row = check_fab_plugin(&plugin, &engine, ID, &[item], |_, _| Ok(update()));
+            let row = check_fab_plugin(&plugin, &engine, ID, &[item], |_, _, _| Ok(update()));
             assert_eq!(row.status, status);
             assert!(row.update.is_none());
         }
@@ -2821,13 +2977,13 @@ mod fab_listing_update_tests {
     fn fab_updates_require_owned_unique_listing_and_exact_windows_engine() {
         let (plugin, mut engine, item) = fixture();
         for items in [vec![], vec![item.clone(), item.clone()]] {
-            let row = check_fab_plugin(&plugin, &engine, ID, &items, |_, _| {
+            let row = check_fab_plugin(&plugin, &engine, ID, &items, |_, _, _| {
                 panic!("Must not fetch unowned or ambiguous items")
             });
             assert!(row.update.is_none());
         }
         engine.version = "5.6.1".into();
-        let row = check_fab_plugin(&plugin, &engine, ID, &[item.clone()], |_, _| {
+        let row = check_fab_plugin(&plugin, &engine, ID, &[item.clone()], |_, _, _| {
             panic!("Must not fetch a different engine branch")
         });
         assert!(row.update.is_none());
@@ -2836,7 +2992,7 @@ mod fab_listing_update_tests {
         mac.project_versions
             .iter_mut()
             .for_each(|v| v.target_platforms = vec!["Mac".into()]);
-        let row = check_fab_plugin(&plugin, &engine, ID, &[mac], |_, _| {
+        let row = check_fab_plugin(&plugin, &engine, ID, &[mac], |_, _, _| {
             panic!("Must not fetch Mac binaries")
         });
         assert!(row.update.is_none());

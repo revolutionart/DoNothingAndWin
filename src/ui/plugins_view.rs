@@ -61,17 +61,29 @@ impl Workspace {
         } else {
             engine.path == self.prefs.default_engine
         };
-        let card_response = ui.interact(
-            c.rect(r),
-            Id::new(("engine-card", &engine.path)),
-            Sense::click(),
-        );
+        let card_response = engine_order::drag_response(ui, c.rect(r), &engine.path);
+        let drop_target = card_response
+            .dnd_hover_payload::<engine_order::EngineCardDrag>()
+            .is_some_and(|drag| drag.path != engine.path);
+        if let Some(drag) = card_response.dnd_release_payload::<engine_order::EngineCardDrag>() {
+            if engine_order::move_card(
+                &self.engines,
+                &mut self.prefs.engine_card_order,
+                &drag.path,
+                &engine.path,
+            ) {
+                self.persist();
+                ui.ctx().request_repaint();
+            }
+        }
         let t = self.theme.clone();
         c.boxed(
             ui,
             r,
             t.card,
-            if update_version.is_some() {
+            if drop_target {
+                t.accent_hover
+            } else if update_version.is_some() {
                 t.warning
             } else if selected {
                 t.accent_hover
@@ -79,7 +91,13 @@ impl Workspace {
                 t.border
             },
             6.,
-            if selected { 1.5 } else { 1. },
+            if drop_target {
+                3.
+            } else if selected {
+                1.5
+            } else {
+                1.
+            },
         );
         let tx = x + 18.;
         let heading_y = y + 30.;

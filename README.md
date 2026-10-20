@@ -58,13 +58,13 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.2.7** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.7/DoNothingAndWin-Setup-1.2.7.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.7/DoNothingAndWin-Portable-1.2.7.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.7/SHA256SUMS.txt)
+Current release: **1.2.8** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.8/DoNothingAndWin-Setup-1.2.8.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.8/DoNothingAndWin-Portable-1.2.8.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.8/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
 - **Launch after setup** is checked by default.
 - **Start with Windows** is optional. When selected, **Start in the system tray** is enabled by default, without a taskbar button. Uncheck it during setup or turn off **Start in system tray** in Settings to show the window at sign-in.
-- Minimize keeps both versions in the taskbar. In the installed version, Close (X) hides the launcher in the system tray; right-click the tray icon and choose Exit to quit. In the portable version, Close (X) exits the application and no tray icon is created. Windows startup and tray startup can be configured independently in Settings.
+- Minimize keeps both versions in the taskbar. In the installed version, Close (X) hides the launcher in the system tray by default; turn off **Close to system tray** in Settings to quit on X, or right-click the tray icon and choose Exit. In the portable version, Close (X) exits the application and no tray icon is created. Windows startup and tray startup can be configured independently in Settings.
 - Setup and uninstall do not delete your Unreal projects or engine installations. Uninstall removes launcher files and its startup entry; local launcher settings are retained.
 - Setup refuses to replace a running launcher. Finish your transfers and exit before installing an update. It never force-closes a download.
 - The launcher checks for stable app updates at startup and daily while open. An available-update notice opens **Settings → Launcher updates**, where you can also check manually and read release notes. From 1.2.1, installed editions offer **Update launcher**: download and verify the installer, finish active operations, install and restart automatically. Startup and shortcut choices are preserved. Portable editions download the new ZIP for manual replacement. Users on 1.2.0 or earlier need to install 1.2.1 manually once to enable this flow for future releases. Windows may still show security prompts for the installer.
@@ -130,7 +130,7 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 ### Everyday use
 
 - Dark and daylight themes, remembered window size, and cached Workspace checks refreshed in the background.
-- Optional Windows startup, with tray startup enabled by default for the installed version. Minimize keeps the app in the taskbar. Close (X) hides the installed version in the tray, where **Exit** quits it; the portable version exits directly.
+- Optional Windows startup, with tray startup enabled by default for the installed version. Minimize keeps the app in the taskbar. Close (X) hides the installed version in the tray by default; turn off **Close to system tray** in Settings to quit on X. The portable version exits directly.
 - A single launcher instance, with build handoff allowed only when idle so active transfers are preserved.
 - Consistent scrollbars across pages, with a minimum thumb size for large lists. Hidden and minimized windows skip UI rendering and UI-only scans while download workers and scheduled release checks continue.
 
