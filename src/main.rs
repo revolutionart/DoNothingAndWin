@@ -126,7 +126,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size(window_size)
-            .with_maximized(preferences.window_maximized)
+            .with_maximized(false)
             .with_icon(icon)
             .with_min_inner_size([1000.0, 680.0])
             .with_decorations(false)
@@ -139,6 +139,13 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             window_frame::install(cc);
+            if let Some(position) = preferences.window_position {
+                window_frame::restore_position(position);
+            }
+            if preferences.window_maximized {
+                cc.egui_ctx
+                    .send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true));
+            }
             let app = ui::Workspace::new(cc, demo, light);
             if minimized && !window_frame::start_in_tray() {
                 cc.egui_ctx

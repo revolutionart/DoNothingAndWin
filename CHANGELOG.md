@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.6 - 2026-10-20
+
+- Show available engine hotfixes on Workspace cards with a warning border and the target version, such as **Update available - UE5.8.4**. Click the status to view engine releases.
+- Add the same circled exclamation indicator to **Engine versions** in the sidebar when an installed engine has an update available.
+- Use consistent gold-orange warning colors for engine updates, **Manage plugins**, and Library update cards and buttons.
+- Rename the selected engine badge to **Default** so it is distinct from update status.
+- Remember the window position alongside its size and maximized state across cold starts. Preserve the normal position while minimized or in the tray, and keep the window on-screen if a monitor is disconnected.
+
 ## 1.2.5 - 2026-10-19
 
 - Start in the system tray by default when Windows startup is enabled, without a taskbar button. Add a separate **Start in system tray** setting and update the installer option; turn it off to show the window at sign-in.

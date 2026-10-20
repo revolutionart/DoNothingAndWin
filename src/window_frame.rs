@@ -332,3 +332,120 @@ pub fn activate_existing(replace: bool) {
         }
     }
 }
+
+/// Read physical screen coordinates, so mixed-DPI monitors don't shift the saved origin.
+/// Hidden, minimized and maximized windows must not replace the normal restore position.
+pub fn normal_position() -> Option<[i32; 2]> {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{Foundation::RECT, UI::WindowsAndMessaging::*};
+        let hwnd = WINDOW.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+        if hwnd.is_null()
+            || IsWindowVisible(hwnd) == 0
+            || IsIconic(hwnd) != 0
+            || IsZoomed(hwnd) != 0
+        {
+            return None;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect) != 0 {
+            return Some([rect.left, rect.top]);
+        }
+    }
+    None
+}
+
+fn position_in_work_area(position: [i32; 2], size: [i32; 2], work: [i32; 4]) -> [i32; 2] {
+    [
+        position[0].clamp(work[0], work[2].saturating_sub(size[0]).max(work[0])),
+        position[1].clamp(work[1], work[3].saturating_sub(size[1]).max(work[1])),
+    ]
+}
+
+/// Called while eframe's new window is still hidden, before maximizing it.
+pub fn restore_position(position: [i32; 2]) {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{
+            Foundation::{POINT, RECT},
+            Graphics::Gdi::{
+                GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+            },
+            UI::WindowsAndMessaging::*,
+        };
+        let hwnd = WINDOW.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+        if hwnd.is_null() {
+            return;
+        }
+        let monitor = MonitorFromPoint(
+            POINT {
+                x: position[0],
+                y: position[1],
+            },
+            MONITOR_DEFAULTTONEAREST,
+        );
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return;
+        }
+        let work = info.rcWork;
+        // Moving across monitors can change DPI and resize the window. Clamp again
+        // using the resulting physical size, keeping the title bar reachable.
+        for _ in 0..2 {
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect) == 0 {
+                return;
+            }
+            let target = position_in_work_area(
+                position,
+                [rect.right - rect.left, rect.bottom - rect.top],
+                [work.left, work.top, work.right, work.bottom],
+            );
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                target[0],
+                target[1],
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = position;
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+    #[test]
+    fn saved_position_survives_restart_and_handles_monitor_changes() {
+        use engine_workspace::storage::Preferences;
+        let mut prefs: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.window_position, None);
+        prefs.window_position = Some([-1800, 120]);
+        let restored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(restored.window_position, Some([-1800, 120]));
+        assert_eq!(
+            position_in_work_area([-1800, 120], [1000, 680], [-1920, 0, 0, 1080]),
+            [-1800, 120]
+        );
+        assert_eq!(
+            position_in_work_area([-1800, 120], [1000, 680], [0, 0, 1920, 1040]),
+            [0, 120]
+        );
+        assert_eq!(
+            position_in_work_area([4000, 2000], [1000, 680], [0, 40, 1920, 1080]),
+            [920, 400]
+        );
+        assert_eq!(
+            position_in_work_area([4000, 2000], [2500, 1500], [0, 40, 1920, 1080]),
+            [0, 40]
+        );
+    }
+}

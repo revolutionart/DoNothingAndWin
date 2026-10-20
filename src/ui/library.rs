@@ -811,7 +811,7 @@ impl Workspace {
                                     let updating = self.library.catalogue.rows_for_item(item)
                                         .into_iter()
                                         .any(|(path, row)| self.plugin_work.is_updating(path, &row.plugin));
-                                    let update_color = Color32::from_rgb(255, 153, 0);
+                                    let update_color = color(theme.warning);
                                     ui.painter().rect_filled(r, 6., color(theme.card));
                                     ui.painter().rect_stroke(
                                         r,
@@ -1006,12 +1006,12 @@ impl Workspace {
                                         WidgetType::Button, response.enabled() && !updating, label));
                                     let update_action = has_update && item.plugin();
                                     let fill = if update_action {
-                                        if response.hovered() && !updating { Color32::from_rgb(255, 173, 51) } else { update_color }
+                                        if response.hovered() && !updating { update_color.lerp_to_gamma(if theme.dark { Color32::WHITE } else { Color32::BLACK }, 0.15) } else { update_color }
                                     } else {
                                         buttons::primary_fill(&theme, &response)
                                     };
                                     ui.painter().rect_filled(action, BUTTON_RADIUS, fill);
-                                    let text_color = if update_action { Color32::BLACK } else { color(theme.on_accent) };
+                                    let text_color = if update_action { if theme.dark { Color32::BLACK } else { Color32::WHITE } } else { color(theme.on_accent) };
                                     let content_left = action.center().x - (text.size().x + spinner_space) / 2.;
                                     if updating {
                                         ui.put(

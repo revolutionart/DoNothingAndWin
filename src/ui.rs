@@ -949,7 +949,16 @@ impl Workspace {
                 },
                 Align2::LEFT_CENTER,
             );
-            if matches!(page, Page::Library) && self.has_plugin_updates() {
+            let update_hint = match page {
+                Page::Library if self.has_plugin_updates() => {
+                    Some("Plugin updates available for your installed engines")
+                }
+                Page::Engines if self.has_engine_updates() => {
+                    Some("Engine updates available for your installed engines")
+                }
+                _ => None,
+            };
+            if let Some(update_hint) = update_hint {
                 let badge_color = if active || r.hovered() {
                     SIDEBAR_ON_HIGHLIGHT
                 } else {
@@ -973,10 +982,10 @@ impl Workspace {
                 );
                 ui.interact(
                     c.rect([201., y + 12., 24., 24.]),
-                    Id::new(("plugin-update-badge", label)),
+                    Id::new(("update-badge", label)),
                     Sense::hover(),
                 )
-                .on_hover_text("Plugin updates available for your installed engines");
+                .on_hover_text(update_hint);
             }
             if page == Page::Downloads
                 && (self.transfer.busy()
@@ -2384,6 +2393,11 @@ impl eframe::App for Workspace {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let backgrounded = crate::window_frame::is_backgrounded()
             || ctx.input(|i| i.viewport().minimized == Some(true));
+        if self.layout_probe.is_none() {
+            if let Some(position) = crate::window_frame::normal_position() {
+                self.prefs.window_position = Some(position);
+            }
+        }
         ctx.input(|i| {
             let viewport = i.viewport();
             if viewport.minimized != Some(true) {

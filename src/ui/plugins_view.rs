@@ -1,5 +1,18 @@
 use super::*;
 impl Workspace {
+    pub(super) fn has_engine_updates(&self) -> bool {
+        self.engines.iter().any(|engine| {
+            let installed = if self.demo {
+                Some(true)
+            } else {
+                self.workspace_cache.engines.get(&engine.path).copied()
+            };
+            engine_card_status(installed, engine, &self.snapshot.releases)
+                .1
+                .is_some()
+        })
+    }
+
     pub(super) fn show_plugins(&mut self, i: usize) {
         if self.plugin_work.mutating {
             return;
@@ -30,7 +43,21 @@ impl Workspace {
     }
     pub(super) fn engine_card(&mut self, ui: &mut Ui, c: &Canvas, i: usize, r: [f32; 4]) {
         let engine = self.engines[i].clone();
+        let installed = self.workspace_cache.engines.get(&engine.path).copied();
+        let (status, update) = engine_card_status(
+            if self.demo { Some(true) } else { installed },
+            &engine,
+            &self.snapshot.releases,
+        );
+        let update_version = update
+            .and_then(|r| r.version.as_ref())
+            .map(ToString::to_string);
+        let status = update_version
+            .as_ref()
+            .map(|version| format!("Update available - UE{version}"))
+            .unwrap_or_else(|| status.to_owned());
         let [x, y, w, h] = r;
+        let status_y = y + 69.;
         let selected = if self.prefs.default_engine.is_empty() {
             i == 0
         } else {
@@ -46,7 +73,13 @@ impl Workspace {
             ui,
             r,
             t.card,
-            if selected { t.accent_hover } else { t.border },
+            if update_version.is_some() {
+                t.warning
+            } else if selected {
+                t.accent_hover
+            } else {
+                t.border
+            },
             6.,
             if selected { 1.5 } else { 1. },
         );
@@ -98,51 +131,64 @@ impl Workspace {
                 ui,
                 x + w - 51.,
                 heading_y,
-                "Current",
+                "Default",
                 14.,
                 false,
                 t.accent_hover,
                 Align2::CENTER_CENTER,
             );
         }
-        let installed = self.workspace_cache.engines.get(&engine.path).copied();
-        let status = if self.demo {
-            "Installed"
-        } else {
-            match installed {
-                Some(true) => "Installed",
-                Some(false) => "Needs repair",
-                None => "Checking…",
-            }
-        };
-        let status_color = if self.demo || installed == Some(true) {
+        let status_color = if update_version.is_some() {
+            t.warning
+        } else if self.demo || installed == Some(true) {
             t.success
         } else if installed == Some(false) {
             t.warning
         } else {
             t.muted
         };
-        c.circle(ui, tx + 7., y + 69., 7., status_color);
-        c.text(
-            ui,
-            tx + 27.,
-            y + 69.,
-            status,
-            14.,
-            false,
-            t.muted,
-            Align2::LEFT_CENTER,
-        );
+        c.circle(ui, tx + 7., status_y, 7., status_color);
         let status_width = ui
             .painter()
             .layout_no_wrap(
-                status.into(),
+                status.clone(),
                 FontId::proportional(14. * c.scale()),
                 color(t.muted),
             )
             .size()
             .x
             / c.scale();
+        let mut status_text_color = t.muted;
+        if let Some(version) = &update_version {
+            let response = ui
+                .interact(
+                    c.rect([tx + 24., status_y - 14., status_width + 6., 28.]),
+                    Id::new(("engine-update", &engine.path)),
+                    Sense::click(),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text(format!(
+                    "Unreal Engine {version} is available. View engine releases."
+                ));
+            status_text_color = if response.hovered() {
+                t.text
+            } else {
+                t.warning
+            };
+            if response.clicked() {
+                self.page = Page::Engines;
+            }
+        }
+        c.text(
+            ui,
+            tx + 27.,
+            status_y,
+            &status,
+            14.,
+            false,
+            status_text_color,
+            Align2::LEFT_CENTER,
+        );
         let count = if self.demo {
             [8, 5, 3][i % 3].to_string()
         } else {
@@ -153,8 +199,8 @@ impl Workspace {
         };
         c.text(
             ui,
-            tx + 27. + status_width + 16.,
-            y + 69.,
+            tx + 27. + status_width + 12.,
+            status_y,
             &format!("|   {count} plugins"),
             14.,
             false,
@@ -177,7 +223,7 @@ impl Workspace {
         let link_color = if response.hovered() {
             [255, 255, 255]
         } else if has_plugin_updates {
-            [255, 153, 0]
+            t.warning
         } else {
             t.accent_hover
         };
@@ -293,7 +339,7 @@ impl Workspace {
             ui.close();
         }
         if ui
-            .add(buttons::secondary_button("Set Current"))
+            .add(buttons::secondary_button("Set as default"))
             .clone()
             .on_hover_cursor(CursorIcon::PointingHand)
             .clicked()
@@ -553,5 +599,134 @@ impl Workspace {
                 self.notify("Sample library item. Open Fab to manage your real assets.");
             }
         }
+    }
+}
+
+// Shared by the engine cards, sidebar badge and regression tests.
+fn engine_card_status<'a>(
+    installed: Option<bool>,
+    engine: &Installation,
+    releases: &'a [Release],
+) -> (&'static str, Option<&'a Release>) {
+    match installed {
+        None => return ("Checking…", None),
+        Some(false) => return ("Needs repair", None),
+        Some(true) => {}
+    }
+    let update = EngineVersion::parse(&engine.version).and_then(|installed| {
+        releases
+            .iter()
+            .filter(|release| {
+                release.platform == "Windows"
+                    && release.channel == "Live"
+                    && release
+                        .build
+                        .as_ref()
+                        .is_some_and(|build| !build.is_empty())
+                    && EngineVersion::parse(&release.app).is_some_and(|branch| {
+                        branch.major == installed.major && branch.minor == installed.minor
+                    })
+                    && release.version.as_ref().is_some_and(|version| {
+                        version.major == installed.major
+                            && version.minor == installed.minor
+                            && version > &installed
+                    })
+            })
+            .max_by(|a, b| a.version.cmp(&b.version))
+    });
+    if update.is_some() {
+        ("Update available", update)
+    } else {
+        ("Installed", None)
+    }
+}
+
+#[cfg(test)]
+mod engine_card_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_card_only_offers_newer_compatible_resolved_live_releases() {
+        let engine = Installation {
+            version: "5.8.3".into(),
+            path: "engine".into(),
+            association: "5.8".into(),
+        };
+        let release = Release {
+            app: "UE_5.8".into(),
+            catalog_id: "engine-58".into(),
+            platform: "Windows".into(),
+            channel: "Live".into(),
+            build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
+            version: EngineVersion::parse("5.8.4"),
+        };
+        assert_eq!(
+            engine_card_status(None, &engine, &[release.clone()]).0,
+            "Checking…"
+        );
+        assert_eq!(
+            engine_card_status(Some(false), &engine, &[release.clone()]).0,
+            "Needs repair"
+        );
+        let updated = Installation {
+            version: "5.8.4".into(),
+            ..engine.clone()
+        };
+        assert_eq!(
+            engine_card_status(Some(true), &updated, &[release.clone()]).0,
+            "Installed"
+        );
+        for invalid in [
+            Release {
+                version: EngineVersion::parse("5.8.2"),
+                ..release.clone()
+            },
+            Release {
+                app: "UE_5.9".into(),
+                version: EngineVersion::parse("5.9.0"),
+                ..release.clone()
+            },
+            Release {
+                build: None,
+                ..release.clone()
+            },
+            Release {
+                channel: "Preview".into(),
+                ..release.clone()
+            },
+            Release {
+                platform: "Mac".into(),
+                ..release.clone()
+            },
+        ] {
+            assert_eq!(
+                engine_card_status(Some(true), &engine, &[invalid]).0,
+                "Installed"
+            );
+        }
+        assert_eq!(engine_card_status(Some(true), &engine, &[]).0, "Installed");
+    }
+
+    #[test]
+    fn workspace_card_reports_hotfix_already_detected_in_releases() {
+        let engine = Installation {
+            version: "5.8.3".into(),
+            path: "F:/Engines/UE_5.8".into(),
+            association: "5.8".into(),
+        };
+        let releases = vec![Release {
+            app: "UE_5.8".into(),
+            catalog_id: "engine-58".into(),
+            platform: "Windows".into(),
+            channel: "Live".into(),
+            build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
+            version: EngineVersion::parse("5.8.4"),
+        }];
+        let (label, update) = engine_card_status(Some(true), &engine, &releases);
+        assert_eq!(label, "Update available");
+        assert_eq!(
+            update.unwrap().version.as_ref().unwrap().to_string(),
+            "5.8.4"
+        );
     }
 }

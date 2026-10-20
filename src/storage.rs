@@ -155,6 +155,8 @@ pub struct Preferences {
     pub project_categories: Vec<String>,
     pub project_category_assignments: std::collections::HashMap<String, String>,
     pub window_size: Option<[f32; 2]>,
+    /// Normal window origin in physical desktop pixels (including negative monitor coordinates).
+    pub window_position: Option<[i32; 2]>,
     pub window_maximized: bool,
     pub downloads: DownloadSettings,
     pub run_at_startup: bool,
@@ -181,6 +183,7 @@ impl Default for Preferences {
             project_categories: vec![],
             project_category_assignments: Default::default(),
             window_size: None,
+            window_position: None,
             window_maximized: false,
             downloads: DownloadSettings::default(),
             run_at_startup: false,
