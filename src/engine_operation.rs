@@ -23,6 +23,7 @@ pub enum Kind {
     Verify,
     Remove,
     Components,
+    Update,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Phase {
@@ -175,9 +176,10 @@ impl Operation {
         Some(event)
     }
     // Explicit render-only fixture; never schedules a worker or touches disk.
-    pub fn preview(&mut self, progress: Progress) {
+    pub fn preview(&mut self, kind: Kind, progress: Progress) {
         *self = Self {
             phase: Phase::Running,
+            kind,
             progress: Arc::new(Mutex::new(progress)),
             ..Self::default()
         };
@@ -257,7 +259,7 @@ mod tests {
     }
     #[test]
     fn maintenance_has_its_own_cancellation_and_completion_rules() {
-        for kind in [Kind::Remove, Kind::Verify, Kind::Components] {
+        for kind in [Kind::Remove, Kind::Verify, Kind::Components, Kind::Update] {
             let mut op = Operation::default();
             let worker = op
                 .maintain(

@@ -142,7 +142,7 @@ pub fn discover_engines() -> Vec<Installation> {
     result.sort_by(|a, b| EngineVersion::parse(&b.version).cmp(&EngineVersion::parse(&a.version)));
     result
 }
-/// Consolidate launcher cards only; maintenance/discovery retain every physical install.
+/// Show the newest usable binary per branch; discovery retains every physical install.
 pub fn display_engines() -> Vec<Installation> {
     let preferred = crate::storage::load_preferences().default_engine;
     consolidate_engines(discover_engines(), &preferred)
@@ -166,13 +166,14 @@ fn consolidate_engines(mut engines: Vec<Installation>, preferred: &str) -> Vec<I
         });
         (
             !engine_ready(e),
+            std::cmp::Reverse(EngineVersion::parse(&e.version)),
             path_key(&e.path) != preferred,
             !standard,
             e.path.to_lowercase(),
         )
     });
     let mut paths = std::collections::HashSet::new();
-    let mut versions = std::collections::HashSet::new();
+    let mut branches = std::collections::HashSet::new();
     engines.retain(|e| {
         if !paths.insert(path_key(&e.path)) {
             return false;
@@ -187,7 +188,13 @@ fn consolidate_engines(mut engines: Vec<Installation>, preferred: &str) -> Vec<I
             == EngineVersion::parse(&e.version)
             && managed.is_some();
         if EngineVersion::parse(&e.association).is_some() || managed_binary {
-            versions.insert(e.version.clone())
+            // Once a hotfix is installed, an older managed copy must not return
+            // as another card. Custom/source builds remain distinct below.
+            branches.insert(
+                EngineVersion::parse(&e.version)
+                    .map(|v| v.branch())
+                    .unwrap_or_else(|| e.version.clone()),
+            )
         } else {
             true
         }
@@ -780,6 +787,55 @@ mod display_tests {
 #[cfg(test)]
 mod managed_display_test {
     use super::*;
+    #[test]
+    fn updated_branch_replaces_old_managed_card_even_when_old_copy_was_default() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("UE_5.8-5.8.3-Workspace");
+        fs::create_dir_all(old.join("Engine/Binaries/Win64")).unwrap();
+        fs::write(old.join("Engine/Binaries/Win64/UnrealEditor.exe"), b"test").unwrap();
+        fs::write(
+            old.join(".engine-workspace-install.json"),
+            br#"{"build":"5.8.3-123+++UE5+Release-5.8-Windows"}"#,
+        )
+        .unwrap();
+        let current = d.path().join("UE_5.8");
+        fs::create_dir_all(current.join("Engine/Binaries/Win64")).unwrap();
+        fs::write(
+            current.join("Engine/Binaries/Win64/UnrealEditor.exe"),
+            b"test",
+        )
+        .unwrap();
+        let old_engine = Installation {
+            path: old.to_string_lossy().into_owned(),
+            version: "5.8.3".into(),
+            association: "{AUTO-GUID}".into(),
+        };
+        let current_engine = Installation {
+            path: current.to_string_lossy().into_owned(),
+            version: "5.8.4".into(),
+            association: "5.8".into(),
+        };
+        let custom = Installation {
+            path: d.path().join("Source").to_string_lossy().into_owned(),
+            version: "5.8.3".into(),
+            association: "{SOURCE-GUID}".into(),
+        };
+        let engines = vec![old_engine.clone(), current_engine.clone(), custom.clone()];
+        let display = consolidate_engines(engines.clone(), &old_engine.path);
+        assert_eq!(
+            display.len(),
+            2,
+            "Old managed hotfix must not return as another card"
+        );
+        assert!(display.iter().any(|e| e.path == current_engine.path));
+        assert!(display.iter().any(|e| e.path == custom.path));
+        assert!(old.join("Engine/Binaries/Win64/UnrealEditor.exe").exists());
+        // An incomplete newer copy must not hide the usable engine.
+        fs::remove_file(current.join("Engine/Binaries/Win64/UnrealEditor.exe")).unwrap();
+        let display = consolidate_engines(engines, &old_engine.path);
+        assert!(display.iter().any(|e| e.path == old_engine.path));
+    }
+
     #[test]
     fn launcher_installed_binary_with_auto_registered_guid_is_not_a_custom_build() {
         let d = tempfile::tempdir().unwrap();

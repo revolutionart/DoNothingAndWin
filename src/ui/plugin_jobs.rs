@@ -2,6 +2,7 @@ use super::*;
 use engine_workspace::plugins::{self, Checked, Plugin, Update};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+mod backups_ui;
 enum Event {
     CheckRow(String, Instant, Checked),
     Updated(String, Instant, Plugin),
@@ -21,6 +22,7 @@ pub(super) struct PluginWork {
     activity: super::plugin_activity::Activity,
     pub icons_loaded: std::collections::HashSet<String>,
     confirm: Option<(Installation, Plugin)>,
+    backups: Option<backups_ui::Manager>,
 }
 #[derive(Clone, Default)]
 pub(super) struct PluginProgress {
@@ -31,6 +33,14 @@ pub(super) struct PluginProgress {
 impl PluginWork {
     pub(super) fn busy(&self) -> bool {
         self.rx.is_some() || self.mutating
+    }
+    // Render-only pending check; no network request or installation is started.
+    pub(super) fn preview_check(&mut self, count: usize) {
+        let (_, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.check_done = 0;
+        self.check_total = count;
+        self.status = "Checking plugin updates…".into();
     }
     pub(super) fn is_updating(&self, engine: &str, plugin: &Plugin) -> bool {
         self.updating
@@ -91,7 +101,7 @@ impl Workspace {
         self.start_plugin_check(ctx, false);
     }
     fn start_plugin_check(&mut self, ctx: Context, force: bool) {
-        if self.plugin_work.rx.is_some() || self.demo {
+        if self.plugin_work.busy() || self.demo {
             return;
         }
         let Some(index) = self.plugin_engine else {
@@ -125,6 +135,7 @@ impl Workspace {
         });
     }
     pub(super) fn poll_plugins(&mut self, ctx: &Context) {
+        self.poll_plugin_backups(ctx);
         if self.plugin_work.mutating {
             if let Some(p) = self.plugin_work.snapshot() {
                 self.plugin_work.status = p.state.phase.into();
@@ -230,7 +241,7 @@ impl Workspace {
         items: Vec<(Plugin, Update)>,
         ctx: Context,
     ) -> bool {
-        if self.plugin_work.rx.is_some()
+        if self.plugin_work.busy()
             || self.transfer.busy()
             || self.library_work_pending()
             || self.launcher_updates.blocks_work()
@@ -365,6 +376,10 @@ impl Workspace {
         }
     }
     pub(super) fn plugin_dialog(&mut self, ctx: &Context) {
+        if self.plugin_work.backups.is_some() {
+            self.plugin_backups_dialog(ctx);
+            return;
+        }
         let Some(index) = self.plugin_engine.filter(|i| *i < self.engines.len()) else {
             return;
         };
@@ -450,6 +465,16 @@ impl Workspace {
                         ui.painter()
                             .line_segment([icon.right_top(), icon.left_bottom()], stroke);
                         close |= close_button.clicked();
+                        if ui
+                            .add_enabled(
+                                !busy && self.plugin_work.rx.is_none(),
+                                plugin_button("Plugin backups"),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            self.open_plugin_backups(engine.clone(), ctx.clone());
+                        }
                         if !updates.is_empty()
                             && ui
                                 .add_enabled(
@@ -621,8 +646,13 @@ impl Workspace {
                                     .max_rect(row)
                                     .layout(Layout::left_to_right(Align::Center)),
                             );
+                            // Apply the disabled appearance once to the entire row,
+                            // including custom-painted icons, text and status dots.
+                            if busy || self.plugin_work.rx.is_some() {
+                                row_ui.disable();
+                            }
                             let ui = &mut row_ui;
-                            let hovered = ui.rect_contains_pointer(row);
+                            let hovered = ui.is_enabled() && ui.rect_contains_pointer(row);
                             let has_update = checked.as_ref().is_some_and(|c| c.has_update());
                             if has_update {
                                 let tint = color(t.warning).gamma_multiply(if hovered {
@@ -741,9 +771,7 @@ impl Workspace {
                             let remove_rect = update_rect.translate(vec2(button_width + 8., 0.));
                             if let Some(update) = update {
                                 let response = ui
-                                    .add_enabled_ui(!busy && self.plugin_work.rx.is_none(), |ui| {
-                                        ui.put(update_rect, primary_button("Update", &t))
-                                    })
+                                    .scope(|ui| ui.put(update_rect, primary_button("Update", &t)))
                                     .inner
                                     .on_hover_cursor(CursorIcon::PointingHand);
                                 if response.clicked() {
@@ -751,7 +779,7 @@ impl Workspace {
                                 }
                             }
                             let folder = ui
-                                .add_enabled_ui(!self.plugin_work.mutating && !self.demo, |ui| {
+                                .add_enabled_ui(!self.demo || !ui.is_enabled(), |ui| {
                                     ui.put(folder_rect, plugin_button(""))
                                 })
                                 .inner
@@ -796,7 +824,7 @@ impl Workspace {
                                 }
                             }
                             let remove = ui
-                                .add_enabled_ui(!busy && self.plugin_work.rx.is_none(), |ui| {
+                                .scope(|ui| {
                                     let widgets = &mut ui.visuals_mut().widgets;
                                     widgets.inactive.fg_stroke.color = color(t.danger);
                                     for widget in [&mut widgets.hovered, &mut widgets.active] {

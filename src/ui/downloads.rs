@@ -387,10 +387,6 @@ impl Workspace {
                                     t.accent,
                                     t.border,
                                 );
-                                ui.label(
-                                    RichText::new("Preparing files and calculating download size…")
-                                        .color(color(t.muted)),
-                                );
                             } else {
                                 ui.label(&p.phase);
                                 ui.add(
@@ -406,6 +402,16 @@ impl Workspace {
                                     p.total as f64 / 1e9,
                                     p.network as f64 / 1e9
                                 ));
+                            }
+                            if p.files_total > 0 {
+                                ui.label(format!("{} / {} files processed", p.files, p.files_total));
+                            }
+                            if !p.detail.is_empty() {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&p.detail).color(color(t.muted)))
+                                        .truncate(),
+                                )
+                                .on_hover_text(&p.detail);
                             }
                             if self.transfer.operation.can_stop()
                                 && ui

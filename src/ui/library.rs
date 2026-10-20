@@ -1005,13 +1005,14 @@ impl Workspace {
                                     response.widget_info(|| WidgetInfo::labeled(
                                         WidgetType::Button, response.enabled() && !updating, label));
                                     let update_action = has_update && item.plugin();
+                                    let update_colors = buttons::update_colors(&theme, response.hovered() && !updating);
                                     let fill = if update_action {
-                                        if response.hovered() && !updating { update_color.lerp_to_gamma(if theme.dark { Color32::WHITE } else { Color32::BLACK }, 0.15) } else { update_color }
+                                        color(update_colors.0)
                                     } else {
                                         buttons::primary_fill(&theme, &response)
                                     };
                                     ui.painter().rect_filled(action, BUTTON_RADIUS, fill);
-                                    let text_color = if update_action { if theme.dark { Color32::BLACK } else { Color32::WHITE } } else { color(theme.on_accent) };
+                                    let text_color = if update_action { color(update_colors.1) } else { color(theme.on_accent) };
                                     let content_left = action.center().x - (text.size().x + spinner_space) / 2.;
                                     if updating {
                                         ui.put(

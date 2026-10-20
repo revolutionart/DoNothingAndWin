@@ -3,6 +3,29 @@ use super::*;
 // All action buttons share these metrics in both egui layouts and painted cards.
 pub(super) const HORIZONTAL_PADDING: f32 = 14.;
 
+/// Shared update-action palette for Library and engine cards.
+pub(super) fn update_colors(theme: &Theme, hovered: bool) -> ([u8; 3], [u8; 3]) {
+    let contrast = if theme.dark {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    };
+    let fill = if hovered {
+        color(theme.warning).lerp_to_gamma(contrast, 0.15)
+    } else {
+        color(theme.warning)
+    };
+    let [r, g, b, _] = fill.to_array();
+    (
+        [r, g, b],
+        if theme.dark {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        },
+    )
+}
+
 const CHECKBOX_SIZE: f32 = 18.;
 const CHECKBOX_RADIUS: u8 = 3;
 

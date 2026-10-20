@@ -50,6 +50,7 @@ impl Plan {
 #[derive(Clone, Default)]
 pub struct Progress {
     pub phase: String,
+    pub detail: String,
     pub completed: u64,
     pub total: u64,
     pub network: u64,
@@ -269,9 +270,12 @@ pub(crate) fn no_links(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn hash_file(path: &Path) -> Result<[u8; 20], String> {
-    hash_file_progress(path, &mut |_| {})
+    hash_file_progress(path, &mut |_| Ok(()))
 }
-fn hash_file_progress(path: &Path, received: &mut impl FnMut(u64)) -> Result<[u8; 20], String> {
+pub(crate) fn hash_file_progress(
+    path: &Path,
+    received: &mut impl FnMut(u64) -> Result<(), String>,
+) -> Result<[u8; 20], String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let mut hash = Sha1::new();
     let mut buf = [0u8; 128 * 1024];
@@ -280,7 +284,7 @@ fn hash_file_progress(path: &Path, received: &mut impl FnMut(u64)) -> Result<[u8
         if n == 0 {
             break;
         }
-        received(n as u64);
+        received(n as u64)?;
         hash.update(&buf[..n]);
     }
     Ok(hash.finalize().into())
@@ -369,6 +373,26 @@ pub fn install(
     control: &Control,
     progress: Arc<Mutex<Progress>>,
 ) -> Result<PathBuf, String> {
+    install_from(plan, control, progress, None)
+}
+
+/// Build a complete replacement beside the installed engine, reusing verified files.
+/// Registration happens only after the caller commits it at the original location.
+pub(crate) fn stage_update(
+    plan: &Plan,
+    source: &Path,
+    control: &Control,
+    progress: Arc<Mutex<Progress>>,
+) -> Result<PathBuf, String> {
+    install_from(plan, control, progress, Some(source))
+}
+
+fn install_from(
+    plan: &Plan,
+    control: &Control,
+    progress: Arc<Mutex<Progress>>,
+    source: Option<&Path>,
+) -> Result<PathBuf, String> {
     crate::download_policy::check_install_allowed()?;
     validate_manifest(&plan.manifest)?;
     control.check()?;
@@ -441,9 +465,26 @@ pub fn install(
         control.check()?;
         let dest = stage.join(relative(&f.name)?);
         no_links(&dest)?;
+        if !dest.exists() {
+            if let Some(source) = source {
+                let original = source.join(relative(&f.name)?);
+                no_links(&original)?;
+                if valid_file(&original, &f.sha, f.size()) {
+                    fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                    // Same-volume hard links avoid copying unchanged engine data.
+                    // The installer replaces invalid staging files instead of writing through links.
+                    fs::hard_link(&original, &dest).map_err(|e| {
+                        format!("Cannot reuse installed engine file {}: {e}", f.name)
+                    })?;
+                }
+            }
+        }
         if fs::metadata(&dest).is_ok_and(|m| m.len() == f.size())
-            && hash_file_progress(&dest, &mut |n| progress.lock().unwrap().read += n)
-                .is_ok_and(|hash| hash == f.sha)
+            && hash_file_progress(&dest, &mut |n| {
+                progress.lock().unwrap().read += n;
+                Ok(())
+            })
+            .is_ok_and(|hash| hash == f.sha)
         {
             verified += f.size();
             progress.lock().unwrap().files += 1;
@@ -626,7 +667,7 @@ pub fn install(
     }
     fs::rename(&stage, &plan.target).map_err(|e| format!("Cannot commit installation: {e}"))?;
     #[cfg(not(test))]
-    {
+    if source.is_none() {
         progress.lock().unwrap().phase = "Registering engine with Epic Games Launcher".into();
         let warning = crate::epic_registration::register(plan).err();
         crate::storage::write_json(
@@ -635,11 +676,21 @@ pub fn install(
         )?;
     }
     // Delete only this transaction's named cache files, never a recursive caller-selected path.
+    {
+        let mut p = progress.lock().unwrap();
+        p.phase = "Cleaning up downloaded chunk cache".into();
+        p.total = 0;
+    }
     for id in needed {
         let p = cache.join(id);
         let _ = fs::remove_file(p);
     }
-    progress.lock().unwrap().phase = "Installation complete - files verified".into();
+    progress.lock().unwrap().phase = if source.is_some() {
+        "Update files prepared - final verification pending"
+    } else {
+        "Installation complete - files verified"
+    }
+    .into();
     Ok(plan.target.clone())
 }
 #[cfg(test)]

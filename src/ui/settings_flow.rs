@@ -197,6 +197,22 @@ impl Workspace {
                 }
                 ui.label("On (default): wait until the compatible package matches the build listed in your Fab library. Off: offer the latest compatible package available from Fab.");
                 ui.label("This checks library availability, not publisher approval. If build information is missing, updates wait until it becomes available. Existing installations are unchanged.");
+                ui.separator();
+                ui.label("A copy of the current plugin is saved before every update. Restore it from Manage plugins → Plugin backups.");
+                let before = self.prefs.plugin_backup_days;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Keep new plugin backups");
+                    AppComboBox::new(&theme, "plugin-backup-retention")
+                        .selected_text(if before == 0 { "Until manually deleted".into() } else { format!("{before} days") })
+                        .width(205.)
+                        .show_ui(ui, |ui| {
+                            for (days, label) in [(7, "7 days (default)"), (14, "14 days"), (30, "30 days"), (0, "Until manually deleted")] {
+                                ui.selectable_value(&mut self.prefs.plugin_backup_days, days, label);
+                            }
+                        });
+                });
+                if before != self.prefs.plugin_backup_days { self.persist(); }
+                ui.label("Existing backups keep their expiry date. Mark any backup Keep to prevent automatic deletion. Expired backups are removed when you open Plugin backups or update plugins for that engine.");
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Workspace");ui.horizontal_wrapped(|ui|{

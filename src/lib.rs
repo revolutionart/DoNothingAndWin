@@ -28,4 +28,5 @@ pub mod download_policy;
 pub mod instance;
 
 pub mod engine_operation;
+pub mod engine_update;
 pub mod epic_registration;

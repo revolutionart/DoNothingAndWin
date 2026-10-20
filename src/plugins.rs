@@ -1,5 +1,6 @@
 pub mod catalogue;
 use std::path::{Path, PathBuf};
+pub mod backups;
 mod check_cache;
 mod parallel_checks;
 pub(crate) mod receipt;
@@ -1660,6 +1661,8 @@ pub fn update_plugin_with_progress(
     {
         return Err("This is not a newer plugin version".into());
     }
+    // Retention only removes recognized, completed plugin backups for this engine.
+    backups::expire_locked(engine, crate::epic::now())?;
     let mut names = std::collections::HashSet::new();
     let mut files = vec![];
     for f in &update.manifest.files {
@@ -1719,8 +1722,13 @@ pub fn update_plugin_with_progress(
         &stage,
         update.number,
         &update.version,
-        &mut |phase| {
-            state.phase = phase;
+        &mut |backup| {
+            state.phase = backup.phase;
+            state.file = backup.file;
+            state.prepared = backup.prepared;
+            state.total = backup.total;
+            state.files_done = backup.files_done;
+            state.files_total = backup.files_total;
             report(state.clone());
         },
     )
@@ -1782,9 +1790,12 @@ fn activate_with_progress(
     stage: &Path,
     number: i64,
     version: &str,
-    report: &mut impl FnMut(&'static str),
+    report: &mut impl FnMut(UpdateProgress),
 ) -> Result<String, String> {
-    report("Validating prepared plugin");
+    report(UpdateProgress {
+        phase: "Validating prepared plugin",
+        ..Default::default()
+    });
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
     let desc = stage.join(plugin.descriptor.file_name().ok_or("Missing descriptor")?);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(desc).map_err(|e| e.to_string())?)
@@ -1797,29 +1808,20 @@ fn activate_with_progress(
     }
     plugin_root(engine, plugin)?;
     crate::maintenance::ensure_closed(&eng)?;
-    let backup = backup_path(engine, &root)?;
-    report("Replacing installed plugin");
-    fs::rename(&root, &backup).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(&stage, &root) {
-        let rollback = fs::rename(&backup, &root);
-        return Err(format!(
-            "Update activation failed: {e}; restored old plugin: {}. Backup: {}",
-            rollback.is_ok(),
-            backup.display()
-        ));
-    }
-    report("Cleaning up previous plugin files");
-    if let Err(error) = delete_scoped_tree(&backup, &eng.join(".engine-workspace-plugin-backups")) {
-        return Ok(format!(
-            "Updated {} to {}. Temporary rollback cleanup failed: {error}. Remaining files: {}",
-            plugin.name,
-            version,
-            backup.display()
-        ));
-    }
+    let days = crate::storage::load_preferences().plugin_backup_days;
+    let mut backup = backups::prepare(engine, plugin, root, days, report)?;
+    crate::maintenance::ensure_closed(&eng)?;
+    report(UpdateProgress {
+        phase: "Replacing installed plugin",
+        ..Default::default()
+    });
+    backups::replace(root, stage, &mut backup)?;
     // Remove the container only when empty; never touch backups from earlier operations.
     let _ = fs::remove_dir(eng.join(".engine-workspace-plugin-backups"));
-    Ok(format!("Updated {} to {}.", plugin.name, version))
+    Ok(format!(
+        "Updated {} to {}. Previous plugin version saved in Plugin backups.",
+        plugin.name, version
+    ))
 }
 #[cfg(test)]
 mod operation_tests {
@@ -1864,7 +1866,7 @@ mod operation_tests {
         );
     }
     #[test]
-    fn update_activation_cleans_rollback_and_rejects_other_engine() {
+    fn update_activation_retains_previous_plugin_and_rejects_other_engine() {
         let (_d, e, p) = fixture();
         let root = p.descriptor.parent().unwrap();
         let stage = Path::new(&e.path).join("stage");
@@ -1882,6 +1884,19 @@ mod operation_tests {
         )
         .unwrap();
         activate(&e, &p, root, &stage, 2, "2.0").unwrap();
+        let saved = backups::list(&e).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].version, "1.0");
+        assert_eq!(
+            fs::read(
+                Path::new(&e.path)
+                    .join(".dnw-plugin-backups")
+                    .join(&saved[0].id)
+                    .join("files/custom.txt")
+            )
+            .unwrap(),
+            b"preserve old files"
+        );
         assert_eq!(installed(Path::new(&e.path))[0].number, 2);
         assert!(!root.join("custom.txt").exists());
         assert!(

@@ -2,7 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = ".dnw-plugin-install.json";
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Receipt {
     schema: u32,
     pub artifact: String,

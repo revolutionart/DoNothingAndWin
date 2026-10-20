@@ -115,6 +115,61 @@ pub(super) struct Scan {
     pub summary: String,
 }
 impl Workspace {
+    pub(super) fn start_engine_update(
+        &mut self,
+        engine: Installation,
+        release: Release,
+        ctx: Context,
+    ) {
+        if self.transfer.busy()
+            || self.plugin_work.mutating
+            || self.library_work_pending()
+            || self.launcher_updates.blocks_work()
+        {
+            self.page = Page::Downloads;
+            self.notify("Finish or stop the current installation before updating an engine.");
+            return;
+        }
+        let Some(session) = storage::load_session().or_else(|| self.session.clone()) else {
+            self.login = true;
+            self.notify("Sign in to Epic, then click Update to update this engine.");
+            return;
+        };
+        self.transfer = Transfers {
+            state: format!(
+                "Updating Unreal Engine {} to {}",
+                engine.version,
+                release
+                    .version
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            ),
+            release: Some(release.clone()),
+            ..Default::default()
+        };
+        let worker = self
+            .transfer
+            .operation
+            .maintain(Kind::Update, engine.clone())
+            .unwrap();
+        self.page = Page::Downloads;
+        self.plugin_engine = None;
+        let snapshot = self.snapshot.clone();
+        std::thread::spawn(move || {
+            let result = engine_workspace::engine_update::run(
+                &engine,
+                &release,
+                &session,
+                &snapshot,
+                &worker.control,
+                worker.progress,
+            );
+            let _ = worker.events.send(Event::Maintained(engine, false, result));
+            ctx.request_repaint();
+        });
+    }
+
     pub(super) fn start_maintenance(&mut self, engine: Installation, remove: bool, ctx: Context) {
         if self.transfer.busy() || self.plugin_work.mutating {
             self.notify("Another engine operation is running.");
@@ -334,7 +389,9 @@ impl Workspace {
                     if *removed {
                         "Engine removal".into()
                     } else {
-                        if self.transfer.operation.kind() == Kind::Verify {
+                        if self.transfer.operation.kind() == Kind::Update {
+                            "Engine update".into()
+                        } else if self.transfer.operation.kind() == Kind::Verify {
                             "Engine verification".into()
                         } else {
                             "Engine component changes".into()
@@ -382,6 +439,7 @@ impl Workspace {
                         }
                         self.persist();
                         self.engines = platform::display_engines();
+                        self.workspace_cache.invalidate();
                         self.plugin_engine = None;
                         self.transfer.state = message.clone();
                         self.notify(message);

@@ -1207,6 +1207,21 @@ impl Workspace {
         if matches!(self.page, Page::Workspace | Page::Projects) {
             if c.button(
                 ui,
+                "find-projects",
+                button_slot([
+                    if header.wrapped { 271. } else { c.width - 535. },
+                    header.actions_y,
+                    150.,
+                    31.,
+                ]),
+                "Find projects",
+                Some(Icon::Search),
+                false,
+            ) {
+                self.open_project_finder();
+            }
+            if c.button(
+                ui,
                 "import",
                 button_slot([c.width - 373., header.actions_y, 160., 31.]),
                 "Import project",
@@ -1237,23 +1252,6 @@ impl Workspace {
                 self.project_section(ui, &c, ctx, projects_divider);
             }
             Page::Projects => {
-                if c.button(
-                    ui,
-                    "scanroot",
-                    button_slot([
-                        if header.wrapped { 271. } else { c.width - 535. },
-                        header.actions_y,
-                        150.,
-                        31.,
-                    ]),
-                    "Scan a folder",
-                    Some(Icon::Folder),
-                    false,
-                ) {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        self.add_project_root(p, ctx);
-                    }
-                }
                 self.project_section(ui, &c, ctx, header.divider_y);
             }
             Page::Library => self.library_page(ui, &c),
@@ -2589,6 +2587,21 @@ impl Canvas {
         icon: Option<Icon>,
         primary: bool,
     ) -> bool {
+        self.styled_button(ui, id, r, label, icon, primary, false)
+    }
+    fn update_button(&self, ui: &mut Ui, id: impl std::hash::Hash, r: [f32; 4]) -> bool {
+        self.styled_button(ui, id, r, "Update", None, true, true)
+    }
+    fn styled_button(
+        &self,
+        ui: &mut Ui,
+        id: impl std::hash::Hash,
+        r: [f32; 4],
+        label: &str,
+        icon: Option<Icon>,
+        primary: bool,
+        update: bool,
+    ) -> bool {
         let mut r = button_bounds(r);
         r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
         r[3] = COMPACT_BUTTON_HEIGHT;
@@ -2618,7 +2631,13 @@ impl Canvas {
         r[2] += extra;
         let response = ui.interact(self.rect(r), Id::new(id), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
-        let bg = if primary {
+        let update_colors = buttons::update_colors(
+            &self.theme,
+            response.hovered() || response.is_pointer_button_down_on(),
+        );
+        let bg = if update {
+            update_colors.0
+        } else if primary {
             if response.hovered() || response.is_pointer_button_down_on() {
                 self.theme.accent_hover
             } else {
@@ -2647,7 +2666,9 @@ impl Canvas {
                 1.
             },
         );
-        let fg = if primary {
+        let fg = if update {
+            update_colors.1
+        } else if primary {
             self.theme.on_accent
         } else if response.hovered() || response.is_pointer_button_down_on() {
             SIDEBAR_ON_HIGHLIGHT

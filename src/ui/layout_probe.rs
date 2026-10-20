@@ -9,6 +9,8 @@ pub(super) struct LayoutProbe {
     deadline: Instant,
     activity: bool,
     engine_activity: bool,
+    engine_update: bool,
+    plugin_backups: bool,
     plugin_design: bool,
     project_finder: bool,
     library_organization: bool,
@@ -43,6 +45,8 @@ impl LayoutProbe {
             deadline: Instant::now(),
             activity: std::env::args().any(|a| a == "--plugin-activity-preview"),
             engine_activity: std::env::args().any(|a| a == "--engine-activity-preview"),
+            engine_update: std::env::args().any(|a| a == "--engine-update-preview"),
+            plugin_backups: std::env::args().any(|a| a == "--plugin-backups-preview"),
             plugin_design: std::env::args().any(|a| a == "--plugin-design-preview"),
             project_finder: std::env::args().any(|a| a == "--project-finder-preview"),
             plugin_install: std::env::args()
@@ -82,7 +86,7 @@ impl Workspace {
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
-            if probe.activity || probe.engine_activity {
+            if probe.activity || probe.engine_activity || probe.engine_update {
                 self.plugin_work.mutating = false;
                 self.plugin_work.progress = None;
                 self.transfer.operation = Default::default();
@@ -129,6 +133,9 @@ impl Workspace {
                         );
                     }
                     self.plugin_work.status = "Design preview".into();
+                    if std::env::args().any(|a| a == "--plugin-check-preview") {
+                        self.plugin_work.preview_check(self.plugins.len());
+                    }
                 }
             }
             if probe.activity {
@@ -152,9 +159,9 @@ impl Workspace {
                         now - Duration::from_millis((120 - i) * 500),
                     );
                 }
-                self.transfer
-                    .operation
-                    .preview(engine_workspace::installer::Progress {
+                self.transfer.operation.preview(
+                    engine_workspace::engine_operation::Kind::Install,
+                    engine_workspace::installer::Progress {
                         phase: "Downloading and verifying chunks".into(),
                         completed: 760_000_000,
                         total: 13_910_000_000,
@@ -164,13 +171,44 @@ impl Workspace {
                         written: totals[2],
                         files_total: 50_000,
                         ..Default::default()
-                    });
+                    },
+                );
+            }
+            if probe.engine_update {
+                self.page = Page::Downloads;
+                self.transfer.state = "Updating Unreal Engine 5.8.3 to 5.8.4".into();
+                let mut p = engine_workspace::installer::Progress {
+                    network: 5_540_000_000,
+                    ..Default::default()
+                };
+                match probe.step {
+                    0 | 1 => {
+                        p.phase = "Final verification of updated engine files".into();
+                        p.completed = 18_000_000_000;
+                        p.total = 30_020_000_000;
+                        p.files = 125_030;
+                        p.files_total = 209_441;
+                        p.detail = "Engine/Binaries/Win64/UnrealEditor-Renderer.dll".into();
+                    }
+                    2 => {
+                        p.phase = "Preserving installed plugins and custom files".into();
+                        p.detail = "210030 entries checked • Engine/Plugins/Marketplace/PCGEx/Binaries/Win64/UnrealEditor-PCGExtendedToolkit.dll".into();
+                    }
+                    3 => p.phase = "Registering updated engine with Epic Games Launcher".into(),
+                    _ => p.phase = "Removing previous engine backup".into(),
+                }
+                self.transfer
+                    .operation
+                    .preview(engine_workspace::engine_operation::Kind::Update, p);
             }
             if probe.library_organization {
                 self.preview_library_organization(probe.step);
             }
             if probe.plugin_install {
                 self.preview_plugin_install();
+            }
+            if probe.plugin_backups {
+                self.preview_plugin_backups(probe.step);
             }
             if probe.library_queue {
                 self.preview_library_queue();

@@ -169,6 +169,8 @@ pub struct Preferences {
     pub pending_engines: Vec<String>,
     pub check_minutes: u64,
     pub wait_for_library_plugin_builds: bool,
+    /// Retention for newly created plugin backups; zero keeps until manually deleted.
+    pub plugin_backup_days: u64,
     pub display_name: String,
     pub install_root: String,
     pub fab_cache: String,
@@ -196,6 +198,7 @@ impl Default for Preferences {
             pending_engines: vec![],
             check_minutes: 15,
             wait_for_library_plugin_builds: true,
+            plugin_backup_days: 7,
             display_name: "Developer".into(),
             install_root: "C:/Program Files/Epic Games".into(),
             fab_cache: "C:/ProgramData/Epic/EpicGamesLauncher/VaultCache".into(),
@@ -378,6 +381,14 @@ mod plugin_update_preferences_tests {
     use super::*;
     #[test]
     fn new_and_legacy_preferences_wait_for_library_builds() {
+        assert_eq!(Preferences::default().plugin_backup_days, 7);
+        let legacy: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.plugin_backup_days, 7);
+        let manual: Preferences = serde_json::from_str(r#"{"plugin_backup_days":0}"#).unwrap();
+        assert_eq!(manual.plugin_backup_days, 0);
+        let round_trip: Preferences =
+            serde_json::from_str(&serde_json::to_string(&manual).unwrap()).unwrap();
+        assert_eq!(round_trip.plugin_backup_days, 0);
         assert!(Preferences::default().wait_for_library_plugin_builds);
         let old: Preferences =
             serde_json::from_str(r#"{"theme":"dark","check_minutes":30}"#).unwrap();

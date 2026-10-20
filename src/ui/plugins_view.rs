@@ -1,15 +1,12 @@
 use super::*;
 impl Workspace {
     pub(super) fn has_engine_updates(&self) -> bool {
-        self.engines.iter().any(|engine| {
-            let installed = if self.demo {
+        engine_updates_available(&self.engines, &self.snapshot.releases, |engine| {
+            if self.demo {
                 Some(true)
             } else {
                 self.workspace_cache.engines.get(&engine.path).copied()
-            };
-            engine_card_status(installed, engine, &self.snapshot.releases)
-                .1
-                .is_some()
+            }
         })
     }
 
@@ -52,6 +49,7 @@ impl Workspace {
         let update_version = update
             .and_then(|r| r.version.as_ref())
             .map(ToString::to_string);
+        let update_release = update.cloned();
         let status = update_version
             .as_ref()
             .map(|version| format!("Update available - UE{version}"))
@@ -221,7 +219,7 @@ impl Workspace {
             .interact(link, Id::new(("manage", i)), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let link_color = if response.hovered() {
-            [255, 255, 255]
+            t.text
         } else if has_plugin_updates {
             t.warning
         } else {
@@ -277,15 +275,24 @@ impl Workspace {
             self.show_plugins(i);
             self.check_plugins(ui.ctx().clone());
         }
-        if c.button(
-            ui,
-            ("launch", i),
-            button_slot(launch_rect),
-            "Launch",
-            None,
-            selected,
-        ) {
-            self.launch_engine(i);
+        let action_clicked = if update_release.is_some() {
+            c.update_button(ui, ("update-engine", i), button_slot(launch_rect))
+        } else {
+            c.button(
+                ui,
+                ("launch", i),
+                button_slot(launch_rect),
+                "Launch",
+                None,
+                selected,
+            )
+        };
+        if action_clicked {
+            if let Some(release) = update_release {
+                self.start_engine_update(engine.clone(), release, ui.ctx().clone());
+            } else {
+                self.launch_engine(i);
+            }
         }
         let response = ui
             .interact(
@@ -602,6 +609,32 @@ impl Workspace {
     }
 }
 
+fn engine_updates_available(
+    engines: &[Installation],
+    releases: &[Release],
+    ready: impl Fn(&Installation) -> Option<bool>,
+) -> bool {
+    engines.iter().any(|engine| {
+        engine_card_status(ready(engine), engine, releases)
+            .1
+            .is_some_and(|release| {
+                // The sidebar describes available releases, like the Engines table.
+                // A retained older copy can still offer its own Update action without
+                // announcing a release that is already installed in this branch.
+                !engines.iter().any(|other| {
+                    ready(other) == Some(true)
+                        && EngineVersion::parse(&other.version)
+                            .zip(release.version.as_ref())
+                            .is_some_and(|(installed, available)| {
+                                installed.major == available.major
+                                    && installed.minor == available.minor
+                                    && installed >= *available
+                            })
+                })
+            })
+    })
+}
+
 // Shared by the engine cards, sidebar badge and regression tests.
 fn engine_card_status<'a>(
     installed: Option<bool>,
@@ -644,6 +677,69 @@ fn engine_card_status<'a>(
 #[cfg(test)]
 mod engine_card_tests {
     use super::*;
+
+    #[test]
+    fn engine_badge_clears_after_update_with_an_older_copy_retained() {
+        let mut engines = vec![Installation {
+            version: "5.8.3".into(),
+            path: "F:/Engines/UE_5.8".into(),
+            association: "5.8".into(),
+        }];
+        let releases = vec![Release {
+            app: "UE_5.8".into(),
+            catalog_id: "engine-58".into(),
+            platform: "Windows".into(),
+            channel: "Live".into(),
+            build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
+            version: EngineVersion::parse("5.8.4"),
+        }];
+        assert!(engine_updates_available(&engines, &releases, |_| Some(
+            true
+        )));
+        engines.push(Installation {
+            path: "F:/Engines/UE_5.8-5.8.3-Workspace".into(),
+            association: "{CUSTOM-GUID}".into(),
+            ..engines[0].clone()
+        });
+        engines[0].version = "5.8.4".into();
+        assert!(
+            !engine_updates_available(&engines, &releases, |_| Some(true)),
+            "The engine release is installed; retaining an older copy must not keep its sidebar alert lit"
+        );
+        assert!(
+            engine_card_status(Some(true), &engines[1], &releases)
+                .1
+                .is_some()
+        );
+        // A broken newer installation must not suppress an actionable update.
+        assert!(engine_updates_available(&engines, &releases, |engine| {
+            Some(engine.path != engines[0].path)
+        }));
+        engines[0].version = "5.8.5".into();
+        assert!(!engine_updates_available(&engines, &releases, |_| Some(
+            true
+        )));
+        // Updating one branch must not clear the alert for another branch.
+        engines.push(Installation {
+            version: "5.7.3".into(),
+            path: "F:/Engines/UE_5.7".into(),
+            association: "5.7".into(),
+        });
+        let mut releases = releases;
+        releases.push(Release {
+            app: "UE_5.7".into(),
+            version: EngineVersion::parse("5.7.4"),
+            build: Some("5.7.4-build".into()),
+            ..releases[0].clone()
+        });
+        assert!(engine_updates_available(&engines, &releases, |_| Some(
+            true
+        )));
+        engines[2].version = "5.7.4".into();
+        assert!(!engine_updates_available(&engines, &releases, |_| Some(
+            true
+        )));
+    }
 
     #[test]
     fn workspace_card_only_offers_newer_compatible_resolved_live_releases() {

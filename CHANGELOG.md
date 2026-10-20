@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.7 - 2026-10-20
+
+### Engine updates
+
+- Replace **Launch** with a gold-orange **Update** button when an engine hotfix is available. Start the update directly, keeping the installation path, selected components, plugins and custom files.
+- Verify the staged update before replacing engine files, and restore the original installation if activation fails.
+- Show verification, registration and cleanup progress instead of leaving Downloads at 100% while work continues.
+- Clear the engine update indicator when the release is installed. Show the newest usable launcher-managed hotfix per engine branch so an older copy does not reappear as a separate card; retain distinct custom/source builds.
+
+### Plugin rollback
+
+- Save the current plugin before updating it. Open **Manage plugins → Plugin backups** to restore a saved version, keep it, or delete its backup.
+- Keep new backups for seven days by default, with settings for 14 days, 30 days or manual deletion only. **Keep** protects an individual backup from expiry. Expired backups are cleaned up when opening the backup manager or updating plugins for that engine.
+- Verify backup contents before restoring to the same engine installation. Save the replaced plugin as another backup so a restore can be undone.
+- Restore captured Epic registration when a matching record is available, and report when registration could not be restored.
+
+### Interface
+
+- Dim entire plugin rows while checks are running, including icons, text, status and actions.
+- Fix **Manage plugins** hover contrast in the light theme.
+- Move **Find projects** to the top toolbar in place of **Scan a folder**, removing the duplicate beside project categories.
+
+### Known limitations
+
+- Plugin backups begin with the next update; previously deleted versions cannot be recovered. Rollback applies to plugins only.
+- Older engine copies remain on disk when consolidated into one card.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.2.6 - 2026-10-20
 
 - Show available engine hotfixes on Workspace cards with a warning border and the target version, such as **Update available - UE5.8.4**. Click the status to view engine releases.
