@@ -162,6 +162,8 @@ pub struct Preferences {
     pub run_at_startup: bool,
     pub startup_in_tray: bool,
     pub close_to_tray: bool,
+    pub scan_projects_on_startup: bool,
+    pub notify_project_scan: bool,
     pub theme: String,
     pub default_engine: String,
     pub launch_engine: Option<String>,
@@ -193,6 +195,8 @@ impl Default for Preferences {
             run_at_startup: false,
             startup_in_tray: true,
             close_to_tray: true,
+            scan_projects_on_startup: false,
+            notify_project_scan: true,
             theme: "dark".into(),
             default_engine: String::new(),
             launch_engine: None,
@@ -358,6 +362,27 @@ mod tests {
 #[cfg(test)]
 mod hidden_project_tests {
     use super::*;
+    #[test]
+    fn startup_scan_defaults_off_and_scan_preferences_persist_independently() {
+        let legacy: Preferences = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.scan_projects_on_startup);
+        assert!(legacy.notify_project_scan);
+        for scan in [false, true] {
+            for notify in [false, true] {
+                let prefs = Preferences {
+                    scan_projects_on_startup: scan,
+                    notify_project_scan: notify,
+                    ..Preferences::default()
+                };
+                let saved = serde_json::to_vec(&prefs).unwrap();
+                let loaded: Preferences = serde_json::from_slice(&saved).unwrap();
+                assert_eq!(
+                    (loaded.scan_projects_on_startup, loaded.notify_project_scan),
+                    (scan, notify)
+                );
+            }
+        }
+    }
     #[test]
     fn hidden_projects_survive_restart_and_old_preferences_default_to_visible() {
         let legacy: Preferences = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use engine_workspace::discovery;
 
 // Opt-in render regression probe. Uses the real native window and renderer;
 // never starts transfers or writes workspace preferences.
@@ -86,6 +87,21 @@ impl Workspace {
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
+            if std::env::args().any(|arg| arg == "--scan-results-preview") {
+                self.scan.summary = "Scan complete: 21 projects; 2155 folders searched; 1 inaccessible folder; 1 linked folder skipped.".into();
+                self.scan.skipped_folders = vec![
+                    discovery::SkippedFolder {
+                        path: "D:/Unreal Projects/Shared Studio/Restricted project archive".into(),
+                        reason: "Could not read folder: Access is denied. (os error 5)".into(),
+                        linked: false,
+                    },
+                    discovery::SkippedFolder {
+                        path: "D:/Unreal Projects/Linked projects".into(),
+                        reason: "Folder link or reparse point was not followed.".into(),
+                        linked: true,
+                    },
+                ];
+            }
             if probe.activity || probe.engine_activity || probe.engine_update {
                 self.plugin_work.mutating = false;
                 self.plugin_work.progress = None;

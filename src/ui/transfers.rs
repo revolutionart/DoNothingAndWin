@@ -113,6 +113,7 @@ pub(super) struct Scan {
     pub cancel: Arc<AtomicBool>,
     pub progress: Arc<AtomicUsize>,
     pub summary: String,
+    pub skipped_folders: Vec<discovery::SkippedFolder>,
 }
 impl Workspace {
     pub(super) fn start_engine_update(
@@ -240,6 +241,7 @@ impl Workspace {
             cancel: cancel.clone(),
             progress: progress.clone(),
             summary: "Searching configured project folders…".into(),
+            skipped_folders: vec![],
         };
         std::thread::spawn(move || {
             let report = discovery::scan_stream(&roots, cancel, progress, |p| {
@@ -364,7 +366,7 @@ impl Workspace {
                 ScanEvent::Finished(report) => {
                     self.scan.receiver = None;
                     self.scan.summary = format!(
-                        "{}: {} projects; {} folders searched; {} inaccessible folders skipped.",
+                        "{}: {} projects; {} folders searched; {}.",
                         if report.cancelled {
                             "Scan stopped"
                         } else {
@@ -372,9 +374,15 @@ impl Workspace {
                         },
                         report.projects.len(),
                         report.directories,
-                        report.skipped
+                        report.skipped_summary()
                     );
-                    self.notify(self.scan.summary.clone());
+                    self.scan.skipped_folders = report.skipped_folders;
+                    if self.prefs.notify_project_scan {
+                        self.notify(format!("{} View scan details →", self.scan.summary));
+                        if let Some(toast) = &mut self.toast {
+                            toast.scan_results = true;
+                        }
+                    }
                 }
             }
         }

@@ -132,7 +132,8 @@ impl Workspace {
             .on_hover_text("Total size of all installed engines");
     }
     pub(super) fn settings_flow(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
-        let area = c.rect([271., 118., c.width - 297., c.height - 180.]);
+        let top = PageHeaderLayout::new().divider_y + 14.;
+        let area = c.rect([271., top, c.width - 297., c.height - top - 62.]);
         let theme = self.theme.clone();
         let mut remove = None;
         ui.scope_builder(UiBuilder::new().max_rect(area),|ui|{
@@ -151,6 +152,13 @@ impl Workspace {
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Project folders");
+                if downloads::toggle(ui, &theme, &mut self.prefs.scan_projects_on_startup, "Scan project folders on startup", "Search configured project folders when the app starts. Turn off to use Rescan folders or the project refresh button manually.") { self.persist(); }
+                if downloads::toggle(ui, &theme, &mut self.prefs.notify_project_scan, "Show scan-completion notifications", "Show the scan result popup. Results and skipped folder paths remain available in Downloads when this is off.") { self.persist(); }
+                if !self.scan.summary.is_empty() && ui.add(buttons::secondary_button("View latest scan results")).clicked() {
+                    self.page = Page::Downloads;
+                    self.downloads.settings = false;
+                    self.downloads.show_overview();
+                }
                 ui.label("Add a single project's folder or a parent folder containing many projects. Projects in all subfolders appear automatically. Removing a folder only removes its projects from this launcher; files stay on disk.");
                 ui.separator();
                 ui.label(RichText::new("Epic default project folder (fixed)").strong().color(ui.visuals().text_color()));

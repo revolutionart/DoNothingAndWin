@@ -93,6 +93,11 @@ enum Job {
     Checked(Result<(Snapshot, Option<Session>), String>),
     SignedIn(Result<Option<Session>, String>),
 }
+struct Toast {
+    message: String,
+    created: Instant,
+    scan_results: bool,
+}
 pub struct Workspace {
     page: Page,
     theme: Theme,
@@ -129,7 +134,7 @@ pub struct Workspace {
     new_path: String,
     new_engine: usize,
     selected: Option<usize>,
-    toast: Option<(String, Instant)>,
+    toast: Option<Toast>,
     free: Option<u64>,
     project_scroll: f32,
     layout_probe: Option<layout_probe::LayoutProbe>,
@@ -577,7 +582,11 @@ impl Workspace {
         } else {
             app.status = "Layout verification • cached engine data".into();
         }
-        if !demo && app.layout_probe.is_none() && !std::env::args().any(|a| a == "--no-scan") {
+        if !demo
+            && app.prefs.scan_projects_on_startup
+            && app.layout_probe.is_none()
+            && !std::env::args().any(|a| a == "--no-scan")
+        {
             app.start_scan(cc.egui_ctx.clone(), None);
         }
         if std::env::args().any(|a| a == "--show-plugins") && !app.engines.is_empty() {
@@ -644,7 +653,11 @@ impl Workspace {
         }
     }
     fn notify(&mut self, s: impl Into<String>) {
-        self.toast = Some((s.into(), Instant::now()));
+        self.toast = Some(Toast {
+            message: s.into(),
+            created: Instant::now(),
+            scan_results: false,
+        });
     }
     fn persist(&mut self) {
         if self.demo {
@@ -905,8 +918,7 @@ impl Workspace {
             (Page::Workspace, "Workspace", Icon::Home, 111.),
             (Page::Projects, "Projects", Icon::Folder, 169.),
             (Page::Library, "Library", Icon::Cube, 227.),
-            (Page::Engines, "Engine versions", Icon::Chip, 285.),
-            (Page::Downloads, "Downloads", Icon::Download, 343.),
+            (Page::Downloads, "Downloads", Icon::Download, 285.),
         ] {
             let active = self.page == page;
             if active {
@@ -951,9 +963,6 @@ impl Workspace {
             let update_hint = match page {
                 Page::Library if self.has_plugin_updates() => {
                     Some("Plugin updates available for your installed engines")
-                }
-                Page::Engines if self.has_engine_updates() => {
-                    Some("Engine updates available for your installed engines")
                 }
                 _ => None,
             };
@@ -1045,7 +1054,7 @@ impl Workspace {
             "Settings",
             Icon::Gear,
             c.height - 139.,
-            self.page == Page::Settings,
+            matches!(self.page, Page::Settings | Page::Engines),
         ) {
             self.plugin_engine = None;
             self.page = Page::Settings;
@@ -1159,6 +1168,7 @@ impl Workspace {
                 self.notify("Could not create the tray icon. The launcher is still open.");
             }
         }
+        let header = PageHeaderLayout::new();
         let (title, subtitle) = match self.page {
             Page::Workspace => ("Workspace", "Everything you need to build."),
             Page::Projects => ("Projects", "Your work. Ready when you are."),
@@ -1185,7 +1195,7 @@ impl Workspace {
         c.text(
             ui,
             271.,
-            40.,
+            header.title_y,
             title,
             34.,
             true,
@@ -1195,24 +1205,55 @@ impl Workspace {
         c.text(
             ui,
             271.,
-            73.,
+            header.subtitle_y,
             subtitle,
             18.,
             false,
             self.theme.muted,
             Align2::LEFT_CENTER,
         );
-        let header = PageHeaderLayout::new(c.width);
+        if self.page == Page::Settings {
+            if c.button(
+                ui,
+                "settings-engine-versions",
+                button_slot([c.width - 206., header.actions_y, 180., 31.]),
+                "Engine versions",
+                Some(Icon::Chip),
+                false,
+            ) {
+                self.page = Page::Engines;
+            }
+            if self.has_engine_updates() {
+                let x = c.width - 224.;
+                let y = header.actions_y + 15.5;
+                ui.painter().circle_stroke(
+                    c.point(x, y),
+                    8. * c.scale(),
+                    Stroke::new(1.5, color(self.theme.warning)),
+                );
+                c.text(
+                    ui,
+                    x,
+                    y,
+                    "!",
+                    13.,
+                    true,
+                    self.theme.warning,
+                    Align2::CENTER_CENTER,
+                );
+                ui.interact(
+                    c.rect([x - 12., y - 12., 24., 24.]),
+                    Id::new("settings-engine-update-badge"),
+                    Sense::hover(),
+                )
+                .on_hover_text("Engine updates available for your installed engines");
+            }
+        }
         if matches!(self.page, Page::Workspace | Page::Projects) {
             if c.button(
                 ui,
                 "find-projects",
-                button_slot([
-                    if header.wrapped { 271. } else { c.width - 535. },
-                    header.actions_y,
-                    150.,
-                    31.,
-                ]),
+                button_slot([c.width - 535., header.actions_y, 150., 31.]),
                 "Find projects",
                 Some(Icon::Search),
                 false,
@@ -1235,15 +1276,13 @@ impl Workspace {
                 button_slot([c.width - 203., header.actions_y, 177., 31.]),
             );
         }
-        if matches!(self.page, Page::Workspace | Page::Projects | Page::Library) {
+        if self.page != Page::Downloads {
             c.line(
                 ui,
                 [271., header.divider_y],
                 [c.width - 26., header.divider_y],
                 self.theme.border,
             );
-        } else if matches!(self.page, Page::Engines | Page::Settings) {
-            c.line(ui, [271., 104.], [c.width - 26., 104.], self.theme.border);
         }
         match self.page {
             Page::Workspace => {
@@ -1455,11 +1494,11 @@ impl Workspace {
             self.theme.muted,
             Align2::RIGHT_CENTER,
         );
-        if let Some((msg, time)) = &self.toast {
-            if time.elapsed() < Duration::from_secs(6) {
+        if let Some(toast) = &self.toast {
+            if toast.created.elapsed() < Duration::from_secs(6) {
                 let width = ((c.width - 340.) * c.sx).min(1000.);
                 let galley = ui.painter().layout(
-                    msg.clone(),
+                    toast.message.clone(),
                     FontId::proportional(15. * c.scale()),
                     color(self.theme.launch_foreground),
                     width - 32.,
@@ -1474,6 +1513,20 @@ impl Workspace {
                     galley,
                     color(self.theme.launch_foreground),
                 );
+                if toast.scan_results
+                    && ui
+                        .interact(rect, Id::new("scan-result-toast"), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(
+                            "View the latest scan results and skipped folder paths in Downloads.",
+                        )
+                        .clicked()
+                {
+                    self.page = Page::Downloads;
+                    self.downloads.settings = false;
+                    self.downloads.show_overview();
+                    self.toast = None;
+                }
             }
         }
     }
@@ -1483,7 +1536,7 @@ impl Workspace {
             .div_ceil(columns)
             .max(1);
         let extra = (rows - 1) as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP);
-        let top = PageHeaderLayout::new(c.width).divider_y + 1.;
+        let top = PageHeaderLayout::new().divider_y + 1.;
         let viewport = c.rect([271., top, c.width - 277., (c.height - top - 50.).max(1.)]);
         let theme = self.theme.clone();
         ui.scope_builder(UiBuilder::new().max_rect(viewport), |ui| {
@@ -1527,7 +1580,7 @@ impl Workspace {
         engine_order::paint_drag_label(ctx, &self.engines, &self.theme);
     }
     fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, short: bool) -> f32 {
-        let offset = PageHeaderLayout::new(c.width).divider_y
+        let offset = PageHeaderLayout::new().divider_y
             - PAGE_HEADER_DIVIDER_Y
             - if short { 16. } else { 0. };
         let local = Canvas {
@@ -1856,7 +1909,7 @@ impl Workspace {
     }
     fn project_section(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context, divider_y: f32) {
         let y = divider_y + FILTER_DIVIDER_GAP;
-        let wrap = PageHeaderLayout::new(c.width).wrapped;
+        let wrap = c.width < 1320.;
         let extra = if wrap {
             FILTER_ROW_HEIGHT + FILTER_ROW_GAP
         } else {
@@ -2193,11 +2246,12 @@ impl Workspace {
         let _ = ctx;
     }
     fn release_page(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
-        let actions_y = if c.width < 1140. { 170. } else { 126. };
+        let header = PageHeaderLayout::new();
+        let actions_y = header.actions_y;
         c.text(
             ui,
             271.,
-            143.,
+            header.divider_y + 34.,
             "Available engine releases",
             22.,
             true,
@@ -2207,7 +2261,7 @@ impl Workspace {
         if c.button(
             ui,
             "check",
-            button_slot([c.width - 50. - 154., actions_y, 154., 32.]),
+            button_slot([c.width - 26. - 154., actions_y, 154., 32.]),
             if self.pending.is_some() {
                 "Checking…"
             } else {
@@ -2221,14 +2275,14 @@ impl Workspace {
         if c.button(
             ui,
             "locate-engine",
-            button_slot([c.width - 50. - 154. - 12. - 220., actions_y, 220., 32.]),
+            button_slot([c.width - 26. - 154. - 12. - 220., actions_y, 220., 32.]),
             "Locate installed engine",
             Some(Icon::Folder),
             false,
         ) {
             self.add_engine();
         }
-        let header_y = actions_y + 56.;
+        let header_y = header.divider_y + 78.;
         c.text(
             ui,
             281.,
@@ -3197,17 +3251,18 @@ const FILTER_DIVIDER_GAP: f32 = 6.;
 const FILTER_ROW_HEIGHT: f32 = 34.;
 const FILTER_ROW_GAP: f32 = 12.;
 struct PageHeaderLayout {
-    wrapped: bool,
     actions_y: f32,
+    title_y: f32,
+    subtitle_y: f32,
     divider_y: f32,
 }
 impl PageHeaderLayout {
-    fn new(width: f32) -> Self {
-        let wrapped = width < 1320.;
+    fn new() -> Self {
         Self {
-            wrapped,
-            actions_y: if wrapped { 108. } else { 38. },
-            divider_y: PAGE_HEADER_DIVIDER_Y + if wrapped { 52. } else { 0. },
+            actions_y: 30.,
+            title_y: 40.,
+            subtitle_y: 73.,
+            divider_y: PAGE_HEADER_DIVIDER_Y,
         }
     }
     fn filters_y(&self) -> f32 {

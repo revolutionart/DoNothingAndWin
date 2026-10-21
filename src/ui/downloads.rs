@@ -131,7 +131,13 @@ fn panel<R>(
         })
         .inner
 }
-fn toggle(ui: &mut Ui, theme: &Theme, value: &mut bool, title: &str, description: &str) -> bool {
+pub(super) fn toggle(
+    ui: &mut Ui,
+    theme: &Theme,
+    value: &mut bool,
+    title: &str,
+    description: &str,
+) -> bool {
     let mut changed = false;
     ui.horizontal_top(|ui| {
         let (r, response) = ui.allocate_exact_size(vec2(46., 26.), Sense::click());
@@ -218,10 +224,11 @@ impl Workspace {
     }
     pub(super) fn downloads_view(&mut self, ui: &mut Ui, c: &Canvas) {
         let theme = self.theme.clone();
+        let header = PageHeaderLayout::new();
         if c.button(
             ui,
             "download-settings",
-            button_slot([c.width - 246., 38., 220., 34.]),
+            button_slot([c.width - 246., header.actions_y, 220., 34.]),
             if self.downloads.settings {
                 "Back to downloads"
             } else {
@@ -236,8 +243,14 @@ impl Workspace {
         ) {
             self.downloads.settings = !self.downloads.settings;
         }
-        c.line(ui, [266., 104.], [c.width - 26., 104.], theme.border);
-        let rect = c.rect([266., 119., c.width - 292., (c.height - 171.).max(200.)]);
+        c.line(
+            ui,
+            [266., header.divider_y],
+            [c.width - 26., header.divider_y],
+            theme.border,
+        );
+        let top = header.divider_y + 15.;
+        let rect = c.rect([266., top, c.width - 292., (c.height - top - 52.).max(200.)]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.spacing_mut().item_spacing = vec2(12., 10.);
             ui.style_mut().override_font_id = Some(FontId::proportional(16.));
@@ -492,6 +505,31 @@ impl Workspace {
             }
             ui.add_space(4.);
         }
+        if !self.scan.summary.is_empty() {
+            panel(ui, t, "Project discovery", None, |ui| {
+                ui.label(&self.scan.summary);
+                if self.scan.receiver.is_some() {
+                    ui.label(format!(
+                        "{} folders searched",
+                        self.scan
+                            .progress
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    ));
+                    if ui
+                        .add(buttons::secondary_button("Stop scan"))
+                        .clone()
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.scan
+                            .cancel
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    project_finder::skipped_folders(ui, t, &self.scan.skipped_folders);
+                }
+            });
+        }
         panel(ui, t, "Latest activity", None, |ui| {
             let wide = ui.available_width() > 900.;
             if !wide {
@@ -695,27 +733,6 @@ impl Workspace {
                 });
             }
         });
-        if self.scan.receiver.is_some() {
-            panel(ui, t, "Project discovery", None, |ui| {
-                ui.label(&self.scan.summary);
-                ui.label(format!(
-                    "{} folders searched",
-                    self.scan
-                        .progress
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                ));
-                if ui
-                    .add(buttons::secondary_button("Stop scan"))
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.scan
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-        }
     }
     fn download_side(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
         panel(ui, t, "Download queue", None, |ui| {

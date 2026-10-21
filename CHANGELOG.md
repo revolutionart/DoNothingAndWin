@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.9 - 2026-10-21
+
+### Library
+
+- Fix **Latest added** sorting for recent Fab acquisitions by reading acquisition dates from the Fab library, with legacy Epic entitlement dates as a fallback.
+- Preserve cached dates if a refresh fails and show a useful retry message. Items without a recorded acquisition date remain last.
+
+### Project discovery
+
+- Show skipped folder paths and reasons in scan results, including inaccessible folders and folder links. Keep the latest results available in Downloads and through Settings.
+- Add **Scan project folders on startup**, off by default. Existing saved choices are preserved; manual refresh and **Rescan folders** remain available.
+- Add **Show scan-completion notifications** so scan popups can be disabled independently. Click a scan notification to open its results.
+
+### Interface
+
+- Keep page actions floating at the top right, independent of the page title, so resizing does not push the title or split the action group into separate rows.
+- Move **Engine versions** from the sidebar to the top right of Settings, retaining its engine update indicator.
+
+### Known limitations
+
+- Some library items may still lack an acquisition date; **Latest added** reports date coverage.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.2.8 - 2026-10-21
 
 ### Library and plugin checks

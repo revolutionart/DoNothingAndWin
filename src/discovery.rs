@@ -14,8 +14,45 @@ pub struct Report {
     pub projects: Vec<Project>,
     pub directories: usize,
     pub skipped: usize,
+    pub skipped_folders: Vec<SkippedFolder>,
     pub cancelled: bool,
     pub limited: bool,
+}
+#[derive(Clone, Debug)]
+pub struct SkippedFolder {
+    pub path: PathBuf,
+    pub reason: String,
+    pub linked: bool,
+}
+impl Report {
+    fn skip(&mut self, path: &Path, reason: String, linked: bool) {
+        if self
+            .skipped_folders
+            .iter()
+            .any(|folder| folder.path == path)
+        {
+            return;
+        }
+        self.skipped_folders.push(SkippedFolder {
+            path: path.into(),
+            reason,
+            linked,
+        });
+        self.skipped += 1;
+    }
+    pub fn skipped_summary(&self) -> String {
+        let linked = self
+            .skipped_folders
+            .iter()
+            .filter(|folder| folder.linked)
+            .count();
+        let inaccessible = self.skipped - linked;
+        format!(
+            "{inaccessible} inaccessible folder{}; {linked} linked folder{} skipped",
+            if inaccessible == 1 { "" } else { "s" },
+            if linked == 1 { "" } else { "s" }
+        )
+    }
 }
 pub fn roots() -> Vec<PathBuf> {
     let mut result = Vec::new();
@@ -124,20 +161,30 @@ fn walk(
             report.limited = true;
             break;
         }
-        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
-            report.skipped += 1;
-            continue;
+        let meta = match std::fs::symlink_metadata(&dir) {
+            Ok(meta) => meta,
+            Err(error) => {
+                report.skip(&dir, format!("Could not inspect folder: {error}"), false);
+                continue;
+            }
         };
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
             if meta.file_attributes() & 0x400 != 0 {
-                report.skipped += 1;
+                report.skip(
+                    &dir,
+                    "Folder link or reparse point was not followed.".into(),
+                    true,
+                );
                 continue;
             }
         }
-        if meta.file_type().is_symlink()
-            || excluded(&dir)
+        if meta.file_type().is_symlink() {
+            report.skip(&dir, "Symbolic folder link was not followed.".into(), true);
+            continue;
+        }
+        if excluded(&dir)
             || dir
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with(".engine-workspace-"))
@@ -161,15 +208,18 @@ fn walk(
         {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            report.skipped += 1;
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                report.skip(&dir, format!("Could not read folder: {error}"), false);
+                continue;
+            }
         };
         report.directories += 1;
         progress.store(report.directories, Ordering::Relaxed);
         let mut children = vec![];
         let mut project_folder = false;
-        for entry in entries.flatten() {
+        for entry in entries {
             if cancel.load(Ordering::Relaxed) {
                 report.cancelled = true;
                 return report;
@@ -178,9 +228,28 @@ fn walk(
                 report.limited = true;
                 return report;
             }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    report.skip(
+                        &dir,
+                        format!("Could not read a folder entry: {error}"),
+                        false,
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
-            let Ok(kind) = entry.file_type() else {
-                continue;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    report.skip(
+                        &dir,
+                        format!("Could not inspect {}: {error}", path.display()),
+                        false,
+                    );
+                    continue;
+                }
             };
             if kind.is_symlink() {
                 continue;
@@ -238,6 +307,53 @@ pub fn merge(existing: &mut Vec<Project>, found: Vec<Project>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scan_retains_failed_paths_and_reasons_while_finding_readable_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("Missing project folder");
+        let not_folder = temp.path().join("not-a-folder.txt");
+        std::fs::write(&not_folder, "file").unwrap();
+        std::fs::write(temp.path().join("Game.uproject"), r#"{"FileVersion":3}"#).unwrap();
+        let report = scan(
+            &[
+                missing.clone(),
+                missing.clone(),
+                not_folder.clone(),
+                temp.path().into(),
+            ],
+            Arc::default(),
+            Arc::default(),
+        );
+        assert_eq!(report.projects.len(), 1);
+        assert_eq!(report.skipped, 2);
+        for path in [missing, not_folder] {
+            let skipped = report
+                .skipped_folders
+                .iter()
+                .find(|folder| folder.path == path)
+                .unwrap();
+            assert!(!skipped.linked);
+            assert!(skipped.reason.starts_with("Could not"));
+            assert!(skipped.reason.contains("os error"));
+        }
+        assert_eq!(
+            report.skipped_summary(),
+            "2 inaccessible folders; 0 linked folders skipped"
+        );
+    }
+    #[test]
+    fn skipped_links_are_not_reported_as_inaccessible() {
+        let mut report = Report::default();
+        report.skip(
+            Path::new("D:/Linked"),
+            "Folder link was not followed.".into(),
+            true,
+        );
+        assert_eq!(
+            report.skipped_summary(),
+            "0 inaccessible folders; 1 linked folder skipped"
+        );
+    }
     #[test]
     fn quick_search_prioritizes_hints_and_respects_work_limits_without_losing_full_scan() {
         let temp = tempfile::tempdir().unwrap();

@@ -8,6 +8,7 @@ enum Event {
     Cached(Vec<Item>),
     Page(Vec<Item>),
     Status(String),
+    AcquisitionError(String),
     Loaded(Result<Vec<Item>, String>),
     Installed(Result<String, String>),
     PluginInstalled(Installation, Result<String, String>),
@@ -47,6 +48,7 @@ pub(super) struct Library {
     engine_filter: String,
     date_rx: Option<Receiver<DateEvent>>,
     date_status: String,
+    acquisition_error: Option<String>,
     date_refresh_pending: bool,
     list_view: bool,
     sync_error: bool,
@@ -224,6 +226,7 @@ impl Workspace {
         };
         self.library.attempted = true;
         self.library.loading = true;
+        self.library.acquisition_error = None;
         self.library.had_saved_items = !self.library.items.is_empty();
         self.library.status = if self.library.items.is_empty() {
             "Loading your Fab library..."
@@ -250,7 +253,9 @@ impl Workspace {
                     item.acquired_at = cached.get(&item.key()).copied().flatten();
                 }
                 let _ = tx.send(Event::Status("Loading library acquisition dates…".into()));
-                let _ = fab::acquisition::refresh(&session, items);
+                if let Err(error) = fab::acquisition::refresh(&session, items) {
+                    let _ = tx.send(Event::AcquisitionError(error));
+                }
                 let _ = fab::save_library_cache(&session.account_id, items);
             }
             let _ = tx.send(Event::Loaded(result));
@@ -356,6 +361,7 @@ impl Workspace {
                     }
                 }
                 Event::Status(s) => self.library.status = s,
+                Event::AcquisitionError(error) => self.library.acquisition_error = Some(error),
                 Event::Loaded(result) => {
                     self.library.loading = false;
                     self.library.rx = None;
@@ -591,7 +597,7 @@ impl Workspace {
         }
     }
     pub(super) fn real_library_page(&mut self, ui: &mut Ui, c: &Canvas) {
-        let header = PageHeaderLayout::new(c.width);
+        let header = PageHeaderLayout::new();
         let header_y = header.actions_y;
         if c.button(
             ui,
@@ -687,7 +693,7 @@ impl Workspace {
                             ui.selectable_value(&mut self.library.sort,sort,sort.label()).on_hover_cursor(CursorIcon::PointingHand);
                         }
                     }).response.on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text("Latest added uses Epic's recorded acquisition dates, newest first. Latest update uses listing update dates. Unavailable dates appear last.");
+                    .on_hover_text("Latest added uses your Fab library acquisition dates, newest first. Latest update uses listing update dates. Unavailable dates appear last.");
                 for (list, icon) in [(false, Icon::Grid), (true, Icon::List)] {
                     let (r, response) =
                         ui.allocate_exact_size(Vec2::splat(COMPACT_BUTTON_HEIGHT) * c.scale(), Sense::click());
@@ -746,6 +752,9 @@ impl Workspace {
             if self.library.sort == Sort::LatestAdded {
                 let dated = visible_items.iter().filter(|&&i| self.library.items[i].acquired_at.is_some()).count();
                 ui.label(RichText::new(format!("Acquisition dates available for {dated} of {} items. Items without a date appear last.", visible_items.len())).color(color(theme.muted)));
+                if let Some(error) = &self.library.acquisition_error {
+                    ui.colored_label(color(theme.warning), format!("Could not refresh acquisition dates: {error}. Use Sync library to retry."));
+                }
             }
             if self.library.sync_error { ui.colored_label(color(theme.warning), &self.library.status); }
             let query = SearchQuery::new(&self.library.search);
@@ -891,7 +900,7 @@ impl Workspace {
                                     );
                                     let listing = fab_listing::listing_id(item);
                                     let action = if listing.is_some() { "Open listing on Fab" } else { "Search for this title on Fab" };
-                                    if title_response.on_hover_text(format!("{}\n{action}\nLast updated: {} (Fab listing)\nAcquired: {} (Epic entitlement)", item.title, fab_listing::date_label(item.listing_updated_at), fab_listing::date_label(item.acquired_at))).clicked() {
+                                    if title_response.on_hover_text(format!("{}\n{action}\nLast updated: {} (Fab listing)\nAcquired: {}", item.title, fab_listing::date_label(item.listing_updated_at), fab_listing::date_label(item.acquired_at))).clicked() {
                                         let url = if let Some(id) = listing {
                                             format!("https://www.fab.com/listings/{id}")
                                         } else {

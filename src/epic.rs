@@ -34,6 +34,27 @@ pub struct Session {
 pub struct Epic {
     client: Client,
 }
+// Temporary Fab web session; never persisted or included in Debug output.
+pub(crate) struct FabLibrarySession {
+    client: Client,
+    cookie: String,
+}
+impl FabLibrarySession {
+    pub(crate) fn page(&self, cursor: &str) -> Result<Value, String> {
+        Epic::decode(
+            self.client
+                .get("https://www.fab.com/i/library/search")
+                .query(&[
+                    ("count", "100"),
+                    ("sort_by", "-createdAt"),
+                    ("cursor", cursor),
+                ])
+                .header(reqwest::header::COOKIE, &self.cookie)
+                .send()
+                .map_err(|_| "Could not load Fab acquisition dates")?,
+        )
+    }
+}
 pub(crate) fn session_lock() -> Result<std::fs::File, String> {
     std::fs::create_dir_all(crate::storage::data_dir()).map_err(|e| e.to_string())?;
     let f = std::fs::OpenOptions::new()
@@ -219,6 +240,40 @@ impl Epic {
             return Self::decode(response);
         }
         Err("Epic sign-in expired. Please reconnect your account.".into())
+    }
+    pub(crate) fn fab_library_session(
+        &self,
+        session: &Session,
+    ) -> Result<FabLibrarySession, String> {
+        let token = self.fab_access_token(session)?;
+        // Fab's plugin sign-in accepts the existing Epic access token. No refresh
+        // token is sent or stored; this cookie is used only for this date lookup.
+        let response = self
+            .client
+            .post("https://www.fab.com/p/authenticate")
+            .header("Authorization", token)
+            .json(&serde_json::json!({}))
+            .send()
+            .map_err(|_| "Fab session connection failed")?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Fab library sign-in returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        let cookie = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|s| s.split(';').next())
+            .find(|s| s.starts_with("fab_sessionid=") && s.len() > "fab_sessionid=".len())
+            .ok_or("Fab did not provide a library session")?
+            .to_owned();
+        Ok(FabLibrarySession {
+            client: self.client.clone(),
+            cookie,
+        })
     }
     pub fn entitlement_page(&self, session: &Session, start: usize) -> Result<Vec<Value>, String> {
         let token = self.fab_access_token(session)?;

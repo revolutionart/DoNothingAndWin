@@ -18,10 +18,64 @@ pub(super) struct Finder {
     summary: String,
     found: usize,
     full_scan: bool,
+    skipped_folders: Vec<discovery::SkippedFolder>,
 }
 enum FinderEvent {
     Results(Vec<Suggestion>, usize),
     Finished(discovery::Report, Vec<Suggestion>),
+}
+pub(super) fn skipped_folders(ui: &mut Ui, theme: &Theme, folders: &[discovery::SkippedFolder]) {
+    if folders.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!(
+        "Skipped folders ({}) — paths and reasons",
+        folders.len()
+    ))
+    .default_open(true)
+    .show(ui, |ui| {
+        if ui
+            .add(buttons::secondary_button("Copy folder details"))
+            .clicked()
+        {
+            ui.ctx().copy_text(
+                folders
+                    .iter()
+                    .map(|folder| format!("{}\n{}", folder.path.display(), folder.reason))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            );
+        }
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 220.),
+            Layout::top_down(Align::Min),
+            |ui| {
+                AppScrollArea::vertical(theme)
+                    .id_salt("skipped-folder-details")
+                    .max_height(220.)
+                    .show(ui, |ui| {
+                        for folder in folders {
+                            ui.label(
+                                RichText::new(if folder.linked {
+                                    "Linked folder (not followed)"
+                                } else {
+                                    "Inaccessible folder"
+                                })
+                                .strong()
+                                .color(color(theme.text)),
+                            );
+                            ui.add(
+                                Label::new(dialog::display_path(&folder.path.to_string_lossy()))
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                            ui.add(Label::new(&folder.reason).wrap().selectable(true));
+                            ui.separator();
+                        }
+                    });
+            },
+        );
+    });
 }
 impl Finder {
     // Render-only fixture; never scans drives or saves project folders.
@@ -86,6 +140,7 @@ impl Workspace {
             summary: String::new(),
             found: 0,
             full_scan,
+            skipped_folders: vec![],
         };
         std::thread::spawn(move || {
             let roots = discovery::quick::preferred_roots();
@@ -125,7 +180,7 @@ impl Workspace {
                     self.project_finder.found = report.projects.len();
                     self.project_finder.rows = rows.into_iter().map(|s| (true, s)).collect();
                     self.project_finder.summary = format!(
-                        "{}: {} projects found. {} folders searched; {} inaccessible or linked folders skipped.{}",
+                        "{}: {} projects found. {} folders searched; {}.{}",
                         if report.cancelled {
                             "Scan stopped"
                         } else if self.project_finder.full_scan {
@@ -135,13 +190,14 @@ impl Workspace {
                         },
                         self.project_finder.found,
                         report.directories,
-                        report.skipped,
+                        report.skipped_summary(),
                         if !self.project_finder.full_scan {
                             " Missing a project? Try Full scan or choose its folder."
                         } else {
                             ""
                         }
                     );
+                    self.project_finder.skipped_folders = report.skipped_folders;
                     break;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -216,6 +272,7 @@ impl Workspace {
                     ctx.request_repaint_after(Duration::from_millis(200));
                 } else if !self.project_finder.summary.is_empty() {
                     ui.label(&self.project_finder.summary);
+                    skipped_folders(ui, &theme, &self.project_finder.skipped_folders);
                     if self.project_finder.rows.is_empty() {
                         ui.label("No new project folders found. Already configured folders are skipped; you can choose a custom folder directly.");
                     }
