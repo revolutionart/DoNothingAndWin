@@ -2,6 +2,7 @@ use super::*;
 use engine_workspace::fab::{self, Item};
 use engine_workspace::fab_listing::{self, DateEvent, Sort};
 use engine_workspace::fab_search::{SearchDocument, SearchQuery};
+mod plugin_download;
 const AVAILABLE_UPDATES_FILTER: usize = 4;
 
 enum Event {
@@ -13,6 +14,8 @@ enum Event {
     Installed(Result<String, String>),
     PluginInstalled(Installation, Result<String, String>),
     PluginBatchFinished(Result<String, String>),
+    PluginDownloadProgress(fab::plugin_download::Progress),
+    PluginDownloaded(Result<std::path::PathBuf, String>),
 }
 enum UpdateEvent {
     Plugin(String, Instant, engine_workspace::plugins::Checked),
@@ -39,6 +42,7 @@ pub(super) struct Library {
     install_engine: String,
     install_results: usize,
     install_control: Option<engine_workspace::installer::Control>,
+    download: plugin_download::Download,
     attempted: bool,
     status: String,
     search: String,
@@ -80,7 +84,7 @@ impl Library {
                     }),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text("Stop the current installation and its remaining engines. Other queued plugins stay in the waiting list.")
+                .on_hover_text(if self.download.active { "Stop this plugin download and remove its partial output." } else { "Stop the current installation and its remaining engines. Other queued plugins stay in the waiting list." })
                 .clicked()
             {
                 control.stop();
@@ -325,7 +329,7 @@ impl Workspace {
             let event = match self.library.rx.as_ref().map(|rx| rx.try_recv()) {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::TryRecvError::Disconnected)) if self.library.installing => {
-                    let result = Err("Installation worker stopped unexpectedly. Check the destination before retrying.".into());
+                    let result = Err("Transfer worker stopped unexpectedly. Check the destination before retrying.".into());
                     self.record_activity(
                         self.library.install_item.clone(),
                         self.library.install_engine.clone(),
@@ -334,15 +338,22 @@ impl Workspace {
                     self.library.install_queue.finished();
                     self.library.install_control = None;
                     self.library.installing = false;
+                    self.library.download.active = false;
                     self.library.rx = None;
                     self.notify(
-                        "Installation worker stopped unexpectedly. Continuing the waiting list.",
+                        "Transfer worker stopped unexpectedly. Continuing the waiting list.",
                     );
                     break;
                 }
                 _ => break,
             };
             match event {
+                Event::PluginDownloadProgress(progress) => {
+                    self.library.status =
+                        format!("{} — {}", self.library.install_item, progress.phase);
+                    self.library.download.progress = progress;
+                }
+                Event::PluginDownloaded(result) => self.finish_plugin_download(result),
                 Event::Cached(items) => {
                     self.library.rx = None;
                     self.library.items = items;
@@ -1106,6 +1117,12 @@ impl Workspace {
                 .take(48)
                 .collect();
             self.library.engine_targets.clear();
+            self.library.download.only = false;
+            self.library.download.branch = item
+                .supported_branches()
+                .last()
+                .cloned()
+                .unwrap_or_default();
             if item.plugin() {
                 if let Some(engine) = self.engines.iter().find(|engine| {
                     item.compatible(&engine.version).is_some()
@@ -1241,17 +1258,22 @@ impl Workspace {
             || !self.library.install_queue.waiting().is_empty();
         let mut open = true;
         let mut install = false;
+        let mut download = false;
         dialog::show(
             ctx,
             &self.theme.clone(),
             "fab-install",
             if item.plugin() {
-                "Install to engine"
+                if self.library.download.only {
+                    "Download plugin"
+                } else {
+                    "Install to engine"
+                }
             } else {
                 "Add to project"
             },
             if item.plugin() {
-                "Choose one or more engines for this plugin."
+                "Install this plugin or download its files for use elsewhere."
             } else {
                 "Select a project for this asset."
             },
@@ -1296,6 +1318,19 @@ impl Workspace {
                         });
                     });
                 if item.plugin() {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.library.download.only,
+                            false,
+                            "Install to engine",
+                        );
+                        ui.selectable_value(&mut self.library.download.only, true, "Download only");
+                    });
+                    ui.add_space(8.);
+                    if self.library.download.only {
+                        download = self.plugin_download_options(ui, &item, waiting);
+                        return;
+                    }
                     ui.label("Compatible engines");
                     if targets.is_empty() {
                         ui.add_enabled(
@@ -1507,6 +1542,10 @@ impl Workspace {
         );
         if !open {
             self.library.selected = None;
+        }
+        if download {
+            self.start_plugin_download(item, ctx);
+            return;
         }
         if install && item.plugin() {
             let engines = self

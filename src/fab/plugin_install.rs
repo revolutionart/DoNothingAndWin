@@ -3,15 +3,15 @@ use super::{Item, Version};
 use crate::{buildpatch::Manifest, epic::Session, installer, model::Installation};
 use std::{collections::HashSet, path::Path};
 
-struct Candidate {
+pub(super) struct Candidate {
     version: Version,
-    manifest: Manifest,
-    bases: Vec<reqwest::Url>,
+    pub(super) manifest: Manifest,
+    pub(super) bases: Vec<reqwest::Url>,
     name: String,
     number: i64,
 }
 
-fn descriptor_file(manifest: &Manifest) -> Result<&crate::buildpatch::File, String> {
+pub(super) fn descriptor_file(manifest: &Manifest) -> Result<&crate::buildpatch::File, String> {
     let descriptors: Vec<_> = manifest
         .files
         .iter()
@@ -30,7 +30,7 @@ fn same_branch(a: &str, b: &str) -> bool {
         .is_some_and(|(a, b)| a.branch() == b.branch())
 }
 
-fn resolve_with(
+pub(super) fn resolve_with(
     item: &Item,
     engine: &str,
     wait_for_library: bool,

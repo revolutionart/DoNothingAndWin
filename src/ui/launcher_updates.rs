@@ -41,6 +41,7 @@ impl Workspace {
             || self.plugin_work.mutating
             || self.library_work_pending()
             || self.cloning.busy()
+            || self.backup.busy()
             || self.scan.receiver.is_some()
             || self.project_finder.busy()
     }

@@ -77,7 +77,7 @@ pub(super) fn show_with_icon(
                     Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                     color(theme.logo),
                 );
-            } else if title == "Install to engine" {
+            } else if title == "Install to engine" || title == "Download plugin" {
                 let p = start + vec2(6., 14.);
                 ui.painter().rect_filled(
                     Rect::from_min_size(p, vec2(25., 25.)),

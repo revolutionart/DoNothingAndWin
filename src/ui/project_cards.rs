@@ -238,6 +238,23 @@ impl Workspace {
             ui.close();
         }
         if ui
+            .add_enabled(
+                !self.demo
+                    && (self.backup.busy()
+                        || self.workspace_cache.projects.get(&p.path) == Some(&true)),
+                buttons::secondary_button(if self.backup.busy() {
+                    "View backup progress"
+                } else {
+                    "Backup project"
+                }),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.begin_project_backup(p.clone());
+            ui.close();
+        }
+        if ui
             .add(buttons::secondary_button(if p.pinned {
                 "Unpin"
             } else {

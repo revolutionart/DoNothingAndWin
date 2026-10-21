@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.0 - 2026-10-21
+
+### Plugin downloads
+
+- Add **Download only** inside **Install to engine**, with a UE version picker and a choice of the plugin cache or a custom folder. No installed engine is required.
+- Save the latest eligible Windows plugin package for the selected UE version in a separate build folder, including source code when supplied by the publisher. Verify downloaded files and reuse unchanged saved packages without overwriting modified copies.
+- Show download progress, file verification counts, cancellation, and **Open plugin folder** on Downloads. Download-only packages do not register as installed plugins or clear engine/plugin update notices.
+
+### Project backups
+
+- Add **Backup project** to project right-click and three-dot menus. Choose a destination and use **Make Backup** to save a full copy in a new timestamped folder.
+- Show copied bytes, file progress, cancellation, and **Open backup folder**. Backups continue when the dialog is closed; click the footer progress to reopen it.
+- Preserve the original project and publish the backup only after copying completes. Reject linked folders, nested destinations, and existing backup folders; detect changes to source files during the copy.
+- Wait for active backups before applying a launcher update or switching builds.
+
+### Interface
+
+- Lower floating page actions to leave space below the window controls, keeping page titles and subtitles left-aligned. Long subtitles truncate before the actions and remain available on hover.
+
+### Known limitations
+
+- Source engine builds may need to rebuild downloaded plugins. Source code is included only when supplied by the publisher; binary-only plugins are not guaranteed to work with custom engine builds.
+- Close the project in Unreal Editor before backing it up. Project backups are full copies, not incremental snapshots.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.2.9 - 2026-10-21
 
 ### Library

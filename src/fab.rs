@@ -13,6 +13,7 @@ use std::{
 };
 
 pub mod acquisition;
+pub mod plugin_download;
 pub mod plugin_install;
 
 #[derive(Clone, Serialize, Deserialize)]

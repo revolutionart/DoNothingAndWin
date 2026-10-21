@@ -58,7 +58,7 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.2.9** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.9/DoNothingAndWin-Setup-1.2.9.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.9/DoNothingAndWin-Portable-1.2.9.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.2.9/SHA256SUMS.txt)
+Current release: **1.3.0** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/DoNothingAndWin-Setup-1.3.0.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/DoNothingAndWin-Portable-1.3.0.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
@@ -92,6 +92,7 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 | **Hide project** | Keep a project out of the launcher’s project lists without deleting or moving its files. Useful for screenshots or keeping your workspace focused. |
 | **Create desktop shortcut** | Create a shortcut to open the project. |
 | **Clone project** | Make a separate copy of a project. |
+| **Backup project** | Choose a location and save a full copy in a new timestamped folder, with progress and cancellation. Close the project in Unreal Editor first. |
 | **Pin project / Unpin** | Add or remove the project from the Pinned tab. |
 | **Show in Folder** | Open the project’s folder in Windows Explorer. |
 
@@ -113,6 +114,7 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 - Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update** (the default) or by name. Fab listing dates load in the background and are cached; items without a date appear last.
 - Search titles, descriptions, tags, and publisher names. Title matches appear first, followed by metadata matches, with the chosen sort order applied within each group. Listing details are cached for responsive searches.
 - Add assets to an existing project, create projects from supported library templates, and install plugins into multiple selected engines. Each engine gets its latest eligible compatible package.
+- Choose **Install to engine → Download only** to select a UE version and save an extracted plugin to the plugin cache or a custom folder without an installed engine. Follow progress in Downloads and use **Open plugin folder** when complete. Source builds may need to rebuild the plugin; source code is included only when supplied by the publisher.
 - Enable **Show all projects** when choosing an asset destination. Projects too old for every available asset version are greyed out, with a reason on hover.
 - Manage plugins separately for each engine: search installed plugins, see installed and available versions, check for updates, update, or remove them.
 - Plugin updates are checked automatically after startup/sign-in. Each affected engine card shows an orange **Manage plugins** link with a circled exclamation; the Library badge covers updates across engines.

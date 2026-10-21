@@ -370,7 +370,7 @@ impl Workspace {
                                     } else if active == 0 {
                                         "You're all caught up"
                                     } else {
-                                        "Installation activity"
+                                        "Transfer activity"
                                     })
                                     .size(25.)
                                     .strong()
@@ -443,6 +443,7 @@ impl Workspace {
                                 color(self.theme.text)
                             }));
                             ui.label(s);
+                            self.library.show_plugin_download_progress(ui);
                             self.library.transfer_controls(ui);
                         }
                         if self.plugin_work.mutating {
@@ -458,6 +459,7 @@ impl Workspace {
                         }
                     });
             }
+            self.show_downloaded_plugin(ui);
             if self.transfer.operation.can_resume() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(&self.transfer.state);

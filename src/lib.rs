@@ -20,6 +20,7 @@ pub mod fab_listing;
 pub mod fab_search;
 pub mod library_organization;
 
+pub mod project_backup;
 pub mod project_clone;
 pub mod project_history;
 

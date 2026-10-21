@@ -50,8 +50,11 @@ impl LayoutProbe {
             plugin_backups: std::env::args().any(|a| a == "--plugin-backups-preview"),
             plugin_design: std::env::args().any(|a| a == "--plugin-design-preview"),
             project_finder: std::env::args().any(|a| a == "--project-finder-preview"),
-            plugin_install: std::env::args()
-                .any(|a| a == "--plugin-install-preview" || a == "--queued-install-preview"),
+            plugin_install: std::env::args().any(|a| {
+                a == "--plugin-install-preview"
+                    || a == "--queued-install-preview"
+                    || a == "--plugin-download-preview"
+            }),
             library_queue: std::env::args()
                 .any(|a| a == "--library-queue-preview" || a == "--queued-install-preview"),
             library_organization: std::env::args().any(|a| a == "--library-organization-preview"),
@@ -60,6 +63,7 @@ impl LayoutProbe {
                 "--settings-preview" => Some(Page::Settings),
                 "--library-organization-preview"
                 | "--plugin-install-preview"
+                | "--plugin-download-preview"
                 | "--queued-install-preview" => Some(Page::Library),
                 "--page-preview=downloads" | "--library-queue-preview" => Some(Page::Downloads),
                 "--page-preview=library" => Some(Page::Library),
@@ -77,7 +81,9 @@ impl Workspace {
             return;
         };
         if probe.step >= if probe.page.is_some() { 5 } else { CASES.len() } {
-            if probe.library_queue {
+            if probe.library_queue
+                || std::env::args().any(|a| a == "--plugin-download-activity-preview")
+            {
                 self.finish_library_preview();
             }
             self.plugin_work.mutating = false;
@@ -222,6 +228,9 @@ impl Workspace {
             }
             if probe.plugin_install {
                 self.preview_plugin_install();
+                if std::env::args().any(|a| a == "--plugin-download-preview") {
+                    self.preview_plugin_download();
+                }
             }
             if probe.plugin_backups {
                 self.preview_plugin_backups(probe.step);
@@ -231,6 +240,12 @@ impl Workspace {
             }
             if let Some(page) = probe.page {
                 self.page = page;
+            }
+            if std::env::args().any(|a| a == "--plugin-download-activity-preview") {
+                self.preview_plugin_download_activity(probe.step > 0);
+            }
+            if std::env::args().any(|a| a == "--project-backup-preview") {
+                self.preview_project_backup(probe.step % 2 == 1);
             }
             if probe.empty_projects {
                 self.projects.clear();

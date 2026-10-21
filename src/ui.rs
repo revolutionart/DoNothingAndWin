@@ -13,6 +13,7 @@ mod library_queue;
 mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
+mod project_backup;
 mod project_cards;
 mod project_finder;
 mod project_thumbnails;
@@ -129,6 +130,7 @@ pub struct Workspace {
     options: engine_options::Options,
     engine_remove: Option<Installation>,
     cloning: clone_project::Cloning,
+    backup: project_backup::Backup,
     new_project: bool,
     new_name: String,
     new_path: String,
@@ -550,6 +552,7 @@ impl Workspace {
             options: Default::default(),
             engine_remove: None,
             cloning: Default::default(),
+            backup: Default::default(),
             new_project: false,
             new_name: String::new(),
             new_path: String::new(),
@@ -1202,16 +1205,38 @@ impl Workspace {
             self.theme.text,
             Align2::LEFT_CENTER,
         );
-        c.text(
-            ui,
-            271.,
-            header.subtitle_y,
-            subtitle,
-            18.,
-            false,
-            self.theme.muted,
-            Align2::LEFT_CENTER,
+        let actions_left = c.width
+            - match self.page {
+                Page::Workspace | Page::Projects => 535.,
+                Page::Engines => 412.,
+                Page::Library => 350.,
+                Page::Downloads => 246.,
+                Page::Settings => 236.,
+            };
+        let mut subtitle_job = egui::text::LayoutJob::simple(
+            subtitle.to_owned(),
+            FontId::proportional(18. * c.scale()),
+            color(self.theme.muted),
+            (actions_left - 283.).max(1.) * c.sx,
         );
+        subtitle_job.wrap.max_rows = 1;
+        let subtitle_galley = ui.painter().layout_job(subtitle_job);
+        ui.painter().galley(
+            c.point(271., header.subtitle_y) - vec2(0., subtitle_galley.size().y / 2.),
+            subtitle_galley,
+            color(self.theme.muted),
+        );
+        ui.interact(
+            c.rect([
+                271.,
+                header.subtitle_y - 12.,
+                (actions_left - 283.).max(1.),
+                24.,
+            ]),
+            Id::new("page-subtitle"),
+            Sense::hover(),
+        )
+        .on_hover_text(subtitle);
         if self.page == Page::Settings {
             if c.button(
                 ui,
@@ -1315,7 +1340,13 @@ impl Workspace {
         } else {
             storage
         };
-        let activity = if self.transfer.busy() {
+        let activity = if self.backup.busy() {
+            Some((
+                "Project backup".into(),
+                self.backup.status(),
+                self.backup.fraction(),
+            ))
+        } else if self.transfer.busy() {
             let p = self.transfer.operation.progress();
             Some((
                 self.transfer.state.clone(),
@@ -1327,7 +1358,7 @@ impl Workspace {
                 },
             ))
         } else if let Some(status) = self.library_transfer_status() {
-            Some(("Library installation".into(), status.into(), None))
+            Some(("Library transfer".into(), status.into(), None))
         } else if self.plugin_work.mutating {
             Some((
                 self.plugin_work
@@ -1376,13 +1407,21 @@ impl Workspace {
             });
             if ui
                 .interact(rect, Id::new("footer-transfer-progress"), Sense::click())
-                .on_hover_text("Open Downloads")
+                .on_hover_text(if self.backup.busy() {
+                    "View project backup"
+                } else {
+                    "Open Downloads"
+                })
                 .clone()
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .clicked()
             {
-                self.page = Page::Downloads;
-                self.plugin_engine = None;
+                if self.backup.busy() {
+                    self.backup.open = true;
+                } else {
+                    self.page = Page::Downloads;
+                    self.plugin_engine = None;
+                }
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
@@ -2371,6 +2410,7 @@ impl Workspace {
     }
     fn dialogs(&mut self, ctx: &Context) {
         self.clone_dialog(ctx);
+        self.project_backup_dialog(ctx);
         self.plugin_confirmation(ctx);
         if let Some(engine) = self.engine_remove.clone() {
             let mut open = true;
@@ -2527,6 +2567,7 @@ impl eframe::App for Workspace {
         self.poll_plugins(ctx);
         self.poll_library(ctx);
         self.poll_clone(ctx);
+        self.poll_project_backup(ctx);
         self.poll_project_finder();
         self.poll_launcher_updates(ctx);
         if self.launcher_updates.blocks_work() {
@@ -2550,13 +2591,18 @@ impl eframe::App for Workspace {
             self.project_finder_dialog(ctx);
         }
         if crate::window_frame::take_replace_request() {
-            if self.transfer.busy() || self.library_work_pending() || self.plugin_work.mutating {
+            if self.transfer.busy()
+                || self.library_work_pending()
+                || self.plugin_work.mutating
+                || self.backup.busy()
+            {
                 self.notify("An operation is running. Finish it before switching launcher builds.");
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
         let busy = self.launcher_updates.active()
+            || self.backup.busy()
             || self.cloning.busy()
             || self.pending.is_some()
             || self.transfer.busy()
@@ -3259,7 +3305,7 @@ struct PageHeaderLayout {
 impl PageHeaderLayout {
     fn new() -> Self {
         Self {
-            actions_y: 30.,
+            actions_y: 42.,
             title_y: 40.,
             subtitle_y: 73.,
             divider_y: PAGE_HEADER_DIVIDER_Y,
