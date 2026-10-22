@@ -71,6 +71,14 @@ pub(super) struct Library {
     image_attempts: std::collections::HashSet<String>,
 }
 impl Library {
+    pub(super) fn cache_items(&self) -> &[Item] {
+        &self.items
+    }
+    pub(super) fn owns_listing(&self, id: &str) -> bool {
+        self.items
+            .iter()
+            .any(|item| fab_listing::listing_id(item).as_deref() == Some(id))
+    }
     pub(super) fn transfer_controls(&self, ui: &mut Ui) {
         if let Some(control) = &self.install_control {
             let stopping = control.cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -127,6 +135,15 @@ impl Library {
     }
 }
 impl Workspace {
+    pub(super) fn open_cached_library_item(&mut self, item: &Item) {
+        self.library.search = item.title.clone();
+        self.library.filter = 0;
+        self.library.engine_filter.clear();
+        self.library.organization.filter =
+            engine_workspace::library_organization::FolderFilter::All;
+        self.library.organization.show_hidden = true;
+        self.page = Page::Library;
+    }
     pub(super) fn has_plugin_updates(&self) -> bool {
         self.engines.iter().any(|e| {
             self.library
@@ -170,7 +187,7 @@ impl Workspace {
         });
     }
 
-    fn queue_library_thumbnail(&mut self, key: String, url: String, ctx: &Context) {
+    pub(super) fn queue_library_thumbnail(&mut self, key: String, url: String, ctx: &Context) {
         if self.library.images.len() >= 8
             || self.textures.contains_key(&key)
             || !self.library.image_attempts.insert(key.clone())
@@ -690,9 +707,9 @@ impl Workspace {
                     .width(140. * c.scale())
                     .selected_text(if self.library.engine_filter.is_empty() {"All engines".into()} else {format!("UE {}",self.library.engine_filter)})
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.library.engine_filter,String::new(),"All engines").on_hover_cursor(CursorIcon::PointingHand);
+                        buttons::selectable_value(ui, &mut self.library.engine_filter,String::new(),"All engines").on_hover_cursor(CursorIcon::PointingHand);
                         for branch in &branches {
-                            ui.selectable_value(&mut self.library.engine_filter,branch.clone(),format!("UE {branch}")).on_hover_cursor(CursorIcon::PointingHand);
+                            buttons::selectable_value(ui, &mut self.library.engine_filter,branch.clone(),format!("UE {branch}")).on_hover_cursor(CursorIcon::PointingHand);
                         }
                     }).response.on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text("Show content that lists support for this engine version on Windows.");
@@ -701,7 +718,7 @@ impl Workspace {
                     .selected_text(self.library.sort.label())
                     .show_ui(ui, |ui| {
                         for sort in [Sort::LatestUpdate,Sort::LatestAdded,Sort::NameAscending,Sort::NameDescending] {
-                            ui.selectable_value(&mut self.library.sort,sort,sort.label()).on_hover_cursor(CursorIcon::PointingHand);
+                            buttons::selectable_value(ui, &mut self.library.sort,sort,sort.label()).on_hover_cursor(CursorIcon::PointingHand);
                         }
                     }).response.on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text("Latest added uses your Fab library acquisition dates, newest first. Latest update uses listing update dates. Unavailable dates appear last.");
@@ -1018,7 +1035,7 @@ impl Workspace {
                                     };
                                     let text = ui.painter().layout_no_wrap(label.into(),
                                         buttons::primary_font(1.), color(theme.on_accent));
-                                    let spinner_space = if updating { 22. } else { 0. };
+                                    let spinner_space = if updating { loading::SIZE + 6. } else { 0. };
                                     let action_width = (if list { 146_f32 } else { 126_f32 })
                                         .max(text.size().x + spinner_space + 2. * buttons::HORIZONTAL_PADDING);
                                     let action = Rect::from_min_size(
@@ -1044,8 +1061,8 @@ impl Workspace {
                                     let content_left = action.center().x - (text.size().x + spinner_space) / 2.;
                                     if updating {
                                         ui.put(
-                                            Rect::from_center_size(pos2(content_left + 8., action.center().y), vec2(16., 16.)),
-                                            egui::Spinner::new().size(16.).color(text_color),
+                                            Rect::from_center_size(pos2(content_left + loading::SIZE / 2., action.center().y), Vec2::splat(loading::SIZE)),
+                                            loading::spinner(&theme),
                                         );
                                     }
                                     ui.painter().galley_with_override_text_color(
@@ -1319,12 +1336,18 @@ impl Workspace {
                     });
                 if item.plugin() {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(
+                        buttons::selectable_value(
+                            ui,
                             &mut self.library.download.only,
                             false,
                             "Install to engine",
                         );
-                        ui.selectable_value(&mut self.library.download.only, true, "Download only");
+                        buttons::selectable_value(
+                            ui,
+                            &mut self.library.download.only,
+                            true,
+                            "Download only",
+                        );
                     });
                     ui.add_space(8.);
                     if self.library.download.only {
@@ -1483,7 +1506,8 @@ impl Workspace {
                                         })
                                         .show_ui(ui, |ui| {
                                             for branch in branches {
-                                                ui.selectable_value(
+                                                buttons::selectable_value(
+                                                    ui,
                                                     &mut self.library.asset_version,
                                                     branch.clone(),
                                                     format!("Unreal Engine {branch}"),
@@ -1745,7 +1769,8 @@ impl Workspace {
                     })
                     .show_ui(ui, |ui| {
                         for branch in item.supported_branches() {
-                            ui.selectable_value(
+                            buttons::selectable_value(
+                                ui,
                                 &mut self.library.asset_version,
                                 branch.clone(),
                                 format!("Unreal Engine {branch}"),

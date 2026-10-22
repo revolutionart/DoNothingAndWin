@@ -342,122 +342,109 @@ impl Workspace {
                     self.transfer.operation.stop();
                 }
             } else {
-                Frame::new()
-                    .fill(color(t.card))
-                    .stroke(Stroke::new(1.5, color(t.accent)))
-                    .corner_radius(6.)
-                    .inner_margin(22)
-                    .show(ui, |ui| {
-                        ui.set_width((ui.available_width() - 2.).max(200.));
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
-                            draw_icon(
-                                ui,
-                                t,
-                                if active == 0 && !waiting {
-                                    Icon::Check
+                highlighted_panel(t).show(ui, |ui| {
+                    ui.set_width((ui.available_width() - 2.).max(200.));
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
+                        draw_icon(
+                            ui,
+                            t,
+                            if active == 0 && !waiting {
+                                Icon::Check
+                            } else {
+                                Icon::Download
+                            },
+                            r,
+                            t.accent,
+                        );
+                        ui.add_space(8.);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(if active == 0 && waiting {
+                                    "Waiting to install"
+                                } else if active == 0 {
+                                    "You're all caught up"
                                 } else {
-                                    Icon::Download
-                                },
-                                r,
-                                t.accent,
+                                    "Transfer activity"
+                                })
+                                .size(25.)
+                                .strong()
+                                .color(ui.visuals().text_color()),
                             );
-                            ui.add_space(8.);
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(if active == 0 && waiting {
-                                        "Waiting to install"
-                                    } else if active == 0 {
-                                        "You're all caught up"
-                                    } else {
-                                        "Transfer activity"
-                                    })
-                                    .size(25.)
-                                    .strong()
-                                    .color(ui.visuals().text_color()),
-                                );
-                                if active == 0 {
-                                    ui.label(if waiting { "Queued plugins will start when the current operation finishes." } else { "No downloads in progress." });
-                                }
-                            });
-                        });
-                        if self.transfer.busy() {
-                            ui.label(&self.transfer.state);
-                            let p = self.transfer.operation.progress();
-                            if p.total == 0 {
-                                ui.horizontal(|ui| {
-                                    ui.add(egui::Spinner::new().color(if self.theme.dark {
-                                        Color32::WHITE
-                                    } else {
-                                        color(self.theme.text)
-                                    }));
-                                    ui.label(&p.phase);
-                                });
-                                indeterminate_progress(
-                                    ui,
-                                    ui.available_width(),
-                                    8.,
-                                    t.accent,
-                                    t.border,
-                                );
-                            } else {
-                                ui.label(&p.phase);
-                                ui.add(
-                                    ProgressBar::new(
-                                        (p.completed as f32 / p.total as f32).clamp(0., 1.),
-                                    )
-                                    .show_percentage()
-                                    .desired_width(ui.available_width()),
-                                );
-                                ui.label(format!(
-                                    "{:.2} / {:.2} GB • {:.2} GB downloaded",
-                                    p.completed as f64 / 1e9,
-                                    p.total as f64 / 1e9,
-                                    p.network as f64 / 1e9
-                                ));
-                            }
-                            if p.files_total > 0 {
-                                ui.label(format!("{} / {} files processed", p.files, p.files_total));
-                            }
-                            if !p.detail.is_empty() {
-                                ui.add(
-                                    egui::Label::new(RichText::new(&p.detail).color(color(t.muted)))
-                                        .truncate(),
-                                )
-                                .on_hover_text(&p.detail);
-                            }
-                            if self.transfer.operation.can_stop()
-                                && ui
-                                    .add(buttons::secondary_button("Stop transfer"))
-                                    .clone()
-                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                    .clicked()
-                            {
-                                self.transfer.operation.stop();
-                            }
-                        }
-                        if let Some(s) = self.library_transfer_status() {
-                            ui.add(egui::Spinner::new().color(if self.theme.dark {
-                                Color32::WHITE
-                            } else {
-                                color(self.theme.text)
-                            }));
-                            ui.label(s);
-                            self.library.show_plugin_download_progress(ui);
-                            self.library.transfer_controls(ui);
-                        }
-                        if self.plugin_work.mutating {
-                            ui.horizontal(|ui| {
-                                ui.add(egui::Spinner::new().color(if self.theme.dark {
-                                    Color32::WHITE
+                            if active == 0 {
+                                ui.label(if waiting {
+                                    "Queued plugins will start when the current operation finishes."
                                 } else {
-                                    color(self.theme.text)
-                                }));
-                                ui.label(&self.plugin_work.status);
-                            });
-                            self.plugin_work.show_progress(ui, t, &self.textures, true);
-                        }
+                                    "No downloads in progress."
+                                });
+                            }
+                        });
                     });
+                    if self.transfer.busy() {
+                        ui.label(&self.transfer.state);
+                        let p = self.transfer.operation.progress();
+                        if p.total == 0 {
+                            ui.horizontal(|ui| {
+                                ui.add(loading::spinner(t));
+                                ui.label(&p.phase);
+                            });
+                            indeterminate_progress(
+                                ui,
+                                ui.available_width(),
+                                8.,
+                                t.accent,
+                                t.border,
+                            );
+                        } else {
+                            ui.label(&p.phase);
+                            ui.add(
+                                ProgressBar::new(
+                                    (p.completed as f32 / p.total as f32).clamp(0., 1.),
+                                )
+                                .show_percentage()
+                                .desired_width(ui.available_width()),
+                            );
+                            ui.label(format!(
+                                "{:.2} / {:.2} GB • {:.2} GB downloaded",
+                                p.completed as f64 / 1e9,
+                                p.total as f64 / 1e9,
+                                p.network as f64 / 1e9
+                            ));
+                        }
+                        if p.files_total > 0 {
+                            ui.label(format!("{} / {} files processed", p.files, p.files_total));
+                        }
+                        if !p.detail.is_empty() {
+                            ui.add(
+                                egui::Label::new(RichText::new(&p.detail).color(color(t.muted)))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&p.detail);
+                        }
+                        if self.transfer.operation.can_stop()
+                            && ui
+                                .add(buttons::secondary_button("Stop transfer"))
+                                .clone()
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .clicked()
+                        {
+                            self.transfer.operation.stop();
+                        }
+                    }
+                    if let Some(s) = self.library_transfer_status() {
+                        ui.add(loading::spinner(t));
+                        ui.label(s);
+                        self.library.show_plugin_download_progress(ui);
+                        self.library.transfer_controls(ui);
+                    }
+                    if self.plugin_work.mutating {
+                        ui.horizontal(|ui| {
+                            ui.add(loading::spinner(t));
+                            ui.label(&self.plugin_work.status);
+                        });
+                        self.plugin_work.show_progress(ui, t, &self.textures, true);
+                    }
+                });
             }
             self.show_downloaded_plugin(ui);
             if self.transfer.operation.can_resume() {

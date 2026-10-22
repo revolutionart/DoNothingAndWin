@@ -563,7 +563,8 @@ impl Workspace {
                             ui.label("No engine versions available to install.");
                         }
                         for release in &releases {
-                            ui.selectable_value(
+                            buttons::selectable_value(
+                                ui,
                                 &mut choice,
                                 release.app.clone(),
                                 release.version.as_ref().unwrap().to_string(),
@@ -709,7 +710,7 @@ impl Workspace {
                     ));
                 } else if self.transfer.preparing() {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().color(color(self.theme.text)));
+                        ui.add(loading::spinner(&self.theme));
                         ui.label("Loading installation options…");
                     });
                 } else {

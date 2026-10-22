@@ -434,7 +434,7 @@ impl Workspace {
             |ui| {
                 if self.options.receiver.is_some() {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().color(color(self.theme.text)));
+                        ui.add(loading::spinner(&self.theme));
                         ui.label("Loading installed engine components...");
                     });
                 }

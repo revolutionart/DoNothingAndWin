@@ -51,19 +51,23 @@ impl Widget for AppCheckbox<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let gap = if self.label.is_empty() { 0. } else { 8. };
         let text: WidgetText = RichText::new(&self.label)
+            .font(FontId::proportional(COMPACT_BUTTON_FONT_SIZE))
             .color(color(self.theme.text))
             .into();
-        let galley = text.into_galley(
+        let galley = centered_galley(
             ui,
-            Some(egui::TextWrapMode::Wrap),
-            (ui.available_width() - CHECKBOX_SIZE - gap).max(0.),
-            TextStyle::Button,
+            text.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                (ui.available_width() - CHECKBOX_SIZE - gap).max(0.),
+                TextStyle::Button,
+            ),
         );
         let size = vec2(
             CHECKBOX_SIZE + gap + galley.size().x,
             CHECKBOX_SIZE
                 .max(galley.size().y)
-                .max(ui.spacing().interact_size.y),
+                .max(COMPACT_BUTTON_HEIGHT),
         );
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
         if response.clicked() {
@@ -147,36 +151,104 @@ pub(super) fn compact_style(ui: &mut Ui) {
     ui.style_mut().override_font_id = Some(FontId::proportional(COMPACT_BUTTON_FONT_SIZE));
 }
 
-pub(super) struct SecondaryButton<'a>(Button<'a>);
-impl SecondaryButton<'_> {
+/// Align the font's capital height, keeping one baseline for every label.
+/// Centering each word's full mesh pulls labels containing g/j/p upward.
+pub(super) fn centered_galley(
+    ui: &Ui,
+    mut galley: std::sync::Arc<egui::Galley>,
+) -> std::sync::Arc<egui::Galley> {
+    if galley.rows.len() == 1 && galley.mesh_bounds.is_positive() {
+        let font = galley.job.sections[0].format.font_id.clone();
+        let reference = ui
+            .painter()
+            .layout_no_wrap("H".into(), font, Color32::WHITE);
+        let baseline_delta = galley.rows[0].glyphs[0].pos.y - reference.rows[0].glyphs[0].pos.y;
+        // Keep glyph vertices on their rasterized pixel grid. An even-pixel
+        // layout height also keeps centered origins on that grid instead of
+        // letting half-pixel ties move a label down on some toolbar rows.
+        let offset = -(reference.mesh_bounds.top() + baseline_delta);
+        let ppp = ui.painter().pixels_per_point();
+        let cap_height = (reference.mesh_bounds.height() * ppp / 2.).ceil() * 2. / ppp;
+        let galley = std::sync::Arc::make_mut(&mut galley);
+        galley.rows[0].pos.y += offset;
+        galley.mesh_bounds = galley.mesh_bounds.translate(vec2(0., offset));
+        galley.rect.max.y = galley.rect.min.y + cap_height;
+    }
+    galley
+}
+pub(super) fn selectable_value<T: PartialEq>(
+    ui: &mut Ui,
+    current: &mut T,
+    selected: T,
+    label: impl Into<WidgetText>,
+) -> Response {
+    let text = centered_galley(
+        ui,
+        label.into().into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            TextStyle::Button,
+        ),
+    );
+    let mut response = ui.selectable_label(*current == selected, text);
+    if response.clicked() && *current != selected {
+        *current = selected;
+        response.mark_changed();
+    }
+    response
+}
+pub(super) struct SecondaryButton {
+    label: WidgetText,
+    width: f32,
+    stroke: Option<Stroke>,
+    radius: CornerRadius,
+}
+impl SecondaryButton {
     pub(super) fn min_size(mut self, size: Vec2) -> Self {
-        self.0 = self.0.min_size(vec2(size.x, COMPACT_BUTTON_HEIGHT));
+        self.width = size.x;
         self
     }
     pub(super) fn stroke(mut self, stroke: Stroke) -> Self {
-        self.0 = self.0.stroke(stroke);
+        self.stroke = Some(stroke);
         self
     }
     pub(super) fn corner_radius(mut self, radius: impl Into<CornerRadius>) -> Self {
-        self.0 = self.0.corner_radius(radius);
+        self.radius = radius.into();
         self
     }
 }
-impl Widget for SecondaryButton<'_> {
+impl Widget for SecondaryButton {
     fn ui(self, ui: &mut Ui) -> Response {
         ui.scope(|ui| {
             compact_style(ui);
-            ui.add(self.0)
+            let text = centered_galley(
+                ui,
+                self.label.into_galley(
+                    ui,
+                    Some(TextWrapMode::Extend),
+                    f32::INFINITY,
+                    TextStyle::Button,
+                ),
+            );
+            let mut button = Button::new(text)
+                .min_size(vec2(self.width, COMPACT_BUTTON_HEIGHT))
+                .corner_radius(self.radius);
+            if let Some(stroke) = self.stroke {
+                button = button.stroke(stroke);
+            }
+            ui.add(button)
         })
         .inner
     }
 }
-pub(super) fn secondary_button<'a>(label: impl Into<WidgetText>) -> SecondaryButton<'a> {
-    SecondaryButton(
-        Button::new(label)
-            .min_size(vec2(0., COMPACT_BUTTON_HEIGHT))
-            .corner_radius(BUTTON_RADIUS),
-    )
+pub(super) fn secondary_button(label: impl Into<WidgetText>) -> SecondaryButton {
+    SecondaryButton {
+        label: label.into(),
+        width: 0.,
+        stroke: None,
+        radius: BUTTON_RADIUS.into(),
+    }
 }
 pub(super) fn primary_font(scale: f32) -> FontId {
     FontId::new(
@@ -226,15 +298,24 @@ impl Widget for PrimaryButton<'_> {
                 widget.bg_fill = color(self.theme.accent_hover);
                 widget.weak_bg_fill = widget.bg_fill;
             }
+            let text: WidgetText = RichText::new(self.label)
+                .font(primary_font(1.))
+                .color(color(self.theme.on_accent))
+                .into();
+            let text = centered_galley(
+                ui,
+                text.into_galley(
+                    ui,
+                    Some(TextWrapMode::Extend),
+                    f32::INFINITY,
+                    TextStyle::Button,
+                ),
+            );
             ui.add(
-                Button::new(
-                    RichText::new(self.label)
-                        .font(primary_font(1.))
-                        .color(color(self.theme.on_accent)),
-                )
-                .min_size(vec2(self.width, COMPACT_BUTTON_HEIGHT))
-                .corner_radius(BUTTON_RADIUS)
-                .stroke(Stroke::NONE),
+                Button::new(text)
+                    .min_size(vec2(self.width, COMPACT_BUTTON_HEIGHT))
+                    .corner_radius(BUTTON_RADIUS)
+                    .stroke(Stroke::NONE),
             )
         })
         .inner
@@ -262,16 +343,25 @@ pub(super) fn tab_button(
         ui.scope(|ui| {
             ui.spacing_mut().button_padding = vec2(HORIZONTAL_PADDING, 5.);
             ui.spacing_mut().interact_size.y = COMPACT_BUTTON_HEIGHT;
+            let text: WidgetText = RichText::new(&label)
+                .font(primary_font(1.))
+                .color(color(theme.text))
+                .into();
+            let text = centered_galley(
+                ui,
+                text.into_galley(
+                    ui,
+                    Some(TextWrapMode::Extend),
+                    f32::INFINITY,
+                    TextStyle::Button,
+                ),
+            );
             ui.add(
-                Button::new(
-                    RichText::new(&label)
-                        .font(primary_font(1.))
-                        .color(color(theme.text)),
-                )
-                .fill(color(theme.background))
-                .stroke(Stroke::NONE)
-                .corner_radius(BUTTON_RADIUS)
-                .min_size(vec2(width, COMPACT_BUTTON_HEIGHT)),
+                Button::new(text)
+                    .fill(color(theme.background))
+                    .stroke(Stroke::NONE)
+                    .corner_radius(BUTTON_RADIUS)
+                    .min_size(vec2(width, COMPACT_BUTTON_HEIGHT)),
             )
         })
         .inner
@@ -298,8 +388,218 @@ mod tests {
             FontFamily::Name("semibold".into()),
             fonts.families[&FontFamily::Proportional].clone(),
         );
+        for (name, path) in [
+            ("segoe", "C:/Windows/Fonts/segoeui.ttf"),
+            ("semibold", "C:/Windows/Fonts/seguisb.ttf"),
+        ] {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts
+                    .font_data
+                    .insert(name.into(), FontData::from_owned(bytes).into());
+                if name == "segoe" {
+                    fonts
+                        .families
+                        .get_mut(&FontFamily::Proportional)
+                        .unwrap()
+                        .insert(0, name.into());
+                } else {
+                    fonts
+                        .families
+                        .insert(FontFamily::Name(name.into()), vec![name.into()]);
+                }
+            }
+        }
         ctx.set_fonts(fonts);
         ctx
+    }
+
+    // Measure the capital glyph, not descenders or the nominal line box.
+    fn capital_center(text: &egui::epaint::TextShape) -> f32 {
+        let row = &text.galley.rows[0];
+        let first = row.glyphs[0].first_vertex as usize;
+        let vertices = &row.visuals.mesh.vertices[first..first + 4];
+        let top = vertices
+            .iter()
+            .map(|v| v.pos.y)
+            .fold(f32::INFINITY, f32::min);
+        let bottom = vertices
+            .iter()
+            .map(|v| v.pos.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        text.pos.y + row.pos.y + (top + bottom) / 2.
+    }
+
+    #[test]
+    fn pictured_icon_buttons_align_capitals_and_icon_bounds_at_each_scale() {
+        // Include both toolbar rows and the native 125% display scale.
+        for (scale, top) in [(1., 40.), (1., 109.6), (1.25, 40.), (1.5, 40.)] {
+            for (label, icon) in [
+                ("Find projects", Icon::Search),
+                ("Import project", Icon::Upload),
+                ("Install engine", Icon::Plus),
+            ] {
+                let ctx = context();
+                ctx.set_pixels_per_point(1.25);
+                let center = (top + 16.) * scale;
+                let output = ctx.run(RawInput::default(), |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        let canvas = Canvas {
+                            origin: Pos2::ZERO,
+                            width: 600.,
+                            height: 400.,
+                            sx: scale,
+                            sy: scale,
+                            theme: Theme::dark(),
+                        };
+                        canvas.button(
+                            ui,
+                            "pictured-button",
+                            button_slot([80., top, 180., 32.]),
+                            label,
+                            Some(icon),
+                            false,
+                        );
+                    });
+                });
+                let text = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| match &s.shape {
+                        Shape::Text(t) if t.galley.text() == label => Some(t),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    (capital_center(text) - center).abs() <= 0.8 * scale,
+                    "{label} capitals are not centered at {scale}"
+                );
+                let mut bounds = Rect::NOTHING;
+                for s in &output.shapes {
+                    if matches!(
+                        s.shape,
+                        Shape::Circle(_) | Shape::LineSegment { .. } | Shape::Path(_)
+                    ) {
+                        bounds |= s.shape.visual_bounding_rect();
+                    }
+                }
+                assert!(
+                    (bounds.center().y - center).abs() <= 0.8 * scale,
+                    "{label} icon is not centered at {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn option_rows_keep_selection_and_changed_semantics() {
+        let ctx = context();
+        let mut value = 1;
+        let mut rect = Rect::NOTHING;
+        for frame in 0..5 {
+            let mut input = RawInput::default();
+            if frame > 0 {
+                input.events.push(Event::PointerMoved(rect.center()));
+                input.events.push(Event::PointerButton {
+                    pos: rect.center(),
+                    button: PointerButton::Primary,
+                    pressed: frame % 2 == 1,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            let mut changed = false;
+            let output = ctx.run(input, |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    style_menu(ui, &Theme::dark());
+                    let response = selectable_value(ui, &mut value, 2, "Largest first");
+                    rect = response.rect;
+                    changed = response.changed();
+                });
+            });
+            assert_eq!(changed, frame == 2);
+            assert_eq!(value, if frame < 2 { 1 } else { 2 });
+            let text = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    Shape::Text(t) if t.galley.text() == "Largest first" => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            assert!((capital_center(text) - rect.center().y).abs() <= 0.75);
+        }
+    }
+
+    #[test]
+    fn toolbar_controls_align_capitals_without_recentering_descenders() {
+        for theme in [Theme::dark(), Theme::light()] {
+            for body_size in [14., 16., 20.] {
+                let ctx = context();
+                theme.apply(&ctx);
+                let mut dropdown = Rect::NOTHING;
+                let mut button = Rect::NOTHING;
+                let mut primary = Rect::NOTHING;
+                let mut checkbox_rect = Rect::NOTHING;
+                let mut show_hidden = false;
+                let mut text = String::new();
+                let output = ctx.run(RawInput::default(), |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        ui.style_mut().override_font_id = Some(FontId::proportional(body_size));
+                        ui.spacing_mut().button_padding = vec2(18., 12.);
+                        ui.spacing_mut().interact_size.y = 48.;
+                        ui.horizontal(|ui| {
+                            search_field(ui, &mut text, "Search cache…", 280., &theme, 1.);
+                            dropdown = AppComboBox::new(&theme, "shared-metrics")
+                                .selected_text("Largest first")
+                                .show_ui(ui, |_| {})
+                                .response
+                                .rect;
+                            button = ui.add(secondary_button("Find projects")).rect;
+                            primary = ui.add(primary_button("Import project", &theme)).rect;
+                            checkbox_rect = ui
+                                .add(checkbox(&mut show_hidden, "Show hidden (2)", &theme))
+                                .rect;
+                        });
+                    });
+                });
+                let search = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| match &s.shape {
+                        Shape::Rect(r) if (r.rect.width() - 280.).abs() < 0.01 => Some(r.rect),
+                        _ => None,
+                    })
+                    .expect("search frame");
+                assert_eq!(search.height(), dropdown.height());
+                assert_eq!(search.top(), dropdown.top());
+                assert_eq!(search.bottom(), dropdown.bottom());
+                assert_eq!(checkbox_rect.height(), dropdown.height());
+                for (label, rect) in [
+                    ("Largest first", dropdown),
+                    ("Find projects", button),
+                    ("Import project", primary),
+                    ("Show hidden (2)", checkbox_rect),
+                ] {
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            Shape::Text(t) if t.galley.text() == label => Some(t),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        text.galley.job.sections[0].format.font_id.size,
+                        COMPACT_BUTTON_FONT_SIZE
+                    );
+                    let visible_center = capital_center(text);
+                    assert!(
+                        (visible_center - rect.center().y).abs() <= 0.75,
+                        "{label} glyph center {visible_center} vs control center {}",
+                        rect.center().y
+                    );
+                }
+            }
+        }
     }
 
     #[test]

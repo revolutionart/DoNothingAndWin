@@ -67,6 +67,8 @@ impl LayoutProbe {
                 | "--queued-install-preview" => Some(Page::Library),
                 "--page-preview=downloads" | "--library-queue-preview" => Some(Page::Downloads),
                 "--page-preview=library" => Some(Page::Library),
+                "--page-preview=free-offers" => Some(Page::FreeOffers),
+                "--page-preview=vault-cache" => Some(Page::VaultCache),
                 "--page-preview=engines" => Some(Page::Engines),
                 "--page-preview=projects" => Some(Page::Projects),
                 "--page-preview=workspace" => Some(Page::Workspace),
@@ -93,6 +95,15 @@ impl Workspace {
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
+            if std::env::args().any(|arg| arg == "--sidebar-update-preview") {
+                self.launcher_updates.available = Some(engine_workspace::launcher_update::Update {
+                    version: "Preview".into(),
+                    release_url: String::new(),
+                    download_url: String::new(),
+                    size: 0,
+                    sha256: None,
+                });
+            }
             if std::env::args().any(|arg| arg == "--scan-results-preview") {
                 self.scan.summary = "Scan complete: 21 projects; 2155 folders searched; 1 inaccessible folder; 1 linked folder skipped.".into();
                 self.scan.skipped_folders = vec![
@@ -241,6 +252,12 @@ impl Workspace {
             if let Some(page) = probe.page {
                 self.page = page;
             }
+            if probe.page == Some(Page::FreeOffers) {
+                self.preview_free_offers(ctx);
+            }
+            if probe.page == Some(Page::VaultCache) {
+                self.preview_vault_cache();
+            }
             if std::env::args().any(|a| a == "--plugin-download-activity-preview") {
                 self.preview_plugin_download_activity(probe.step > 0);
             }
@@ -275,6 +292,8 @@ impl Workspace {
                         Some(Page::Settings) => "settings",
                         Some(Page::Downloads) => "downloads",
                         Some(Page::Library) => "library",
+                        Some(Page::FreeOffers) => "free-offers",
+                        Some(Page::VaultCache) => "vault-cache",
                         Some(Page::Engines) => "engines",
                         Some(Page::Projects) => "projects",
                         _ =>

@@ -80,15 +80,20 @@ impl Workspace {
                 })
                 .show_ui(ui, |ui| {
                     for branch in branches.iter().rev() {
-                        ui.selectable_value(&mut d.branch, branch.clone(), format!("UE {branch}"));
+                        buttons::selectable_value(
+                            ui,
+                            &mut d.branch,
+                            branch.clone(),
+                            format!("UE {branch}"),
+                        );
                     }
                 });
         });
         ui.label("Choose your project's UE version. No installed engine is required.");
         ui.horizontal(|ui| {
             ui.label("Save to");
-            ui.selectable_value(&mut d.custom, false, "Plugin cache");
-            ui.selectable_value(&mut d.custom, true, "Custom folder");
+            buttons::selectable_value(ui, &mut d.custom, false, "Plugin cache");
+            buttons::selectable_value(ui, &mut d.custom, true, "Custom folder");
         });
         let location = if d.custom {
             dialog::folder(ui, &mut d.location);

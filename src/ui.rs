@@ -5,11 +5,13 @@ mod dialog;
 mod downloads;
 mod engine_options;
 mod engine_order;
+mod free_offers;
 mod launcher_updates;
 mod layout_probe;
 mod library;
 mod library_folders;
 mod library_queue;
+mod loading;
 mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
@@ -21,8 +23,10 @@ mod project_visibility;
 mod scrollbar;
 mod settings_flow;
 mod transfers;
+mod vault_cache;
 mod workspace_cache;
 use buttons::primary_button;
+use eframe::egui::emath::GuiRounding;
 use eframe::egui::{self, *};
 use engine_workspace::{
     epic::{self, Epic, Session},
@@ -44,6 +48,8 @@ enum Page {
     Workspace,
     Projects,
     Library,
+    FreeOffers,
+    VaultCache,
     Engines,
     Downloads,
     Settings,
@@ -147,6 +153,8 @@ pub struct Workspace {
     plugin_engine: Option<usize>,
     plugin_work: plugin_jobs::PluginWork,
     library: library::Library,
+    free_offers: free_offers::FreeOffers,
+    vault: vault_cache::Vault,
     downloads: downloads::Downloads,
     plugin_search: String,
     plugin_updates_only: bool,
@@ -196,6 +204,33 @@ fn search_field(
         .rect_filled(rect, BUTTON_RADIUS, color(theme.card));
     let has_text = !value.is_empty();
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
+    let font = FontId::proportional(COMPACT_BUTTON_FONT_SIZE * scale);
+    // Use one stable reference for input and hint so typing descenders does not
+    // move the baseline. Caret geometry follows the same shifted row.
+    let reference = ui
+        .painter()
+        .layout_no_wrap("Hg".into(), font.clone(), color(theme.text));
+    let offset = reference.rect.center().y - reference.mesh_bounds.center().y;
+    let align_input = |mut galley: std::sync::Arc<egui::Galley>| {
+        let adjusted = std::sync::Arc::make_mut(&mut galley);
+        for row in &mut adjusted.rows {
+            row.pos.y += offset;
+        }
+        adjusted.mesh_bounds = adjusted.mesh_bounds.translate(vec2(0., offset));
+        galley
+    };
+    let hint = align_input(ui.painter().layout_no_wrap(
+        hint.into(),
+        font.clone(),
+        color(theme.muted),
+    ));
+    let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, _width: f32| {
+        align_input(ui.painter().layout_no_wrap(
+            text.as_str().into(),
+            font.clone(),
+            color(theme.text),
+        ))
+    };
     let input_rect = Rect::from_min_max(
         rect.min + vec2(34., 3.) * scale,
         rect.max - vec2(if has_text { 30. } else { 8. }, 3.) * scale,
@@ -205,7 +240,8 @@ fn search_field(
         TextEdit::singleline(value)
             .id(slot.id.with("input"))
             .hint_text(hint)
-            .font(FontId::proportional(14. * scale))
+            .font(font.clone())
+            .layouter(&mut layouter)
             .text_color(color(theme.text))
             .vertical_align(Align::Center)
             .margin(Vec2::ZERO)
@@ -268,6 +304,14 @@ fn search_field(
     }
     response
 }
+fn highlighted_panel(theme: &Theme) -> Frame {
+    Frame::new()
+        .fill(color(theme.card))
+        .stroke(Stroke::new(1.5, color(theme.accent)))
+        .corner_radius(6.)
+        .inner_margin(22)
+}
+
 fn menu_frame(theme: &Theme) -> Frame {
     Frame::popup(&Style {
         visuals: theme.visuals(),
@@ -356,12 +400,11 @@ impl Workspace {
                 )
             })
             .unwrap_or_else(|| "Install engine".into());
-        c.text(
+        c.control_text(
             ui,
             x + (w - split) / 2.,
             y + h / 2.,
             &label,
-            COMPACT_BUTTON_FONT_SIZE,
             true,
             t.launch_foreground,
             Align2::CENTER_CENTER,
@@ -553,6 +596,8 @@ impl Workspace {
             engine_remove: None,
             cloning: Default::default(),
             backup: Default::default(),
+            free_offers: Default::default(),
+            vault: Default::default(),
             new_project: false,
             new_name: String::new(),
             new_path: String::new(),
@@ -917,12 +962,53 @@ impl Workspace {
             [(side - width) / 2., 54. - height / 2., width, height],
             [255, 255, 255],
         );
+        let free_offers_y = c.height - 265.;
+        let launcher_update_y = if self.prefs.show_free_offers_button {
+            free_offers_y - 46.
+        } else {
+            c.height - 251.
+        };
+        // Reserve space for the update notice above the bottom-anchored offer
+        // button, including at the smallest supported window height.
+        let nav_step = if self.launcher_updates.available.is_some() {
+            let last_index = if self.prefs.show_vault_cache_button {
+                4.
+            } else {
+                3.
+            };
+            ((launcher_update_y - 8. - 48. - 111.) / last_index).clamp(50., 58.)
+        } else {
+            58.
+        };
         for (page, label, icon, y) in [
             (Page::Workspace, "Workspace", Icon::Home, 111.),
-            (Page::Projects, "Projects", Icon::Folder, 169.),
-            (Page::Library, "Library", Icon::Cube, 227.),
-            (Page::Downloads, "Downloads", Icon::Download, 285.),
+            (Page::Projects, "Projects", Icon::Folder, 111. + nav_step),
+            (Page::Library, "Library", Icon::Cube, 111. + 2. * nav_step),
+            (
+                Page::Downloads,
+                "Downloads",
+                Icon::Download,
+                111. + 3. * nav_step,
+            ),
+            (
+                Page::VaultCache,
+                "Vault Cache",
+                Icon::Database,
+                111. + 4. * nav_step,
+            ),
+            (
+                Page::FreeOffers,
+                "Limited-Time Free",
+                Icon::Layers,
+                free_offers_y,
+            ),
         ] {
+            if page == Page::FreeOffers && !self.prefs.show_free_offers_button {
+                continue;
+            }
+            if page == Page::VaultCache && !self.prefs.show_vault_cache_button {
+                continue;
+            }
             let active = self.page == page;
             if active {
                 c.fill(ui, [10., y, side - 20., 48.], SIDEBAR_HIGHLIGHT, 7.);
@@ -952,9 +1038,13 @@ impl Workspace {
             c.text(
                 ui,
                 77.,
-                y + 24.,
+                if page == Page::FreeOffers && self.free_offer_countdown().is_some() {
+                    y + 16.
+                } else {
+                    y + 24.
+                },
                 label,
-                16.,
+                if page == Page::FreeOffers { 15. } else { 16. },
                 false,
                 if active || r.hovered() {
                     SIDEBAR_ON_HIGHLIGHT
@@ -963,6 +1053,24 @@ impl Workspace {
                 },
                 Align2::LEFT_CENTER,
             );
+            if page == Page::FreeOffers {
+                if let Some(countdown) = self.free_offer_countdown() {
+                    c.text(
+                        ui,
+                        77.,
+                        y + 35.,
+                        &countdown,
+                        11.,
+                        false,
+                        if active || r.hovered() {
+                            SIDEBAR_ON_HIGHLIGHT
+                        } else {
+                            self.theme.muted
+                        },
+                        Align2::LEFT_CENTER,
+                    );
+                }
+            }
             let update_hint = match page {
                 Page::Library if self.has_plugin_updates() => {
                     Some("Plugin updates available for your installed engines")
@@ -1005,18 +1113,7 @@ impl Workspace {
             {
                 let rect = c.rect([200., y + 14., 20., 20.]);
                 let mut indicator = ui.new_child(UiBuilder::new().max_rect(rect));
-                indicator.put(
-                    rect,
-                    egui::Spinner::new()
-                        .size(20.)
-                        .color(if active || r.hovered() {
-                            Color32::BLACK
-                        } else if self.theme.dark {
-                            Color32::WHITE
-                        } else {
-                            color(self.theme.text)
-                        }),
-                );
+                indicator.put(rect, loading::spinner(&self.theme));
                 ui.ctx().request_repaint();
             }
             if r.clone()
@@ -1038,7 +1135,7 @@ impl Workspace {
             && c.button(
                 ui,
                 "launcher-update-available",
-                [16., c.height - 251., 208., 36.],
+                [16., launcher_update_y, 208., 36.],
                 "Launcher update available",
                 None,
                 false,
@@ -1176,6 +1273,11 @@ impl Workspace {
             Page::Workspace => ("Workspace", "Everything you need to build."),
             Page::Projects => ("Projects", "Your work. Ready when you are."),
             Page::Library => ("Library", "Your assets, projects and plugins from Fab."),
+            Page::FreeOffers => ("Limited-Time Free", "What Fab is giving away right now."),
+            Page::VaultCache => (
+                "Vault Cache",
+                "Your cached downloads and the space they use.",
+            ),
             Page::Engines => (
                 "Engine versions",
                 "Releases, hotfixes and your installed engines.",
@@ -1210,6 +1312,7 @@ impl Workspace {
                 Page::Workspace | Page::Projects => 535.,
                 Page::Engines => 412.,
                 Page::Library => 350.,
+                Page::FreeOffers | Page::VaultCache => 0.,
                 Page::Downloads => 246.,
                 Page::Settings => 236.,
             };
@@ -1317,6 +1420,8 @@ impl Workspace {
                 self.project_section(ui, &c, ctx, header.divider_y);
             }
             Page::Library => self.library_page(ui, &c),
+            Page::FreeOffers => self.free_offers_page(ui, &c),
+            Page::VaultCache => self.vault_cache_page(ui, &c),
             Page::Engines => self.release_page(ui, &c, ctx),
             Page::Downloads => self.downloads_page(ui, &c),
             Page::Settings => self.settings_page(ui, &c, ctx),
@@ -1453,9 +1558,7 @@ impl Workspace {
                 if !status.is_empty() {
                     ui.put(
                         c.rect([271., c.height - 37., 22., 22.]),
-                        egui::Spinner::new()
-                            .size(22. * c.scale())
-                            .color(color(self.theme.text)),
+                        loading::spinner(&self.theme),
                     );
                     let storage_width = ui
                         .painter()
@@ -1764,13 +1867,8 @@ impl Workspace {
         )
         .on_hover_text("Manage project categories");
         if self.scan.receiver.is_some() {
-            ui.put(
-                c.rect(refresh_rect),
-                egui::Spinner::new()
-                    .size(32. * c.scale())
-                    .color(color(self.theme.accent)),
-            )
-            .on_hover_text("Refreshing configured project folders…");
+            ui.put(c.rect(refresh_rect), loading::spinner(&self.theme))
+                .on_hover_text("Refreshing configured project folders…");
         } else {
             if c.icon_button(
                 ui,
@@ -1789,67 +1887,23 @@ impl Workspace {
             )
             .on_hover_text("Refresh projects from configured folders and remove missing entries");
         }
-        c.boxed(
-            ui,
-            [search, top, search_w, 32.],
-            self.theme.card,
-            self.theme.border,
-            BUTTON_RADIUS,
-            1.,
-        );
-        c.icon(
-            ui,
-            Icon::Search,
-            search + 12.,
-            top + 8.,
-            16.,
-            self.theme.muted,
-        );
-        ui.put(
-            c.rect([
-                search + 36.,
-                top + 3.,
-                search_w - if self.search.is_empty() { 47. } else { 68. },
-                26.,
-            ]),
-            TextEdit::singleline(&mut self.search)
-                .id_salt(("project-search", compact))
-                .vertical_align(Align::Center)
-                .hint_text("Search projects...")
-                .font(FontId::proportional(14. * c.scale()))
-                .frame(false),
-        );
-        if !self.search.is_empty() {
-            let clear = ui
-                .interact(
-                    c.rect([search + search_w - 30., top + 3., 26., 26.]),
-                    Id::new(("clear-project-search", compact)),
-                    Sense::click(),
+        ui.scope_builder(
+            UiBuilder::new().max_rect(c.rect([search, top, search_w, 32.])),
+            |ui| {
+                if search_field(
+                    ui,
+                    &mut self.search,
+                    "Search projects…",
+                    search_w * c.sx,
+                    &self.theme,
+                    c.scale(),
                 )
-                .on_hover_cursor(CursorIcon::PointingHand);
-            c.text(
-                ui,
-                search + search_w - 17.,
-                top + 16.,
-                "×",
-                20.,
-                false,
-                if clear.hovered() {
-                    self.theme.text
-                } else {
-                    self.theme.muted
-                },
-                Align2::CENTER_CENTER,
-            );
-            if clear
-                .clone()
-                .on_hover_cursor(CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.search.clear();
-                self.project_scroll = 0.;
-            }
-        }
+                .changed()
+                {
+                    self.project_scroll = 0.;
+                }
+            },
+        );
         ui.scope_builder(
             UiBuilder::new().max_rect(c.rect([filter, top, filter_w, 32.])),
             |ui| {
@@ -1864,13 +1918,13 @@ impl Workspace {
                         &self.filter
                     })
                     .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(
-                                &mut self.filter,
-                                "All versions".into(),
-                                "All versions",
-                            )
-                            .clicked()
+                        if buttons::selectable_value(
+                            ui,
+                            &mut self.filter,
+                            "All versions".into(),
+                            "All versions",
+                        )
+                        .clicked()
                         {
                             self.project_scroll = 0.;
                         }
@@ -1892,9 +1946,13 @@ impl Workspace {
                             } else {
                                 &version
                             };
-                            if ui
-                                .selectable_value(&mut self.filter, version.clone(), label)
-                                .clicked()
+                            if buttons::selectable_value(
+                                ui,
+                                &mut self.filter,
+                                version.clone(),
+                                label,
+                            )
+                            .clicked()
                             {
                                 self.project_scroll = 0.;
                             }
@@ -1917,9 +1975,13 @@ impl Workspace {
                             ProjectSort::NameAscending,
                             ProjectSort::NameDescending,
                         ] {
-                            if ui
-                                .selectable_value(&mut self.project_sort, sort, sort.label())
-                                .changed()
+                            if buttons::selectable_value(
+                                ui,
+                                &mut self.project_sort,
+                                sort,
+                                sort.label(),
+                            )
+                            .changed()
                             {
                                 self.project_scroll = 0.;
                             }
@@ -2475,7 +2537,7 @@ impl Workspace {
                         )
                         .show_ui(ui, |ui| {
                             for (i, e) in self.engines.iter().enumerate() {
-                                ui.selectable_value(&mut self.new_engine, i, &e.version);
+                                buttons::selectable_value(ui, &mut self.new_engine, i, &e.version);
                             }
                         });
                     if self.demo {
@@ -2568,6 +2630,8 @@ impl eframe::App for Workspace {
         self.poll_library(ctx);
         self.poll_clone(ctx);
         self.poll_project_backup(ctx);
+        self.poll_free_offers(ctx);
+        self.poll_vault_cache(ctx);
         self.poll_project_finder();
         self.poll_launcher_updates(ctx);
         if self.launcher_updates.blocks_work() {
@@ -2724,6 +2788,29 @@ impl Canvas {
             color(tint),
         );
     }
+    fn control_text(
+        &self,
+        ui: &Ui,
+        x: f32,
+        y: f32,
+        text: &str,
+        bold: bool,
+        col: [u8; 3],
+        align: Align2,
+    ) {
+        let font = if bold {
+            buttons::primary_font(self.scale())
+        } else {
+            FontId::proportional(COMPACT_BUTTON_FONT_SIZE * self.scale())
+        };
+        let galley = buttons::centered_galley(
+            ui,
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), font, color(col)),
+        );
+        let origin = align.anchor_size(self.point(x, y), galley.size()).min;
+        ui.painter().galley(origin, galley, color(col));
+    }
     fn button(
         &self,
         ui: &mut Ui,
@@ -2775,6 +2862,18 @@ impl Canvas {
         let extra = (needed - r[2]).max(0.);
         r[0] -= extra / 2.;
         r[2] += extra;
+        // Paint and align contents against the same physical pixel rectangle.
+        // Otherwise frame tessellation can round a fractional edge separately
+        // from the text and leave identical buttons with different baselines.
+        let painted_rect = self
+            .rect(r)
+            .round_to_pixels(ui.painter().pixels_per_point());
+        r = [
+            (painted_rect.left() - self.origin.x) / self.sx,
+            (painted_rect.top() - self.origin.y) / self.sy,
+            painted_rect.width() / self.sx,
+            painted_rect.height() / self.sy,
+        ];
         let response = ui.interact(self.rect(r), Id::new(id), Sense::click());
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
         let update_colors = buttons::update_colors(
@@ -2847,23 +2946,21 @@ impl Canvas {
                 icon_size,
                 fg,
             );
-            self.text(
+            self.control_text(
                 ui,
                 left + icon_size + gap,
                 r[1] + r[3] / 2.,
                 label,
-                COMPACT_BUTTON_FONT_SIZE,
                 primary,
                 fg,
                 Align2::LEFT_CENTER,
             );
         } else {
-            self.text(
+            self.control_text(
                 ui,
                 r[0] + r[2] / 2.,
                 r[1] + r[3] / 2.,
                 label,
-                COMPACT_BUTTON_FONT_SIZE,
                 primary,
                 fg,
                 Align2::CENTER_CENTER,

@@ -55,17 +55,18 @@ impl Workspace {
         }
         .to_owned();
         ui.horizontal_wrapped(|ui| {
+            buttons::compact_style(ui);
             ui.label("Folder");
             AppComboBox::new(&self.theme, "library-folder-filter")
                 .width(210.)
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.library.organization.filter, FolderFilter::All, format!("All items ({})", count(&FolderFilter::All)));
-                    ui.selectable_value(&mut self.library.organization.filter, FolderFilter::Unfiled, format!("Unfiled ({})", count(&FolderFilter::Unfiled)));
+                    buttons::selectable_value(ui, &mut self.library.organization.filter, FolderFilter::All, format!("All items ({})", count(&FolderFilter::All)));
+                    buttons::selectable_value(ui, &mut self.library.organization.filter, FolderFilter::Unfiled, format!("Unfiled ({})", count(&FolderFilter::Unfiled)));
                     for name in org.folders() {
                         let filter = FolderFilter::Folder(name.clone());
                         let label = format!("{name} ({})", count(&filter));
-                        ui.selectable_value(&mut self.library.organization.filter, filter, label);
+                        buttons::selectable_value(ui, &mut self.library.organization.filter, filter, label);
                     }
                 });
             if ui.add(buttons::secondary_button("Manage folders")).clicked() {

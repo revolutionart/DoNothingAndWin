@@ -444,7 +444,12 @@ impl Workspace {
                             .width(130.)
                             .show_ui(ui, |ui| {
                                 for (i, e) in self.engines.iter().enumerate() {
-                                    ui.selectable_value(&mut next, i, format!("UE {}", e.version));
+                                    buttons::selectable_value(
+                                        ui,
+                                        &mut next,
+                                        i,
+                                        format!("UE {}", e.version),
+                                    );
                                 }
                             });
                     });
@@ -892,7 +897,7 @@ impl Workspace {
                     overlay.set_clip_rect(rect.intersect(ui.clip_rect()));
                     overlay.put(
                         Rect::from_center_size(center - vec2(0., 12.), vec2(32., 32.)),
-                        egui::Spinner::new().size(32.).color(color(t.accent)),
+                        loading::spinner(&t),
                     );
                     overlay.put(
                         Rect::from_min_max(
@@ -914,7 +919,7 @@ impl Workspace {
                             .show_progress(ui, &t, &self.textures, false);
                     } else {
                         ui.horizontal(|ui| {
-                            ui.add(Spinner::new().size(16.).color(color(t.accent)));
+                            ui.add(loading::spinner(&t));
                             ui.label(
                                 RichText::new(format!(
                                     "Checking plugin updates: {} of {} checked…",
@@ -972,7 +977,7 @@ fn plugin_cell(ui: &mut Ui, rect: Rect, text: RichText, tooltip: &str) {
 }
 
 // Secondary plugin actions use the same compact dimensions as primary actions.
-fn plugin_button(label: impl Into<String>) -> buttons::SecondaryButton<'static> {
+fn plugin_button(label: impl Into<String>) -> buttons::SecondaryButton {
     buttons::secondary_button(
         RichText::new(label.into()).font(FontId::proportional(COMPACT_BUTTON_FONT_SIZE)),
     )

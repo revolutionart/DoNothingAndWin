@@ -17,8 +17,10 @@ pub mod maintenance;
 
 pub mod fab;
 pub mod fab_listing;
+pub mod fab_offers;
 pub mod fab_search;
 pub mod library_organization;
+pub mod vault_cache;
 
 pub mod project_backup;
 pub mod project_clone;

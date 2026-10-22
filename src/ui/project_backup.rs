@@ -156,7 +156,7 @@ impl Workspace {
                             self.backup.progress.files_total
                         ));
                     } else {
-                        ui.spinner();
+                        ui.add(loading::spinner(&self.theme));
                     }
                     if !self.backup.progress.file.is_empty() {
                         ui.add(Label::new(&self.backup.progress.file).truncate())

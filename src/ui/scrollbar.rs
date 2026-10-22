@@ -134,23 +134,21 @@ impl AppComboBox {
         let popup_theme = theme.clone();
         ui.scope(|ui| {
             buttons::compact_style(ui);
-            // Center the label and arrow inside the shared 32-point button.
-            let content_height = self
-                .selected_text
-                .clone()
-                .into_galley(
+            let selected_text = buttons::centered_galley(
+                ui,
+                self.selected_text.into_galley(
                     ui,
                     Some(TextWrapMode::Extend),
                     f32::INFINITY,
                     TextStyle::Button,
-                )
-                .size()
-                .y
-                .max(ui.spacing().icon_width);
+                ),
+            );
+            // Center the label and arrow inside the shared 32-point button.
+            let content_height = selected_text.size().y.max(ui.spacing().icon_width);
             ui.spacing_mut().button_padding.y =
                 ((COMPACT_BUTTON_HEIGHT - content_height) / 2.).max(0.);
             self.combo
-                .selected_text(self.selected_text)
+                .selected_text(selected_text)
                 .popup_style(egui::style::StyleModifier::new(move |style| {
                     style_menu_settings(style, &popup_theme);
                     apply_style(style, &popup_theme)

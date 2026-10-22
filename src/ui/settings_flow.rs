@@ -178,11 +178,13 @@ impl Workspace {
                     if ui.add(buttons::secondary_button("Add project folder")).on_hover_text("Choose a folder containing one or many projects, including projects in subfolders.").on_hover_cursor(CursorIcon::PointingHand).clicked(){if let Some(p)=rfd::FileDialog::new().set_title("Choose a folder containing one or more Unreal projects").pick_folder(){self.add_project_root(p,ctx);}}
                     if ui.add(buttons::secondary_button("Find projects on this PC")).clicked(){self.open_project_finder();}
                     if ui.add_enabled(self.scan.receiver.is_none(),buttons::secondary_button("Rescan folders")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.start_scan(ctx.clone(),None);}
-                    if self.scan.receiver.is_some(){ui.spinner();ui.label("Scanning project folders…");}
+                    if self.scan.receiver.is_some(){ui.add(loading::spinner(&theme));ui.label("Scanning project folders…");}
                 });
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Appearance");
+                if downloads::toggle(ui, &theme, &mut self.prefs.show_vault_cache_button, "Show Vault Cache in sidebar", "View the cache folder configured in Download settings, including sizes and cached-file removal.") { self.persist(); }
+                if downloads::toggle(ui, &theme, &mut self.prefs.show_free_offers_button, "Show Limited-Time Free in sidebar", "Show the Fab limited-time free offers button in the sidebar.") { self.persist(); }
                 ui.horizontal_wrapped(|ui|{
                     if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();self.theme.apply(ctx);self.persist();}
                     if ui.add(buttons::secondary_button("Daylight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();self.theme.apply(ctx);self.persist();}
@@ -215,7 +217,7 @@ impl Workspace {
                         .width(205.)
                         .show_ui(ui, |ui| {
                             for (days, label) in [(7, "7 days (default)"), (14, "14 days"), (30, "30 days"), (0, "Until manually deleted")] {
-                                ui.selectable_value(&mut self.prefs.plugin_backup_days, days, label);
+                                buttons::selectable_value(ui, &mut self.prefs.plugin_backup_days, days, label);
                             }
                         });
                 });

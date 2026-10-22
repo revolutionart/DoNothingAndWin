@@ -123,7 +123,7 @@ impl Workspace {
                     ui.label(&self.cloning.status);
                 }
                 if self.cloning.busy() {
-                    ui.spinner();
+                    ui.add(loading::spinner(&self.theme));
                     ui.label("You can close this dialog; cloning will continue in the background.");
                 }
                 start = dialog::footer(

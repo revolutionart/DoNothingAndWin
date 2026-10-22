@@ -257,7 +257,7 @@ impl Workspace {
                 });
                 if self.project_finder.busy() {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().color(color(theme.accent)));
+                        ui.add(loading::spinner(&theme));
                         ui.label(format!(
                             "{} · {} folders searched · {} projects found…",
                             if self.project_finder.full_scan {

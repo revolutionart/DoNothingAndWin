@@ -28,7 +28,7 @@ impl Workspace {
         if !backgrounded {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.heading("Preparing launcher update");
-                ui.spinner();
+                ui.add(loading::spinner(&self.theme));
                 ui.label("Verifying the installer and saving your settings...");
             });
         }

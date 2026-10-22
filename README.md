@@ -58,7 +58,7 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.3.0** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/DoNothingAndWin-Setup-1.3.0.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/DoNothingAndWin-Portable-1.3.0.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.0/SHA256SUMS.txt)
+Current release: **1.3.1** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/DoNothingAndWin-Setup-1.3.1.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/DoNothingAndWin-Portable-1.3.1.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.

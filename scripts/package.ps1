@@ -6,6 +6,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
+& (Join-Path $PSScriptRoot 'check-ui-controls.ps1')
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 if ($SkipBuild) {
     if (-not $InstalledExe -or -not $PortableExe) {

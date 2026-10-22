@@ -297,7 +297,7 @@ impl Workspace {
                     }
                 }
                 if busy {
-                    ui.spinner();
+                    ui.add(loading::spinner(&theme));
                     if self.plugin_work.progress.is_some() {
                         self.plugin_work
                             .show_progress(ui, &theme, &self.textures, false);

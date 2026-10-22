@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.3.1 - 2026-10-23
+
+### Limited-Time Free
+
+- Add a **Limited-Time Free** page showing Fab's current offers, end dates, countdowns and library ownership. Open an offer on Fab to claim it.
+- Refresh offers automatically, with manual refresh and clear notices when saved information needs checking. Group the offer information and deadline in a blue-outlined panel matching Downloads.
+- Place the sidebar button directly above the divider over Documentation. Hide the countdown or turn off the sidebar button in Settings; the button is enabled by default.
+
+### Vault Cache
+
+- Add a **Vault Cache** page using the cache location selected in Download settings, with total size, per-item sizes, search and sorting.
+- Match cached items to library artwork and titles where possible. Keep actions in right-click and three-dot menus, including opening folders, viewing matched library items and removing cached data with confirmation.
+- Hide internal database files from item cards. Explain shared download chunks and when they can be removed; removing cached data does not uninstall engines, plugins or projects.
+- Add a Settings toggle for the Vault Cache sidebar button, enabled by default.
+
+### Interface
+
+- Align shared button and dropdown labels, icons and search fields consistently, including at fractional Windows display scaling.
+- Match Library folder controls and **Show hidden** text to the compact control style.
+- Use one small circular loader throughout the launcher, white in dark theme and dark in light theme. Add a build check to prevent separate loader implementations.
+
+### Known limitations
+
+- Fab offers must be claimed on Fab. Availability and ownership information depend on Fab's services; saved offers are marked when they need checking.
+- Some cached items cannot be matched to a library listing. Cache removal may require downloading the data again; wait for downloads in both launchers to finish before clearing it.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.3.0 - 2026-10-21
 
 ### Plugin downloads
