@@ -843,6 +843,8 @@ impl Workspace {
         let before = self.prefs.downloads.clone();
         let old_root = self.prefs.install_root.clone();
         let old_cache = self.prefs.fab_cache.clone();
+        let old_paths = self.prefs.vault_cache_paths.clone();
+        let old_ask = self.prefs.ask_vault_cache;
         self.install_preferences(ui, t);
         if ui.available_width() > 900. {
             ui.columns(2, |cols| {
@@ -853,14 +855,99 @@ impl Workspace {
             self.speed_preferences(ui, t);
             self.location_preferences(ui, t);
         }
+        if self.layout_probe.is_some() && std::env::args().any(|arg| arg == "--multi-cache-preview")
+        {
+            ui.scroll_to_cursor(Some(Align::Min));
+        }
         panel(
             ui,
             t,
             "Fab asset cache",
             Some("Reuse verified downloads for assets and plugins."),
             |ui| {
-                ui.label("Cache directory");
+                ui.label("Default cache directory");
                 dialog::folder(ui, &mut self.prefs.fab_cache);
+                let roots = self.prefs.vault_cache_roots();
+                let mut make_default = None;
+                let mut remove_path = None;
+                for root in roots.iter().skip(1) {
+                    ui.horizontal(|ui| {
+                        let label_width = (ui.available_width() - 240.).max(80.);
+                        let text = RichText::new(dialog::display_path(root))
+                            .size(COMPACT_BUTTON_FONT_SIZE)
+                            .into();
+                        let text: WidgetText = text;
+                        let galley = buttons::centered_galley(
+                            ui,
+                            text.into_galley(
+                                ui,
+                                Some(TextWrapMode::Truncate),
+                                label_width,
+                                TextStyle::Button,
+                            ),
+                        );
+                        let (_, path_rect) =
+                            ui.allocate_space(vec2(label_width, COMPACT_BUTTON_HEIGHT));
+                        ui.painter().galley(
+                            pos2(
+                                path_rect.left(),
+                                path_rect.center().y - galley.size().y / 2.,
+                            ),
+                            galley,
+                            color(t.text),
+                        );
+                        let response = ui
+                            .interact(path_rect, ui.id().with(root), Sense::hover())
+                            .on_hover_text(root);
+                        response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, root));
+                        if ui
+                            .add(
+                                buttons::secondary_button("Make default")
+                                    .min_size(vec2(120., COMPACT_BUTTON_HEIGHT)),
+                            )
+                            .clicked()
+                        {
+                            make_default = Some(root.clone());
+                        }
+                        if ui
+                            .add(
+                                buttons::secondary_button("Remove")
+                                    .min_size(vec2(80., COMPACT_BUTTON_HEIGHT)),
+                            )
+                            .on_hover_text(
+                                "Remove this location from the list. Cached files stay on disk.",
+                            )
+                            .clicked()
+                        {
+                            remove_path = Some(root.clone());
+                        }
+                    });
+                }
+                if let Some(root) = make_default {
+                    self.prefs.set_default_vault_cache(&root);
+                }
+                if let Some(root) = remove_path {
+                    self.prefs.vault_cache_paths.retain(|p| p != &root);
+                }
+                if ui
+                    .add(buttons::secondary_button("Add cache folder"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Add a Vault Cache location")
+                        .pick_folder()
+                    {
+                        if let Err(error) = self.prefs.add_vault_cache(&path.to_string_lossy()) {
+                            self.notify(error);
+                        }
+                    }
+                }
+                ui.add(buttons::checkbox(
+                    &mut self.prefs.ask_vault_cache,
+                    "Ask which cache to use for Download only",
+                    t,
+                ));
+                ui.label("With multiple locations, choose where each plugin download is saved. Verified download chunks can be reused from every listed cache. Removing a location does not delete its files.");
                 ui.horizontal(|ui| {
                     if icon_button(ui, t, "Reset", Icon::Reset) {
                         self.prefs.fab_cache = storage::Preferences::default().fab_cache;
@@ -880,10 +967,14 @@ impl Workspace {
             let defaults = storage::Preferences::default();
             self.prefs.install_root = defaults.install_root;
             self.prefs.fab_cache = defaults.fab_cache;
+            self.prefs.vault_cache_paths = defaults.vault_cache_paths;
+            self.prefs.ask_vault_cache = defaults.ask_vault_cache;
         }
         if before != self.prefs.downloads
             || old_root != self.prefs.install_root
             || old_cache != self.prefs.fab_cache
+            || old_paths != self.prefs.vault_cache_paths
+            || old_ask != self.prefs.ask_vault_cache
         {
             self.prefs.projects = self.projects.clone();
             self.prefs.launch_engine = self.launch_path.clone();

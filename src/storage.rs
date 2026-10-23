@@ -149,6 +149,14 @@ mod activity_tests {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub library_sort: crate::fab_listing::Sort,
+    pub project_sort: Option<String>,
+    // Earlier test builds saved the old key as true by default. Only this new
+    // key represents an intentional opt-in; the old value must not enable work.
+    #[serde(rename = "verify_cache_on_startup_opt_in")]
+    pub verify_cache_on_startup: bool,
+    pub startup_page: String,
+    pub last_view: SavedView,
     pub library_organization:
         std::collections::HashMap<String, crate::library_organization::Organization>,
     pub hidden_projects: std::collections::HashSet<String>,
@@ -181,12 +189,19 @@ pub struct Preferences {
     pub display_name: String,
     pub install_root: String,
     pub fab_cache: String,
+    pub vault_cache_paths: Vec<String>,
+    pub ask_vault_cache: bool,
     pub project_roots: Vec<String>,
     pub manual_projects: Vec<String>,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            library_sort: Default::default(),
+            project_sort: None,
+            verify_cache_on_startup: false,
+            startup_page: "last".into(),
+            last_view: SavedView::default(),
             library_organization: Default::default(),
             hidden_projects: Default::default(),
             project_categories: vec![],
@@ -216,13 +231,131 @@ impl Default for Preferences {
             display_name: "Developer".into(),
             install_root: "C:/Program Files/Epic Games".into(),
             fab_cache: "C:/ProgramData/Epic/EpicGamesLauncher/VaultCache".into(),
+            vault_cache_paths: vec![],
+            ask_vault_cache: true,
             project_roots: vec![],
             manual_projects: vec![],
         }
     }
 }
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedView {
+    pub page: String,
+    pub pinned_only: bool,
+    pub category: Option<String>,
+    pub project_search: String,
+    pub project_engine: String,
+    pub project_sort: String,
+    pub project_list: bool,
+}
+
+impl Preferences {
+    pub fn vault_cache_roots(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        std::iter::once(&self.fab_cache)
+            .chain(&self.vault_cache_paths)
+            .filter(|path| !path.trim().is_empty())
+            .filter(|path| seen.insert(crate::discovery::path_key(Path::new(path))))
+            .cloned()
+            .collect()
+    }
+
+    pub fn add_vault_cache(&mut self, path: &str) -> Result<(), String> {
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            return Err("Choose an absolute cache folder.".into());
+        }
+        crate::installer::no_links(path)?;
+        if self.vault_cache_roots().iter().any(|root| {
+            crate::discovery::inside(path, Path::new(root))
+                || crate::discovery::inside(Path::new(root), path)
+        }) {
+            return Err("This folder is already listed or overlaps another cache location.".into());
+        }
+        self.vault_cache_paths
+            .push(path.to_string_lossy().into_owned());
+        Ok(())
+    }
+
+    pub fn set_default_vault_cache(&mut self, path: &str) {
+        let key = crate::discovery::path_key(Path::new(path));
+        let mut roots = self.vault_cache_roots();
+        if !roots
+            .iter()
+            .any(|root| crate::discovery::path_key(Path::new(root)) == key)
+        {
+            return;
+        }
+        roots.retain(|root| crate::discovery::path_key(Path::new(root)) != key);
+        self.fab_cache = path.into();
+        self.vault_cache_paths = roots;
+    }
+
+    pub fn vault_download_root(&self, selected: &str) -> Option<String> {
+        let roots = self.vault_cache_roots();
+        roots
+            .iter()
+            .find(|root| *root == selected)
+            .cloned()
+            .or_else(|| {
+                (roots.len() == 1 || !self.ask_vault_cache)
+                    .then(|| roots.first().cloned())
+                    .flatten()
+            })
+    }
+}
 pub fn load_preferences() -> Preferences {
     read_json(&data_dir().join("preferences.json")).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod cache_location_tests {
+    use super::*;
+    #[test]
+    fn cache_locations_migrate_deduplicate_and_switch_default_without_deleting_files() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("keep"), "first cache").unwrap();
+        let mut prefs: Preferences =
+            serde_json::from_value(serde_json::json!({"fab_cache":first.path()})).unwrap();
+        assert!(prefs.ask_vault_cache);
+        assert_eq!(prefs.vault_cache_roots().len(), 1);
+        prefs
+            .add_vault_cache(&second.path().to_string_lossy())
+            .unwrap();
+        assert!(
+            prefs
+                .add_vault_cache(&second.path().to_string_lossy())
+                .is_err()
+        );
+        assert!(
+            prefs
+                .add_vault_cache(&first.path().join("nested").to_string_lossy())
+                .is_err()
+        );
+        assert!(prefs.add_vault_cache("relative").is_err());
+        assert!(
+            prefs.vault_download_root("").is_none(),
+            "Multiple caches require an explicit destination"
+        );
+        let chosen = second.path().to_string_lossy().into_owned();
+        assert_eq!(prefs.vault_download_root(&chosen), Some(chosen.clone()));
+        prefs.set_default_vault_cache(&chosen);
+        assert_eq!(prefs.fab_cache, chosen);
+        assert_eq!(prefs.vault_cache_roots().len(), 2);
+        prefs.ask_vault_cache = false;
+        assert_eq!(prefs.vault_download_root(""), Some(chosen));
+        prefs.vault_cache_paths.clear();
+        assert_eq!(
+            fs::read_to_string(first.path().join("keep")).unwrap(),
+            "first cache"
+        );
+        let reloaded: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(reloaded.vault_cache_roots(), prefs.vault_cache_roots());
+    }
 }
 pub fn save_preferences(p: &Preferences) -> Result<(), String> {
     write_json(&data_dir().join("preferences.json"), p)
@@ -347,6 +480,32 @@ fn protect(_bytes: &[u8], _encrypt: bool) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_verification_requires_explicit_startup_opt_in() {
+        assert!(!Preferences::default().verify_cache_on_startup);
+        for saved in [
+            r#"{}"#,
+            r#"{"verify_cache_on_startup":true,"theme":"light"}"#,
+            r#"{"verify_cache_on_startup":false,"theme":"light"}"#,
+        ] {
+            let prefs: Preferences = serde_json::from_str(saved).unwrap();
+            assert!(!prefs.verify_cache_on_startup);
+            if saved.contains("theme") {
+                assert_eq!(prefs.theme, "light");
+            }
+        }
+        for enabled in [true, false] {
+            let prefs = Preferences {
+                verify_cache_on_startup: enabled,
+                ..Preferences::default()
+            };
+            let saved = serde_json::to_value(&prefs).unwrap();
+            assert_eq!(saved["verify_cache_on_startup_opt_in"], enabled);
+            assert!(saved.get("verify_cache_on_startup").is_none());
+            let restored: Preferences = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.verify_cache_on_startup, enabled);
+        }
+    }
     #[test]
     fn atomic_overwrite_is_valid() {
         let d = tempfile::tempdir().unwrap();

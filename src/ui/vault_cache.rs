@@ -8,7 +8,8 @@ enum Event {
 }
 #[derive(Default)]
 pub(super) struct Vault {
-    root: String,
+    roots: Vec<String>,
+    root_filter: String,
     inventory: Option<Inventory>,
     rx: Option<Receiver<Event>>,
     error: Option<String>,
@@ -31,7 +32,7 @@ fn size(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
-fn dots(ui: &mut Ui, theme: &Theme) -> Response {
+pub(super) fn dots(ui: &mut Ui, theme: &Theme) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(32., 32.), Sense::click());
     let hovered = response.hovered();
     ui.painter().rect_filled(
@@ -64,10 +65,21 @@ fn dots(ui: &mut Ui, theme: &Theme) -> Response {
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text("More options")
 }
+impl Vault {
+    pub(super) fn preview_entries(&self) -> Vec<Entry> {
+        self.inventory
+            .as_ref()
+            .map(|i| i.entries.clone())
+            .unwrap_or_default()
+    }
+    pub(super) fn removing(&self) -> bool {
+        self.remove_rx.is_some() || self.rx.is_some()
+    }
+}
 impl Workspace {
     pub(super) fn preview_vault_cache(&mut self) {
         self.demo = true;
-        self.vault.root = self.prefs.fab_cache.clone();
+        self.vault.roots = self.prefs.vault_cache_roots();
         if std::env::args().any(|a| a == "--search-filled-preview") {
             self.vault.search = "PCG".into();
         }
@@ -80,8 +92,10 @@ impl Workspace {
                 ("Unknown package", 2_500_000_000),
             ]
             .into_iter()
-            .map(|(name, bytes)| Entry {
-                path: Path::new(&self.prefs.fab_cache).join(name),
+            .enumerate()
+            .map(|(index, (name, bytes))| Entry {
+                root: PathBuf::from(&self.vault.roots[index % self.vault.roots.len()]),
+                path: Path::new(&self.vault.roots[index % self.vault.roots.len()]).join(name),
                 title: name.into(),
                 bytes,
                 identities: vec![],
@@ -96,16 +110,16 @@ impl Workspace {
         if self.vault.rx.is_some() || self.vault.remove_rx.is_some() {
             return;
         }
-        self.vault.root = self.prefs.fab_cache.clone();
+        self.vault.roots = self.prefs.vault_cache_roots();
         self.vault.error = None;
         self.vault.progress = "Reading cache folders…".into();
-        let root = PathBuf::from(&self.vault.root);
+        let roots: Vec<_> = self.vault.roots.iter().map(PathBuf::from).collect();
         let (tx, rx) = mpsc::channel();
         self.vault.rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let mut last = Instant::now();
-            let result = vault_cache::scan(&root, |path| {
+            let result = vault_cache::scan_roots(&roots, |path| {
                 if last.elapsed() >= Duration::from_millis(150) {
                     let _ = tx.send(Event::Progress(path.to_string_lossy().into_owned()));
                     ctx.request_repaint();
@@ -137,7 +151,7 @@ impl Workspace {
                 Event::Progress(p) => self.vault.progress = p,
                 Event::Finished(result) => {
                     finished = true;
-                    if self.vault.root == self.prefs.fab_cache {
+                    if self.vault.roots == self.prefs.vault_cache_roots() {
                         match result {
                             Ok(inv) => {
                                 self.vault.inventory = Some(inv);
@@ -165,6 +179,9 @@ impl Workspace {
             })
         {
             self.vault.remove_rx = None;
+            if let Some(entry) = &self.vault.confirm {
+                self.cache_health.forget(&entry.path);
+            }
             self.vault.confirm = None;
             match result {
                 Ok(()) => self.notify(
@@ -175,12 +192,12 @@ impl Workspace {
             self.vault.inventory = None;
             self.scan_vault_cache(ctx);
         }
-        if self.vault.root != self.prefs.fab_cache && self.vault.remove_rx.is_none() {
+        if self.vault.roots != self.prefs.vault_cache_roots() && self.vault.remove_rx.is_none() {
             self.vault.inventory = None;
             self.vault.confirm = None;
             self.vault.error = None;
             if self.vault.rx.is_none() {
-                self.vault.root = self.prefs.fab_cache.clone();
+                self.vault.roots = self.prefs.vault_cache_roots();
             }
         }
         if self.page == Page::VaultCache
@@ -200,6 +217,10 @@ impl Workspace {
     }
     pub(super) fn vault_cache_page(&mut self, ui: &mut Ui, c: &Canvas) {
         let theme = self.theme.clone();
+        let cache_roots = self.prefs.vault_cache_roots();
+        if !self.vault.root_filter.is_empty() && !cache_roots.contains(&self.vault.root_filter) {
+            self.vault.root_filter.clear();
+        }
         let scanning = self.vault.rx.is_some()
             || (self.layout_probe.is_some() && std::env::args().any(|a| a == "--loading-preview"));
         let top = PageHeaderLayout::new().divider_y + 18.;
@@ -234,6 +255,9 @@ impl Workspace {
                     .color(color(theme.text)),
                 );
                 let menu = dots(ui, &theme);
+                if std::env::args().any(|a| a == "--cache-health-menu-preview") {
+                    Popup::open_id(ui.ctx(), menu.id.with("popup"));
+                }
                 Popup::menu(&menu).frame(menu_frame(&theme)).show(|ui| {
                     style_menu(ui, &theme);
                     if ui
@@ -244,14 +268,38 @@ impl Workspace {
                         ui.close();
                     }
                     if ui
-                        .add(buttons::secondary_button("Show cache folder"))
+                        .add(buttons::secondary_button("Verify cache now"))
                         .clicked()
                     {
-                        if let Err(e) = platform::open_external(&self.prefs.fab_cache) {
-                            self.notify(e);
-                        }
+                        self.start_cache_verification(
+                            engine_workspace::vault_health::Selection::All,
+                            false,
+                            ui.ctx(),
+                        );
                         ui.close();
                     }
+                    if self.cache_health.busy()
+                        && ui
+                            .add(buttons::secondary_button("Stop verification"))
+                            .clicked()
+                    {
+                        self.cache_health.cancel();
+                        ui.close();
+                    }
+                    ui.menu_button("Show cache folder", |ui| {
+                        style_menu(ui, &theme);
+                        for root in &cache_roots {
+                            if ui
+                                .add(buttons::secondary_button(dialog::display_path(root)))
+                                .clicked()
+                            {
+                                if let Err(error) = platform::open_external(root) {
+                                    self.notify(error);
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui
                         .add(buttons::secondary_button("Download settings"))
                         .clicked()
@@ -263,16 +311,57 @@ impl Workspace {
                 });
             });
             ui.add(
-                Label::new(RichText::new(&self.prefs.fab_cache).color(color(theme.muted)))
-                    .truncate(),
+                Label::new(
+                    RichText::new(if cache_roots.len() == 1 {
+                        self.prefs.fab_cache.clone()
+                    } else {
+                        format!(
+                            "{} cache locations • Total across all locations",
+                            cache_roots.len()
+                        )
+                    })
+                    .color(color(theme.muted)),
+                )
+                .truncate(),
             )
-            .on_hover_text(&self.prefs.fab_cache);
+            .on_hover_text(cache_roots.join("\n"));
+            let filter_controls_width = if cache_roots.len() > 1 {
+                240. + 160. + 2. * ui.spacing().item_spacing.x
+            } else {
+                160. + ui.spacing().item_spacing.x
+            };
+            let search_width = (ui.available_width() - filter_controls_width).clamp(140., 280.);
             ui.horizontal_wrapped(|ui| {
+                if cache_roots.len() > 1 {
+                    AppComboBox::new(&theme, "vault-location")
+                        .bounded_width(240.)
+                        .selected_text(if self.vault.root_filter.is_empty() {
+                            "All cache locations".into()
+                        } else {
+                            dialog::display_path(&self.vault.root_filter)
+                        })
+                        .show_ui(ui, |ui| {
+                            buttons::selectable_value(
+                                ui,
+                                &mut self.vault.root_filter,
+                                String::new(),
+                                "All cache locations",
+                            );
+                            for root in &cache_roots {
+                                buttons::selectable_value(
+                                    ui,
+                                    &mut self.vault.root_filter,
+                                    root.clone(),
+                                    dialog::display_path(root),
+                                );
+                            }
+                        });
+                }
                 search_field(
                     ui,
                     &mut self.vault.search,
                     "Search cache…",
-                    280.,
+                    search_width,
                     &theme,
                     1.,
                 );
@@ -349,8 +438,13 @@ impl Workspace {
                 .collect();
             let search = self.vault.search.to_lowercase();
             entries.retain(|(e, _, title)| {
-                title.to_lowercase().contains(&search)
-                    || e.path.to_string_lossy().to_lowercase().contains(&search)
+                (self.vault.root_filter.is_empty()
+                    || engine_workspace::discovery::path_key(&e.root)
+                        == engine_workspace::discovery::path_key(Path::new(
+                            &self.vault.root_filter,
+                        )))
+                    && (title.to_lowercase().contains(&search)
+                        || e.path.to_string_lossy().to_lowercase().contains(&search))
             });
             if self.vault.sort_name {
                 entries.sort_by_cached_key(|(_, _, title)| title.to_lowercase());
@@ -420,7 +514,7 @@ impl Workspace {
         ui.push_id(&entry.path, |ui| {
             ui.allocate_ui_with_layout(vec2(width, 0.), Layout::top_down(Align::Min), |ui| {
                 let response = ui.interact(
-                    Rect::from_min_size(ui.cursor().min, vec2(width, (width - 2.) * 0.54 + 100.)),
+                    Rect::from_min_size(ui.cursor().min, vec2(width, (width - 2.) * 0.54 + 124.)),
                     ui.id().with("context"),
                     Sense::click(),
                 );
@@ -491,6 +585,7 @@ impl Workspace {
                                     .truncate(),
                             )
                             .on_hover_text(title);
+                            self.cache_entry_health(ui, &entry.path);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(format!(
@@ -502,6 +597,12 @@ impl Workspace {
                                 );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let menu = dots(ui, theme);
+                                    if std::env::args()
+                                        .any(|a| a == "--cache-health-entry-menu-preview")
+                                        && title == "PCGEx"
+                                    {
+                                        Popup::open_id(ui.ctx(), menu.id.with("popup"));
+                                    }
                                     Popup::menu(&menu)
                                         .frame(menu_frame(theme))
                                         .show(|ui| self.vault_entry_menu(ui, entry, item));
@@ -523,6 +624,17 @@ impl Workspace {
         item: Option<&engine_workspace::fab::Item>,
     ) {
         style_menu(ui, &self.theme);
+        if ui
+            .add(buttons::secondary_button("Verify cached files"))
+            .clicked()
+        {
+            self.start_cache_verification(
+                engine_workspace::vault_health::Selection::Entry(entry.path.clone()),
+                false,
+                ui.ctx(),
+            );
+            ui.close();
+        }
         if entry.title == "Shared download chunks"
             && ui
                 .add(buttons::secondary_button("About shared download chunks"))
@@ -604,8 +716,15 @@ impl Workspace {
                 }
             },
         );
-        if remove && self.vault.root == self.prefs.fab_cache {
-            let root = PathBuf::from(&self.vault.root);
+        if remove
+            && self.prefs.vault_cache_roots().iter().any(|root| {
+                engine_workspace::discovery::path_key(Path::new(root))
+                    == engine_workspace::discovery::path_key(&entry.root)
+            })
+        {
+            self.cache_health.cancel();
+            self.cache_health.forget(&entry.path);
+            let root = entry.root.clone();
             let (tx, rx) = mpsc::channel();
             self.vault.remove_rx = Some(rx);
             let ctx = ctx.clone();

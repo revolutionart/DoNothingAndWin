@@ -16,13 +16,15 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Sort {
-    #[default]
-    LatestUpdate,
     LatestAdded,
     NameAscending,
     NameDescending,
+    #[default]
+    #[serde(other)]
+    LatestUpdate,
 }
 impl Sort {
     pub fn label(self) -> &'static str {

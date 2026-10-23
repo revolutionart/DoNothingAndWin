@@ -142,14 +142,8 @@ impl Workspace {
             ui.style_mut().text_styles.insert(TextStyle::Heading,FontId::proportional(23.));
             AppScrollArea::vertical(&theme).inner_margin(16.).id_salt("settings-flow").auto_shrink([false,true]).show(ui,|ui|{
                 ui.set_width(ui.available_width());ui.spacing_mut().item_spacing=vec2(14.,14.);ui.spacing_mut().button_padding=vec2(18.,10.);
-                settings_section(ui,&theme,|ui|{
-                ui.heading("Epic account");
-                ui.horizontal_wrapped(|ui|{
-                    ui.label(self.session.as_ref().map(|s|s.display_name.as_str()).unwrap_or("Not connected"));
-                    if self.session.is_some(){if ui.add(buttons::secondary_button("Sign out")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.sign_out_account();}}else if ui.add(buttons::secondary_button("Sign in with Epic")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.login=true;}
-                });
-                ui.label("Each developer signs in with their own account. Sessions are encrypted for this Windows user.");
-                });
+                self.account_community_row(ui,&theme);
+                settings_section(ui,&theme,|ui| { self.startup_preferences(ui, &theme); });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Project folders");
                 if downloads::toggle(ui, &theme, &mut self.prefs.scan_projects_on_startup, "Scan project folders on startup", "Search configured project folders when the app starts. Turn off to use Rescan folders or the project refresh button manually.") { self.persist(); }
@@ -189,6 +183,11 @@ impl Workspace {
                     if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();self.theme.apply(ctx);self.persist();}
                     if ui.add(buttons::secondary_button("Daylight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::light();self.prefs.theme="light".into();self.theme.apply(ctx);self.persist();}
                 });
+                });
+                settings_section(ui,&theme,|ui|{
+                    let heading = ui.heading("Vault Cache verification");
+                    if std::env::args().any(|a|a == "--cache-health-settings-preview") { heading.scroll_to_me(Some(Align::TOP)); }
+                    self.cache_health_controls(ui);
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Engine release checks");ui.label("Check for available engine releases while the launcher is open. Updates are always installed manually.");
@@ -245,7 +244,7 @@ impl Workspace {
     }
 }
 
-fn settings_section(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui)) {
+pub(super) fn settings_section(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui)) -> Response {
     Frame::new()
         .fill(color(theme.card))
         .stroke(Stroke::new(1., color(theme.border)))
@@ -254,5 +253,6 @@ fn settings_section(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui)) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             body(ui);
-        });
+        })
+        .response
 }

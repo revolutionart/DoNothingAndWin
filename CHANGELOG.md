@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.2 - 2026-10-23
+
+### Startup and preferences
+
+- Remember the last open page by default, including the Projects tab, Pinned/category selection, search, engine filter and grid/list view. Choose a fixed startup page in Settings if preferred.
+- Remember Library sorting, including **Latest added** and **Latest update**, and Projects sorting, including **Recently opened**, independently of the chosen startup page.
+- Add large **Discord support** and **GitHub repository** buttons beside the Epic account section in Settings.
+
+### Library and Vault Cache
+
+- Detect `.uproject` files in package manifests for all **ASSET_PACK** items. Complete project packages automatically use **Create project**; prevent importing those packages into an existing project.
+- Add multiple Vault Cache locations in Download settings, choose a default, and optionally ask which configured location to use for each download. Browse all cache locations together or filter to one location.
+- Reuse valid shared download chunks across configured cache locations.
+- Add read-only cache verification with **Healthy**, **Needs redownload**, **Not verified** and **Metadata only** results. Verify manually from Settings, Vault Cache menus, or a Library item's right-click menu, including its type icon.
+- Keep verification manual by default. An optional Settings switch enables a startup check at most once a day. Verification runs without a speed cap, continues while browsing, and waits during downloads and file operations.
+- Show current files, byte/file progress, results, Details and Stop controls while verification runs. Retain each item's result independently so downloading another asset does not clear unrelated health results.
+- Check older plugin downloads against their exact original package manifest when available. Keep metadata-only listing folders separate from downloaded payloads.
+
+### Known limitations
+
+- Package classification and recovery of missing verification metadata depend on Epic's available package manifests and your account access. Items without trusted file hashes remain **Not verified**.
+- Verification checks cached downloads, not installed engines, plugins or project copies. It reports damage; it does not repair or redownload payloads automatically.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.3.1 - 2026-10-23
 
 ### Limited-Time Free

@@ -107,17 +107,33 @@ pub(super) struct AppComboBox {
     combo: egui::ComboBox,
     selected_text: WidgetText,
     theme: Theme,
+    text_width: Option<f32>,
+    id_salt: Id,
+    preview_open: bool,
 }
 impl AppComboBox {
     pub fn new(theme: &Theme, id: impl std::hash::Hash) -> Self {
+        let id_salt = Id::new(&id);
         Self {
             combo: egui::ComboBox::from_id_salt(id),
             selected_text: WidgetText::default(),
             theme: theme.clone(),
+            text_width: None,
+            id_salt,
+            preview_open: false,
         }
     }
     pub fn width(mut self, width: f32) -> Self {
         self.combo = self.combo.width(width);
+        self
+    }
+    pub fn bounded_width(mut self, width: f32) -> Self {
+        self.combo = self.combo.width(width);
+        self.text_width = Some(width);
+        self
+    }
+    pub fn preview_open(mut self, open: bool) -> Self {
+        self.preview_open = open;
         self
     }
     pub fn selected_text(mut self, text: impl Into<WidgetText>) -> Self {
@@ -132,14 +148,30 @@ impl AppComboBox {
         let content = ui.visuals().clone();
         let theme = self.theme;
         let popup_theme = theme.clone();
+        let text_width = self.text_width;
         ui.scope(|ui| {
             buttons::compact_style(ui);
+            if self.preview_open {
+                Popup::open_id(ui.ctx(), ui.make_persistent_id(self.id_salt).with("popup"));
+            }
             let selected_text = buttons::centered_galley(
                 ui,
                 self.selected_text.into_galley(
                     ui,
-                    Some(TextWrapMode::Extend),
-                    f32::INFINITY,
+                    Some(if text_width.is_some() {
+                        TextWrapMode::Truncate
+                    } else {
+                        TextWrapMode::Extend
+                    }),
+                    text_width
+                        .map(|width| {
+                            (width
+                                - 2. * buttons::HORIZONTAL_PADDING
+                                - ui.spacing().icon_width
+                                - ui.spacing().icon_spacing)
+                                .max(40.)
+                        })
+                        .unwrap_or(f32::INFINITY),
                     TextStyle::Button,
                 ),
             );
@@ -172,6 +204,37 @@ pub(super) fn thumb_length(track: f32, visible: f32, content: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_cache_paths_truncate_inside_compact_dropdown_bounds() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let ctx = Context::default();
+            theme.apply(&ctx);
+            let mut rect = Rect::NOTHING;
+            let path = format!("F:/Studio/{}/Vault Cache", "Long shared folder/".repeat(12));
+            let output = ctx.run(RawInput::default(), |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    ui.style_mut().override_font_id = Some(FontId::proportional(22.));
+                    rect = AppComboBox::new(&theme, "long-cache")
+                        .bounded_width(240.)
+                        .selected_text(&path)
+                        .show_ui(ui, |_| {})
+                        .response
+                        .rect;
+                });
+            });
+            assert!(rect.width() <= 242. && rect.height() == COMPACT_BUTTON_HEIGHT);
+            let text = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(t) if t.galley.text() == path => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(text.galley.elided);
+            assert!(text.pos.x + text.galley.size().x < rect.right() - 16.);
+        }
+    }
     #[test]
     fn dropdowns_keep_launcher_colors_when_windows_uses_the_other_theme() {
         for theme in [Theme::dark(), Theme::light()] {

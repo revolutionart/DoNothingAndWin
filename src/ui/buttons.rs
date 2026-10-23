@@ -250,6 +250,61 @@ pub(super) fn secondary_button(label: impl Into<WidgetText>) -> SecondaryButton 
         radius: BUTTON_RADIUS.into(),
     }
 }
+/// Large navigation links share button typography, icon centering and theme states.
+pub(super) fn link_card(
+    ui: &mut Ui,
+    theme: &Theme,
+    size: Vec2,
+    icon: Icon,
+    label: &str,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered() || response.is_pointer_button_down_on();
+    let tint = if hovered {
+        SIDEBAR_ON_HIGHLIGHT
+    } else {
+        theme.text
+    };
+    ui.painter().rect_filled(
+        rect,
+        6.,
+        color(if hovered {
+            SIDEBAR_HIGHLIGHT
+        } else {
+            theme.card
+        }),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        6.,
+        Stroke::new(1., color(theme.border)),
+        StrokeKind::Inside,
+    );
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.into(), primary_font(1.), color(tint));
+    let text = centered_galley(ui, text);
+    let icon_size = 32.;
+    let gap = 12.;
+    let top = rect.center().y - (icon_size + gap + text.size().y) / 2.;
+    downloads::draw_icon(
+        ui,
+        theme,
+        icon,
+        Rect::from_center_size(
+            pos2(rect.center().x, top + icon_size / 2.),
+            Vec2::splat(icon_size),
+        ),
+        tint,
+    );
+    ui.painter().galley(
+        pos2(rect.center().x - text.size().x / 2., top + icon_size + gap),
+        text,
+        color(tint),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, true, label));
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
 pub(super) fn primary_font(scale: f32) -> FontId {
     FontId::new(
         COMPACT_BUTTON_FONT_SIZE * scale,

@@ -5,6 +5,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Entry {
+    pub root: PathBuf,
     pub path: PathBuf,
     pub title: String,
     pub bytes: u64,
@@ -31,6 +32,42 @@ impl Entry {
 pub struct Inventory {
     pub entries: Vec<Entry>,
     pub warnings: Vec<String>,
+}
+
+/// Combine disjoint configured caches without counting repeated/nested roots twice.
+pub fn scan_roots(roots: &[PathBuf], mut progress: impl FnMut(&Path)) -> Result<Inventory, String> {
+    let mut roots = roots.to_vec();
+    let configured = roots.clone();
+    roots.sort_by_key(|root| crate::discovery::path_key(root).len());
+    let mut scanned: Vec<PathBuf> = Vec::new();
+    let mut result = Inventory::default();
+    for root in roots {
+        if scanned
+            .iter()
+            .any(|parent| crate::discovery::inside(&root, parent))
+        {
+            continue;
+        }
+        scanned.push(root.clone());
+        match scan(&root, &mut progress) {
+            Ok(mut inventory) => {
+                result.entries.append(&mut inventory.entries);
+                result.warnings.append(&mut inventory.warnings);
+            }
+            Err(error) => result.warnings.push(format!("{}: {error}", root.display())),
+        }
+    }
+    for entry in &mut result.entries {
+        // Protect another configured root even if preferences were edited to
+        // contain nested locations. A parent cache card must not delete it.
+        if configured.iter().any(|root| {
+            crate::discovery::path_key(root) != crate::discovery::path_key(&entry.root)
+                && crate::discovery::inside(root, &entry.path)
+        }) {
+            entry.removable = false;
+        }
+    }
+    Ok(result)
 }
 
 /// Enumerate the configured cache, keeping shared chunks separate from packages.
@@ -94,6 +131,7 @@ fn enumerate(
         progress(&path);
         let name = child.file_name().to_string_lossy().into_owned();
         let mut entry = Entry {
+            root: root.to_owned(),
             path: path.clone(),
             title: if key == "engineworkspace/chunks" {
                 "Shared download chunks".into()
@@ -144,6 +182,8 @@ fn measure(
                 || name.ends_with(".mancpn")
                 || name.ends_with(".uplugin")
                 || name == ".dnw-plugin-install.json"
+                || name == crate::vault_health::INDEX
+                || name == "manifest"
             {
                 if let Ok(bytes) = fs::read(path) {
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -161,7 +201,7 @@ fn measure(
                         if let Some(title) = v["FriendlyName"].as_str().filter(|s| !s.is_empty()) {
                             entry.title = title.into();
                         }
-                    } else if name.ends_with(".manifest") {
+                    } else if name.ends_with(".manifest") || name == "manifest" {
                         if let Ok(m) = crate::buildpatch::parse(&bytes) {
                             entry.identities.push(m.app);
                         }
@@ -227,6 +267,7 @@ pub fn remove(root: &Path, entry: &Entry) -> Result<(), String> {
     if !warnings.is_empty() {
         return Err(warnings.join("\n"));
     }
+    let _change = crate::vault_health::changing(&target);
     remove_tree(&target)
 }
 fn remove_tree(path: &Path) -> Result<(), String> {
@@ -275,6 +316,41 @@ pub fn match_item<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multiple_caches_keep_same_named_items_separate_and_removal_stays_in_owner() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for root in [a.path(), b.path()] {
+            fs::create_dir(root.join("Same item")).unwrap();
+            fs::write(root.join("Same item/file"), b"test").unwrap();
+        }
+        let inventory = scan_roots(
+            &[
+                a.path().to_owned(),
+                b.path().to_owned(),
+                a.path().to_owned(),
+            ],
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(inventory.entries.len(), 2);
+        assert_eq!(inventory.entries.iter().map(|e| e.bytes).sum::<u64>(), 8);
+        let owner = fs::canonicalize(a.path()).unwrap();
+        let entry = inventory.entries.iter().find(|e| e.root == owner).unwrap();
+        assert!(remove(b.path(), entry).is_err());
+        remove(&entry.root, entry).unwrap();
+        assert_eq!(fs::read(b.path().join("Same item/file")).unwrap(), b"test");
+    }
+    #[test]
+    fn nested_cache_configuration_is_not_double_counted_or_removable_as_one_card() {
+        let parent = tempfile::tempdir().unwrap();
+        let nested = parent.path().join("Other cache");
+        fs::create_dir_all(nested.join("Asset")).unwrap();
+        fs::write(nested.join("Asset/file"), b"test").unwrap();
+        let inventory = scan_roots(&[nested, parent.path().to_owned()], |_| {}).unwrap();
+        assert_eq!(inventory.entries.iter().map(|e| e.bytes).sum::<u64>(), 4);
+        assert!(!inventory.entries[0].removable);
+    }
     #[test]
     #[ignore = "Reads the locally configured cache; does not change files"]
     fn configured_cache_inventory() {

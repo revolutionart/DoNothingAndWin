@@ -659,6 +659,7 @@ fn install_from(
     )?;
     crate::maintenance::save_plan(&stage, plan)?;
     no_links(&plan.target)?;
+    let _change = crate::vault_health::changing(&plan.target);
     if plan.target.exists() {
         // remove_dir succeeds only for an empty directory; never delete contents.
         fs::remove_dir(&plan.target).map_err(|_| {

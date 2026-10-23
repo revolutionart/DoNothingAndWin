@@ -58,7 +58,7 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.3.1** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/DoNothingAndWin-Setup-1.3.1.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/DoNothingAndWin-Portable-1.3.1.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.1/SHA256SUMS.txt)
+Current release: **1.3.2** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/DoNothingAndWin-Setup-1.3.2.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/DoNothingAndWin-Portable-1.3.2.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
@@ -111,9 +111,10 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 - Use the eye icon to hide or restore an item. **Show hidden** displays only hidden items. Folder assignments and visibility are saved separately for each Epic account on this PC.
 - Click **Update** on a Library plugin to start its update directly. The button shows **Updating** with a spinner; detailed progress appears on Downloads.
 - **Wait for builds listed in the Fab library** is on by default for new settings. Existing saved choices are preserved. It waits for matching Windows build metadata and does not verify publisher approval.
-- Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update** (the default) or by name. Fab listing dates load in the background and are cached; items without a date appear last.
+- Browse your owned Fab content under **All**, **Assets**, **Projects**, and **Plugins**, with search and engine-version filtering. Sort by **Latest update**, **Latest added**, or by name; the last choice is remembered. Listing and acquisition dates load in the background and are cached; items without a date appear last.
 - Search titles, descriptions, tags, and publisher names. Title matches appear first, followed by metadata matches, with the chosen sort order applied within each group. Listing details are cached for responsive searches.
 - Add assets to an existing project, create projects from supported library templates, and install plugins into multiple selected engines. Each engine gets its latest eligible compatible package.
+- Asset packs containing a `.uproject` are detected from package manifests and use **Create project**. Complete project packages cannot be added into an existing project.
 - Choose **Install to engine → Download only** to select a UE version and save an extracted plugin to the plugin cache or a custom folder without an installed engine. Follow progress in Downloads and use **Open plugin folder** when complete. Source builds may need to rebuild the plugin; source code is included only when supplied by the publisher.
 - Enable **Show all projects** when choosing an asset destination. Projects too old for every available asset version are greyed out, with a reason on hover.
 - Manage plugins separately for each engine: search installed plugins, see installed and available versions, check for updates, update, or remove them.
@@ -132,9 +133,18 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 ### Everyday use
 
 - Dark and daylight themes, remembered window size, and cached Workspace checks refreshed in the background.
+- Remember the last page and Projects view, including Pinned/category selection, search, engine filter, sorting and grid/list view. Choose a fixed startup page in Settings if preferred. Library and Projects sort choices are remembered independently.
+- Open **Discord support** or the **GitHub repository** from the buttons beside the Epic account section in Settings.
 - Optional Windows startup, with tray startup enabled by default for the installed version. Minimize keeps the app in the taskbar. Close (X) hides the installed version in the tray by default; turn off **Close to system tray** in Settings to quit on X. The portable version exits directly.
 - A single launcher instance, with build handoff allowed only when idle so active transfers are preserved.
 - Consistent scrollbars across pages, with a minimum thumb size for large lists. Hidden and minimized windows skip UI rendering and UI-only scans while download workers and scheduled release checks continue.
+
+### Vault Cache
+
+- Add cache locations in Download settings, choose a default, and optionally ask which location to use for each download. The Vault Cache page shows their contents and sizes together or filtered to one location.
+- Use **Verify cache now** in Settings, or Verify in a cache/Library item's right-click menu, to check cached files without changing them. Results distinguish healthy payloads, files needing a redownload, missing verification information and metadata-only folders.
+- Verification is manual by default. Enable the startup verification switch in Settings for a check at most once a day. Checks run without a speed limit and show file/byte progress, Details and Stop controls; they wait during downloads and file operations.
+- Verification covers cached downloads rather than installed engines, plugins or project copies. It requires trusted expected hashes and does not repair payloads automatically. Downloading one asset preserves verification results for other unchanged cache entries.
 
 This does not include Unreal Engine, paid assets, plugins, or games. You use your own Epic account and entitlements. Engine and asset license terms remain their owners' terms. Older assets may be offered for explicit import into a newer project; compatibility is not guaranteed. Assets requiring a newer engine are blocked from older projects.
 

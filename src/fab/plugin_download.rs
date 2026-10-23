@@ -29,6 +29,34 @@ pub struct Progress {
 pub fn cache_directory(fab_cache: &str) -> PathBuf {
     Path::new(fab_cache).join("EngineWorkspace/Plugins")
 }
+/// Identity used by existing Download only folders; keep it shared with verification.
+pub(crate) fn cache_fingerprint(manifest: &Manifest) -> Result<String, String> {
+    let descriptor = installer::relative(&descriptor_file(manifest)?.name)?;
+    let prefix = descriptor.parent().ok_or("Invalid plugin root")?;
+    let mut files = Vec::new();
+    let mut names = HashSet::new();
+    for file in &manifest.files {
+        let full = installer::relative(&file.name)?;
+        if let Ok(relative) = full.strip_prefix(prefix) {
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+            if !names.insert(relative.to_string_lossy().to_lowercase()) {
+                return Err("Duplicate plugin package path".into());
+            }
+            files.push((file, relative.to_owned()));
+        }
+    }
+    files.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut identity = format!("{}\n{}\n", manifest.app, manifest.build).into_bytes();
+    for (file, relative) in files {
+        identity.extend_from_slice(relative.to_string_lossy().as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(&file.sha);
+        identity.extend_from_slice(&file.size().to_le_bytes());
+    }
+    Ok(buildpatch::hex(&buildpatch::digest(&identity)))
+}
 
 pub fn download(
     session: &Session,
@@ -109,14 +137,7 @@ fn extract(
         }
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    let mut identity = format!("{}\n{}\n", manifest.app, manifest.build).into_bytes();
-    for (file, relative) in &files {
-        identity.extend_from_slice(relative.to_string_lossy().as_bytes());
-        identity.push(0);
-        identity.extend_from_slice(&file.sha);
-        identity.extend_from_slice(&file.size().to_le_bytes());
-    }
-    let fingerprint = buildpatch::hex(&buildpatch::digest(&identity));
+    let fingerprint = cache_fingerprint(manifest)?;
     if !location.is_absolute() {
         return Err("Choose an absolute download folder.".into());
     }
@@ -160,6 +181,7 @@ fn extract(
         }
         state.phase = "Plugin already downloaded and verified".into();
         progress(state);
+        crate::vault_health::write_download_index(&destination, manifest, prefix, Path::new(name))?;
         return Ok(plugin);
     }
     if fs2::available_space(&root).map_err(|e| e.to_string())?
@@ -214,12 +236,14 @@ fn extract(
         state.phase = "Saving verified plugin…".into();
         progress(state.clone());
         control.check()?;
+        crate::vault_health::write_download_index(&stage, manifest, prefix, Path::new(name))?;
         installer::no_links(&destination)?;
         if destination.exists() {
             return Err(
                 "Download destination appeared; existing files were not overwritten.".into(),
             );
         }
+        let _change = crate::vault_health::changing(&destination);
         fs::rename(&stage, &destination)
             .map_err(|e| format!("Cannot save downloaded plugin: {e}"))?;
         state.phase = "Plugin downloaded".into();
@@ -278,6 +302,20 @@ mod tests {
                 .is_some_and(|e| e == "uplugin")
         }));
         assert!(!path.join(".dnw-plugin-install.json").exists());
+        assert!(
+            path.parent()
+                .unwrap()
+                .join(crate::vault_health::INDEX)
+                .is_file()
+        );
+        let records = crate::vault_health::verify_roots(
+            &[dir.path().to_string_lossy().into()],
+            &crate::vault_health::Selection::All,
+            &crate::vault_health::Gate::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(records[0].health, crate::vault_health::Health::Healthy);
         assert!(!dir.path().join("Engine").exists());
         println!(
             "Verified {title} for UE {branch}; no engine installation or registration required"

@@ -136,10 +136,29 @@ impl Workspace {
         }
     }
 
-    fn library_item_options(&mut self, ui: &mut Ui, key: &str, org: &Organization) {
+    pub(super) fn library_item_options(&mut self, ui: &mut Ui, key: &str, org: &Organization) {
         style_menu(ui, &self.theme);
         ui.label(format!("Folder: {}", org.folder(key).unwrap_or("Unfiled")));
         ui.separator();
+        if ui
+            .add(buttons::secondary_button("Verify cached files"))
+            .clicked()
+        {
+            if let Some(item) = self
+                .library
+                .cache_items()
+                .iter()
+                .find(|item| item.key() == key)
+                .cloned()
+            {
+                self.start_cache_verification(
+                    engine_workspace::vault_health::Selection::Item(item),
+                    false,
+                    ui.ctx(),
+                );
+            }
+            ui.close();
+        }
         ui.menu_button("Move to folder", |ui| {
             style_menu(ui, &self.theme);
             self.library_folder_destinations(ui, key, org);

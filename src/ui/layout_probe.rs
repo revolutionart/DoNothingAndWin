@@ -82,7 +82,15 @@ impl Workspace {
         let Some(mut probe) = self.layout_probe.take() else {
             return;
         };
-        if probe.step >= if probe.page.is_some() { 5 } else { CASES.len() } {
+        if probe.step
+            >= if probe.page.is_some()
+                || std::env::args().any(|arg| arg == "--startup-view-preview")
+            {
+                5
+            } else {
+                CASES.len()
+            }
+        {
             if probe.library_queue
                 || std::env::args().any(|a| a == "--plugin-download-activity-preview")
             {
@@ -95,6 +103,14 @@ impl Workspace {
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
+            if std::env::args().any(|arg| arg == "--multi-cache-preview") {
+                self.prefs.vault_cache_paths =
+                    vec!["E:/Epic Vault Cache".into(), "F:/Studio/Vault Cache".into()];
+                self.prefs.ask_vault_cache = true;
+                if probe.page == Some(Page::Downloads) {
+                    self.downloads.settings = true;
+                }
+            }
             if std::env::args().any(|arg| arg == "--sidebar-update-preview") {
                 self.launcher_updates.available = Some(engine_workspace::launcher_update::Update {
                     version: "Preview".into(),
@@ -269,6 +285,9 @@ impl Workspace {
             }
             if probe.project_finder {
                 self.project_finder.preview();
+            }
+            if std::env::args().any(|a| a == "--cache-health-preview") {
+                self.preview_cache_health();
             }
             probe.phase = 1;
             probe.deadline = Instant::now() + Duration::from_millis(700);

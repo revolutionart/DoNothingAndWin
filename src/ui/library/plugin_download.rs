@@ -7,6 +7,7 @@ pub(super) struct Download {
     pub(super) branch: String,
     custom: bool,
     location: String,
+    cache_root: String,
     pub(super) active: bool,
     pub(super) progress: fab::plugin_download::Progress,
     completed: Option<PathBuf>,
@@ -99,7 +100,31 @@ impl Workspace {
             dialog::folder(ui, &mut d.location);
             PathBuf::from(&d.location)
         } else {
-            fab::plugin_download::cache_directory(&self.prefs.fab_cache)
+            let roots = self.prefs.vault_cache_roots();
+            if roots.len() > 1 {
+                AppComboBox::new(&self.theme, "plugin-download-cache")
+                    .bounded_width(360.)
+                    .preview_open(std::env::args().any(|arg| arg == "--cache-picker-preview"))
+                    .selected_text(if d.cache_root.is_empty() {
+                        "Choose cache location".into()
+                    } else {
+                        dialog::display_path(&d.cache_root)
+                    })
+                    .show_ui(ui, |ui| {
+                        for root in &roots {
+                            buttons::selectable_value(
+                                ui,
+                                &mut d.cache_root,
+                                root.clone(),
+                                dialog::display_path(root),
+                            );
+                        }
+                    });
+            }
+            self.prefs
+                .vault_download_root(&d.cache_root)
+                .map(|root| fab::plugin_download::cache_directory(&root))
+                .unwrap_or_default()
         };
         if !d.custom {
             ui.add(Label::new(dialog::display_path(&location.to_string_lossy())).truncate())
@@ -132,7 +157,17 @@ impl Workspace {
         let location = if d.custom {
             PathBuf::from(&d.location)
         } else {
-            fab::plugin_download::cache_directory(&self.prefs.fab_cache)
+            let Some(root) = self.prefs.vault_download_root(&d.cache_root) else {
+                return;
+            };
+            fab::plugin_download::cache_directory(&root)
+        };
+        let cache_root = if d.custom {
+            Some(PathBuf::from(&self.prefs.fab_cache))
+        } else {
+            self.prefs
+                .vault_download_root(&d.cache_root)
+                .map(PathBuf::from)
         };
         d.active = true;
         d.completed = None;
@@ -151,21 +186,31 @@ impl Workspace {
         let wait_for_library = self.prefs.wait_for_library_plugin_builds;
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = fab::plugin_download::download(
-                &session,
-                &item,
-                &branch,
-                &location,
-                wait_for_library,
-                &control,
-                |progress| {
-                    let _ = tx.send(Event::PluginDownloadProgress(progress));
-                    crate::window_frame::progress_repaint(&ctx);
-                },
-            );
+            let result = engine_workspace::download_policy::with_cache_root(cache_root, || {
+                fab::plugin_download::download(
+                    &session,
+                    &item,
+                    &branch,
+                    &location,
+                    wait_for_library,
+                    &control,
+                    |progress| {
+                        let _ = tx.send(Event::PluginDownloadProgress(progress));
+                        crate::window_frame::progress_repaint(&ctx);
+                    },
+                )
+            });
             let _ = tx.send(Event::PluginDownloaded(result));
             ctx.request_repaint();
         });
+    }
+
+    pub(in crate::ui) fn reset_plugin_download_cache(&mut self) {
+        self.library.download.cache_root = if self.prefs.ask_vault_cache {
+            String::new()
+        } else {
+            self.prefs.fab_cache.clone()
+        };
     }
 
     pub(super) fn finish_plugin_download(&mut self, result: Result<PathBuf, String>) {

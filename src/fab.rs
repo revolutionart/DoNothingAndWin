@@ -15,6 +15,7 @@ use std::{
 pub mod acquisition;
 pub mod plugin_download;
 pub mod plugin_install;
+pub mod project_kind;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +94,8 @@ pub struct Item {
     pub acquired_at: Option<i64>,
     #[serde(default)]
     pub legacy_item_id: Option<String>,
+    #[serde(default)]
+    pub project_detection: Option<project_kind::Detection>,
 }
 impl Item {
     pub fn key(&self) -> String {
@@ -100,6 +103,10 @@ impl Item {
     }
     pub fn plugin(&self) -> bool {
         self.distribution_method == "CODE_PLUGIN"
+    }
+    pub fn complete_project(&self) -> bool {
+        self.distribution_method == "COMPLETE_PROJECT"
+            || (self.distribution_method == "ASSET_PACK" && project_kind::is_project(self))
     }
     pub fn compatible(&self, engine: &str) -> Option<Version> {
         let branch = EngineVersion::parse(engine)?.branch();
@@ -257,6 +264,9 @@ pub fn library_pages(session: &Session, progress: impl Fn(&[Item])) -> Result<Ve
         {
             let item: Item =
                 serde_json::from_value(value.clone()).map_err(|_| "Invalid Fab item")?;
+            let mut item = item;
+            // Type evidence is local, never trusted from a library metadata response.
+            item.project_detection = None;
             if item.distribution_method == "ENGINE" {
                 continue;
             }
@@ -289,7 +299,9 @@ pub fn library_pages(session: &Session, progress: impl Fn(&[Item])) -> Result<Ve
                 items.insert(item.key(), item);
             }
         }
-        progress(&items.values().cloned().collect::<Vec<_>>());
+        let mut visible: Vec<_> = items.values().cloned().collect();
+        project_kind::hydrate(&mut visible);
+        progress(&visible);
         cursor = page["cursors"]["next"].as_str().unwrap_or("").to_owned();
         if cursor.is_empty() {
             break;
@@ -299,6 +311,7 @@ pub fn library_pages(session: &Session, progress: impl Fn(&[Item])) -> Result<Ve
         }
     }
     let mut result: Vec<_> = items.into_values().collect();
+    project_kind::hydrate(&mut result);
     result.sort_by_key(|x| x.title.to_lowercase());
     *RECENT_LIBRARY.get_or_init(Default::default).lock().unwrap() = Some((
         session.account_id.clone(),
@@ -447,6 +460,9 @@ fn install_package(
     progress: impl Fn(String),
 ) -> Result<String, String> {
     control.check()?;
+    if item.complete_project() {
+        return Err("This is a complete Unreal project. Use Create project instead of Add to project; no files were copied.".into());
+    }
     crate::download_policy::check_install_allowed()?;
     if item.compatible(engine_version).is_none()
         || !version.supports_windows_engine(engine_version)
@@ -466,6 +482,14 @@ fn install_package(
     let package_result = package();
     control.check()?;
     let (manifest, bases) = package_result?;
+    if !item.plugin()
+        && manifest
+            .files
+            .iter()
+            .any(|file| file.name.to_ascii_lowercase().ends_with(".uproject"))
+    {
+        return Err("This download contains a complete Unreal project. Use Create project instead of Add to project; no files were copied.".into());
+    }
     let prefix = if item.plugin() {
         let descriptors: Vec<_> = manifest
             .files
@@ -585,6 +609,7 @@ fn install_package(
         }
         progress("Installing verified files...".into());
         control.check()?;
+        let _change = crate::vault_health::changing(&destination);
         if item.plugin() {
             crate::maintenance::ensure_closed(&target)?;
             crate::plugins::receipt::write(&stage, &manifest, &prefix)?;
@@ -633,6 +658,51 @@ fn install_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn asset_import_rejects_project_manifest_before_copying_any_content() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("Existing.uproject");
+        fs::write(&existing, "original project").unwrap();
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"mislabelled", "assetNamespace":"test", "title":"Example sample",
+            "distributionMethod":"ASSET_PACK",
+            "projectVersions":[{"artifactId":"sample56", "engineVersions":["5.6"], "targetPlatforms":["Windows"]}]
+        })).unwrap();
+        let version = item.compatible("5.6.1").unwrap();
+        let manifest = buildpatch::Manifest {
+            files: ["Sample.UPROJECT", "Content/NewSample.umap"]
+                .into_iter()
+                .map(|name| buildpatch::File {
+                    name: name.into(),
+                    sha: buildpatch::digest(&[]),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let result = install_package(
+            &item,
+            &version,
+            root.path(),
+            "5.6.1",
+            || Ok((manifest, vec![])),
+            &installer::Control::default(),
+            |_| {},
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("Create project")),
+            "A project package must never be imported as assets: {result:?}"
+        );
+        assert_eq!(fs::read_to_string(existing).unwrap(), "original project");
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "No content or staging directory may be left in the existing project"
+        );
+    }
+
     #[test]
     fn stop_before_activation_removes_staging_and_preserves_existing_files() {
         let root = tempfile::tempdir().unwrap();
@@ -761,10 +831,7 @@ fn template_receipt_path(item: &Item, branch: &str) -> PathBuf {
 /// Working project files are never used as a cache or updated in place.
 pub fn project_updates(session: &Session, items: &[Item]) -> Vec<(String, String)> {
     let mut updates = Vec::new();
-    for item in items
-        .iter()
-        .filter(|i| i.distribution_method == "COMPLETE_PROJECT")
-    {
+    for item in items.iter().filter(|i| i.complete_project()) {
         for branch in item.supported_branches() {
             let Some(receipt) =
                 crate::storage::read_json::<TemplateReceipt>(&template_receipt_path(item, &branch))
@@ -848,7 +915,7 @@ pub fn create_project_with_control(
 ) -> Result<String, String> {
     control.check()?;
     crate::download_policy::check_install_allowed()?;
-    if item.distribution_method != "COMPLETE_PROJECT" {
+    if !item.complete_project() {
         return Err("Not a project template".into());
     }
     if name.is_empty()
@@ -881,6 +948,7 @@ pub fn create_project_with_control(
         return Err("Not enough disk space".into());
     }
     // Reserve the destination exclusively. Other folders, including existing projects, are untouched.
+    let _change = crate::vault_health::changing(&destination);
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
     let result = (|| {
         let mut cache = HashMap::new();
@@ -1004,12 +1072,14 @@ pub fn load_library_cache(account: &str) -> Vec<Item> {
     if account.is_empty() {
         return Vec::new();
     }
-    crate::storage::read_json(
+    let mut items: Vec<Item> = crate::storage::read_json(
         &crate::storage::data_dir()
             .join("library")
             .join(format!("{}.json", cache_key(account))),
     )
-    .unwrap_or_default()
+    .unwrap_or_default();
+    project_kind::hydrate(&mut items);
+    items
 }
 pub fn save_library_cache(account: &str, items: &[Item]) -> Result<(), String> {
     if account.is_empty() {

@@ -41,17 +41,65 @@ pub fn throttle(bytes: usize) {
     };
     std::thread::sleep(delay);
 }
+thread_local! {
+    static CACHE_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Pin a worker's destination for the duration of a download; other workers and
+/// later preferences changes cannot redirect a transfer already in progress.
+pub fn with_cache_root<T>(root: Option<PathBuf>, work: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CACHE_ROOT.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(CACHE_ROOT.with(|slot| slot.replace(root)));
+    work()
+}
+
 fn cache_path(chunk: &Chunk) -> PathBuf {
-    PathBuf::from(storage::load_preferences().fab_cache)
+    CACHE_ROOT
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| PathBuf::from(storage::load_preferences().fab_cache))
         .join("EngineWorkspace/Chunks")
         .join(buildpatch::hex(&chunk.sha))
 }
 pub fn cached_chunk(chunk: &Chunk) -> Option<Vec<u8>> {
-    read_cached_chunk(&cache_path(chunk), chunk)
+    cached_chunk_progress(chunk, &mut |_| {})
 }
 pub(crate) fn cached_chunk_progress(chunk: &Chunk, read: &mut impl FnMut(u64)) -> Option<Vec<u8>> {
-    read_cached_chunk_progress(&cache_path(chunk), chunk, read)
+    let prefs = storage::load_preferences();
+    let root = CACHE_ROOT
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| PathBuf::from(&prefs.fab_cache));
+    let primary = root
+        .join("EngineWorkspace/Chunks")
+        .join(buildpatch::hex(&chunk.sha));
+    read_chunk_paths(
+        chunk,
+        std::iter::once(primary).chain(prefs.vault_cache_roots().into_iter().map(|root| {
+            PathBuf::from(root)
+                .join("EngineWorkspace/Chunks")
+                .join(buildpatch::hex(&chunk.sha))
+        })),
+        read,
+    )
 }
+fn read_chunk_paths(
+    chunk: &Chunk,
+    paths: impl IntoIterator<Item = PathBuf>,
+    read: &mut impl FnMut(u64),
+) -> Option<Vec<u8>> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .find_map(|path| read_cached_chunk_progress(&path, chunk, read))
+}
+#[cfg(test)]
 fn read_cached_chunk(path: &std::path::Path, chunk: &Chunk) -> Option<Vec<u8>> {
     read_cached_chunk_progress(path, chunk, &mut |_| {})
 }
@@ -89,6 +137,7 @@ pub(crate) fn cache_chunk_progress(chunk: &Chunk, bytes: &[u8], written: &mut im
             return;
         }
     }
+    let _change = crate::vault_health::changing(path.parent().unwrap_or(&path));
     if storage::write_atomic(&path, bytes).is_ok() {
         written(bytes.len() as u64);
     }
@@ -197,6 +246,43 @@ pub fn set_startup(enabled: bool, in_tray: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    #[test]
+    fn chosen_cache_is_scoped_to_worker_and_restored_after_nested_use() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let chunk = Chunk::default();
+        let original = cache_path(&chunk);
+        with_cache_root(Some(a.path().to_owned()), || {
+            assert!(cache_path(&chunk).starts_with(a.path()));
+            with_cache_root(Some(b.path().to_owned()), || {
+                assert!(cache_path(&chunk).starts_with(b.path()))
+            });
+            assert!(cache_path(&chunk).starts_with(a.path()));
+            let other_thread = std::thread::spawn(move || cache_path(&Chunk::default()))
+                .join()
+                .unwrap();
+            assert!(!other_thread.starts_with(a.path()));
+        });
+        assert_eq!(cache_path(&chunk), original);
+    }
+    #[test]
+    fn verified_chunks_are_reused_from_secondary_cache_when_first_is_missing_or_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("first");
+        let b = root.path().join("second");
+        fs::write(&a, b"bad!").unwrap();
+        fs::write(&b, b"good").unwrap();
+        let chunk = Chunk {
+            sha: buildpatch::digest(b"good"),
+            window: 4,
+            ..Default::default()
+        };
+        let mut read = 0;
+        let bytes = read_chunk_paths(&chunk, vec![a.clone(), a, b], &mut |n| read += n).unwrap();
+        assert_eq!(bytes, b"good");
+        assert_eq!(read, 8, "Repeated roots must not read corrupt data twice");
+    }
     #[test]
     fn startup_defaults_to_tray_but_can_show_the_window() {
         let prefs: crate::storage::Preferences = serde_json::from_str("{}").unwrap();

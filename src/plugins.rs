@@ -1638,6 +1638,7 @@ pub fn remove_plugin(engine: &Installation, plugin: &Plugin) -> Result<String, S
     let _lock = crate::maintenance::lock(&eng)?;
     crate::maintenance::ensure_closed(&eng)?;
     let root = plugin_root(engine, plugin)?;
+    let _change = crate::vault_health::changing(&root);
     delete_scoped_tree(&root,&eng.join("Engine/Plugins"))
         .map_err(|e|format!("Plugin removal failed: {e}. Some files may already have been removed; reinstall the plugin if needed."))?;
     Ok(format!("Removed {} from this engine.", plugin.name))
@@ -1751,6 +1752,7 @@ pub fn update_plugin_with_progress(
     state.file.clear();
     report(state.clone());
     receipt::write(&stage, &update.manifest, &update.prefix)?;
+    let _change = crate::vault_health::changing(&root);
     activate_with_progress(
         engine,
         plugin,

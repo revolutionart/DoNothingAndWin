@@ -1,6 +1,8 @@
 mod buttons;
+mod cache_health;
 mod categories;
 mod clone_project;
+mod community;
 mod dialog;
 mod downloads;
 mod engine_options;
@@ -12,6 +14,7 @@ mod library;
 mod library_folders;
 mod library_queue;
 mod loading;
+mod navigation;
 mod plugin_activity;
 mod plugin_jobs;
 mod plugins_view;
@@ -95,6 +98,8 @@ enum Icon {
     Database,
     Back,
     Reset,
+    Discord,
+    Github,
 }
 enum Job {
     Checked(Result<(Snapshot, Option<Session>), String>),
@@ -155,6 +160,7 @@ pub struct Workspace {
     library: library::Library,
     free_offers: free_offers::FreeOffers,
     vault: vault_cache::Vault,
+    cache_health: cache_health::State,
     downloads: downloads::Downloads,
     plugin_search: String,
     plugin_updates_only: bool,
@@ -559,8 +565,9 @@ impl Workspace {
             &prefs.manual_projects,
         );
         let _ = storage::save_preferences(&prefs);
+        let (startup_page, startup_view) = navigation::restored_view(&prefs);
         let mut app = Self {
-            page: Page::Workspace,
+            page: startup_page,
             theme,
             prefs: prefs.clone(),
             engines,
@@ -572,15 +579,19 @@ impl Workspace {
             error: None,
             textures: HashMap::new(),
             project_thumbnails: Default::default(),
-            search: String::new(),
-            pinned_only: false,
-            category_filter: None,
+            search: startup_view.project_search,
+            pinned_only: startup_view.pinned_only,
+            category_filter: startup_view.category,
             category_manager: false,
             category_add_project: None,
             category_name: String::new(),
-            filter: "All versions".into(),
-            project_sort: ProjectSort::default(),
-            list_view: false,
+            filter: if startup_view.project_engine.is_empty() {
+                "All versions".into()
+            } else {
+                startup_view.project_engine
+            },
+            project_sort: navigation::project_order(&prefs),
+            list_view: startup_view.project_list,
             pending: None,
             next_check: Instant::now()
                 + if std::env::args().any(|a| a.starts_with("--layout-probe=")) {
@@ -598,6 +609,7 @@ impl Workspace {
             backup: Default::default(),
             free_offers: Default::default(),
             vault: Default::default(),
+            cache_health: cache_health::State::load(),
             new_project: false,
             new_name: String::new(),
             new_path: String::new(),
@@ -622,6 +634,7 @@ impl Workspace {
             workspace_cache: Default::default(),
             launcher_updates: Default::default(),
         };
+        app.library.sort = prefs.library_sort;
         app.load_assets(&cc.egui_ctx);
         if !demo && app.layout_probe.is_none() {
             app.check(cc.egui_ctx.clone());
@@ -711,6 +724,14 @@ impl Workspace {
         if self.demo {
             return;
         }
+        if self.layout_probe.is_some()
+            || std::env::args().any(|arg| arg.starts_with("--layout-probe="))
+        {
+            return;
+        }
+        self.prefs.last_view = self.view_snapshot();
+        self.prefs.library_sort = self.library.sort;
+        self.prefs.project_sort = Some(self.prefs.last_view.project_sort.clone());
         self.prefs.launch_engine = self.launch_path.clone();
         self.prefs.projects = self.projects.clone();
         if let Err(e) = storage::save_preferences(&self.prefs) {
@@ -963,6 +984,7 @@ impl Workspace {
             [255, 255, 255],
         );
         let free_offers_y = c.height - 265.;
+        let show_update_notice = self.launcher_updates.available.is_some();
         let launcher_update_y = if self.prefs.show_free_offers_button {
             free_offers_y - 46.
         } else {
@@ -970,7 +992,7 @@ impl Workspace {
         };
         // Reserve space for the update notice above the bottom-anchored offer
         // button, including at the smallest supported window height.
-        let nav_step = if self.launcher_updates.available.is_some() {
+        let nav_step = if show_update_notice {
             let last_index = if self.prefs.show_vault_cache_button {
                 4.
             } else {
@@ -1131,7 +1153,7 @@ impl Workspace {
             [224., c.height - 205.],
             self.theme.border,
         );
-        if self.launcher_updates.available.is_some()
+        if show_update_notice
             && c.button(
                 ui,
                 "launcher-update-available",
@@ -1476,7 +1498,11 @@ impl Workspace {
         } else {
             None
         };
-        if let Some((title, detail, progress)) = activity {
+        let cache_status_visible =
+            self.cache_health.busy() || (activity.is_none() && self.cache_verification_visible());
+        if cache_status_visible {
+            self.cache_verification_footer(ui, &c);
+        } else if let Some((title, detail, progress)) = activity {
             let rect = c.rect([271., c.height - 47., (c.width - 540.).max(220.), 42.]);
             ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
                 ui.set_width(rect.width());
@@ -1626,16 +1652,18 @@ impl Workspace {
                 );
             }
         }
-        c.text(
-            ui,
-            c.width - 31.,
-            c.height - 26.,
-            &storage,
-            14.,
-            false,
-            self.theme.muted,
-            Align2::RIGHT_CENTER,
-        );
+        if !cache_status_visible {
+            c.text(
+                ui,
+                c.width - 31.,
+                c.height - 26.,
+                &storage,
+                14.,
+                false,
+                self.theme.muted,
+                Align2::RIGHT_CENTER,
+            );
+        }
         if let Some(toast) = &self.toast {
             if toast.created.elapsed() < Duration::from_secs(6) {
                 let width = ((c.width - 340.) * c.sx).min(1000.);
@@ -2625,6 +2653,7 @@ impl eframe::App for Workspace {
             }
         }
         self.poll(ctx);
+        self.poll_cache_health(ctx);
         self.poll_transfers(ctx);
         self.poll_plugins(ctx);
         self.poll_library(ctx);
@@ -2653,6 +2682,7 @@ impl eframe::App for Workspace {
             self.dialogs(ctx);
             self.install_dialog(ctx);
             self.project_finder_dialog(ctx);
+            self.cache_verification_dialog(ctx);
         }
         if crate::window_frame::take_replace_request() {
             if self.transfer.busy()
@@ -2665,6 +2695,7 @@ impl eframe::App for Workspace {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+        self.remember_view();
         let busy = self.launcher_updates.active()
             || self.backup.busy()
             || self.cloning.busy()
@@ -2976,6 +3007,17 @@ impl Canvas {
         icon: Icon,
         primary: bool,
     ) -> bool {
+        self.icon_button_response(ui, id, r, icon, primary)
+            .clicked()
+    }
+    fn icon_button_response(
+        &self,
+        ui: &mut Ui,
+        id: impl std::hash::Hash,
+        r: [f32; 4],
+        icon: Icon,
+        primary: bool,
+    ) -> Response {
         let mut r = button_bounds(r);
         r[0] += (r[2] - COMPACT_BUTTON_HEIGHT) / 2.;
         r[1] += (r[3] - COMPACT_BUTTON_HEIGHT) / 2.;
@@ -3023,7 +3065,7 @@ impl Canvas {
                 self.theme.muted
             },
         );
-        res.on_hover_cursor(CursorIcon::PointingHand).clicked()
+        res.on_hover_cursor(CursorIcon::PointingHand)
     }
     fn pill(&self, ui: &mut Ui, id: &str, r: [f32; 4], text: &str, active: bool) -> bool {
         let mut r = button_bounds(r);
@@ -3146,6 +3188,7 @@ impl Canvas {
             p.line_segment([point(a[0], a[1]), point(b[0], b[1])], s);
         };
         match icon {
+            Icon::Discord | Icon::Github => community::draw_brand_icon(p, icon, &point, s),
             Icon::User => {
                 p.circle_stroke(point(12., 7.), size * self.scale() / 6., s);
                 p.add(Shape::line(

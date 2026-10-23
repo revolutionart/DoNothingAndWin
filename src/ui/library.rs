@@ -4,6 +4,7 @@ use engine_workspace::fab_listing::{self, DateEvent, Sort};
 use engine_workspace::fab_search::{SearchDocument, SearchQuery};
 mod plugin_download;
 const AVAILABLE_UPDATES_FILTER: usize = 4;
+type KindResult = (String, String, Result<fab::project_kind::Detection, String>);
 
 enum Event {
     Cached(Vec<Item>),
@@ -35,6 +36,9 @@ pub(super) struct Library {
     pub(super) install_queue: super::library_queue::Queue,
     items: Vec<Item>,
     rx: Option<Receiver<Event>>,
+    kind_rx: Option<Receiver<KindResult>>,
+    kind_attempted: std::collections::HashSet<String>,
+    kind_errors: std::collections::HashMap<String, String>,
     loading: bool,
     had_saved_items: bool,
     installing: bool,
@@ -48,7 +52,7 @@ pub(super) struct Library {
     search: String,
     search_index: std::collections::HashMap<String, SearchDocument>,
     pub filter: usize,
-    sort: Sort,
+    pub(super) sort: Sort,
     engine_filter: String,
     date_rx: Option<Receiver<DateEvent>>,
     date_status: String,
@@ -120,6 +124,9 @@ impl Library {
             self.items.iter().map(|i| (i.key(), i)).collect();
         for item in &mut items {
             if let Some(old) = previous.get(&item.key()) {
+                if let Some(detection) = &old.project_detection {
+                    fab::project_kind::apply(item, detection.clone());
+                }
                 if item.listing_updated_at.is_none() {
                     item.listing_updated_at = old.listing_updated_at;
                 }
@@ -135,6 +142,60 @@ impl Library {
     }
 }
 impl Workspace {
+    fn check_library_package_types(&mut self, ctx: &Context) {
+        if self.demo
+            || self.layout_probe.is_some()
+            || self.library.kind_rx.is_some()
+            || std::env::args().any(|arg| arg.starts_with("--layout-probe="))
+        {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let items: std::collections::VecDeque<_> = self
+            .library
+            .items
+            .iter()
+            .filter(|item| fab::project_kind::needs_refresh(item))
+            .filter(|item| {
+                self.library
+                    .kind_attempted
+                    .insert(fab::project_kind::signature(item))
+            })
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let work = std::sync::Arc::new(std::sync::Mutex::new(items));
+        let (tx, rx) = mpsc::channel();
+        self.library.kind_rx = Some(rx);
+        // Bound metadata requests independently of transfer workers. No package
+        // payload is fetched here, only hash-verified manifest file lists.
+        for _ in 0..3 {
+            let work = work.clone();
+            let session = session.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let Some(item) = work.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let result = fab::project_kind::detect(&session, &item);
+                    if tx
+                        .send((item.key(), fab::project_kind::signature(&item), result))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+        }
+    }
+
     pub(super) fn open_cached_library_item(&mut self, item: &Item) {
         self.library.search = item.title.clone();
         self.library.filter = 0;
@@ -216,6 +277,8 @@ impl Workspace {
             "Checking installed library content for updates…"
         } else if self.library.date_rx.is_some() {
             &self.library.date_status
+        } else if self.library.kind_rx.is_some() {
+            "Checking library package types…"
         } else {
             ""
         }
@@ -246,6 +309,8 @@ impl Workspace {
             return;
         };
         self.library.attempted = true;
+        self.library.kind_attempted.clear();
+        self.library.kind_errors.clear();
         self.library.loading = true;
         self.library.acquisition_error = None;
         self.library.had_saved_items = !self.library.items.is_empty();
@@ -290,6 +355,7 @@ impl Workspace {
             .iter()
             .map(|item| (item.key(), SearchDocument::new(item)))
             .collect();
+        self.rebuild_cache_health_links();
     }
     fn refresh_library_dates(&mut self, ctx: &Context, retry: bool) {
         if self.library.date_rx.is_some() {
@@ -338,6 +404,7 @@ impl Workspace {
             self.library = Library {
                 rx: Some(rx),
                 account,
+                sort: self.prefs.library_sort,
                 ..Default::default()
             };
             self.textures.retain(|key, _| !key.starts_with("fab:"));
@@ -587,6 +654,39 @@ impl Workspace {
                 UpdateEvent::Finished => self.library.update_rx = None,
             }
         }
+        loop {
+            let event = match self.library.kind_rx.as_ref().map(|rx| rx.try_recv()) {
+                Some(Ok(event)) => event,
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.library.kind_rx = None;
+                    break;
+                }
+                _ => break,
+            };
+            let (key, signature, result) = event;
+            let Some(item) =
+                self.library.items.iter_mut().find(|item| {
+                    item.key() == key && fab::project_kind::signature(item) == signature
+                })
+            else {
+                continue;
+            };
+            match result {
+                Ok(detection) => {
+                    fab::project_kind::apply(item, detection.clone());
+                    if let Some(selected) =
+                        self.library.selected.as_mut().filter(|s| s.key() == key)
+                    {
+                        fab::project_kind::apply(selected, detection);
+                    }
+                    self.library.kind_errors.remove(&key);
+                }
+                Err(error) => {
+                    self.library.kind_errors.insert(key, error);
+                }
+            }
+        }
+        self.check_library_package_types(ctx);
         let mut done = Vec::new();
         for (i, (key, rx)) in self.library.images.iter().enumerate() {
             if let Ok(data) = rx.try_recv() {
@@ -618,6 +718,7 @@ impl Workspace {
         }
         if !crate::window_frame::is_backgrounded()
             && (self.library.rx.is_some()
+                || self.library.kind_rx.is_some()
                 || self.library.date_rx.is_some()
                 || !self.library.images.is_empty())
         {
@@ -958,7 +1059,7 @@ impl Workspace {
                                     );
                                     let kind = if item.plugin() {
                                         "Plugin"
-                                    } else if item.distribution_method == "COMPLETE_PROJECT" {
+                                    } else if item.complete_project() {
                                         "Project"
                                     } else {
                                         "Asset"
@@ -967,7 +1068,7 @@ impl Workspace {
                                         ui,
                                         badge.min + vec2(10., 7.),
                                         kind,
-                                        color(theme.text),
+                                        color(self.cache_icon_tint(item)),
                                     );
                                     ui.painter().text(
                                         badge.min + vec2(33., 15.),
@@ -976,6 +1077,18 @@ impl Workspace {
                                         FontId::proportional(14.),
                                         color(theme.text),
                                     );
+                                    let badge_response = ui.interact(badge, ui.id().with((&key,"cache-health")), Sense::click())
+                                        .on_hover_ui(|ui| { ui.label(self.cached_item_tooltip(item)); });
+                                    let badge_menu_id = badge_response.id.with("context-menu");
+                                    let menu_preview = std::env::args().any(|a| a == "--cache-health-library-menu-preview") && item.asset_id == "item-0";
+                                    if menu_preview {
+                                        Popup::open_id(ui.ctx(), badge_menu_id);
+                                    }
+                                    let mut badge_menu = Popup::context_menu(&badge_response).id(badge_menu_id).frame(menu_frame(&theme));
+                                    if menu_preview {
+                                        badge_menu = badge_menu.anchor(badge).align(RectAlign::TOP_START);
+                                    }
+                                    badge_menu.show(|ui| self.library_item_options(ui, &key, &organization));
                                     if show_controls {
                                     let info = Rect::from_center_size(
                                         pos2(picture.right() - 20., picture.top() + 20.),
@@ -1022,17 +1135,10 @@ impl Workspace {
                                     )
                                     .on_hover_text(tooltip);
                                     }
-                                    let label = if updating {
-                                        "Updating"
-                                    } else if has_update && item.plugin() {
-                                        "Update"
-                                    } else if item.plugin() {
-                                        "Install to engine"
-                                    } else if item.distribution_method == "COMPLETE_PROJECT" {
-                                        "Create project"
-                                    } else {
-                                        "Add to project"
-                                    };
+                                    let unknown_kind = !fab::project_kind::known(item);
+                                    let type_error = self.library.kind_errors.get(&item.key()).filter(|_| unknown_kind);
+                                    let checking_kind = unknown_kind && type_error.is_none() && !self.demo;
+                                    let label = library_action_label(item, updating, has_update, checking_kind, type_error.is_some());
                                     let text = ui.painter().layout_no_wrap(label.into(),
                                         buttons::primary_font(1.), color(theme.on_accent));
                                     let spinner_space = if updating { loading::SIZE + 6. } else { 0. };
@@ -1045,10 +1151,13 @@ impl Workspace {
                                     );
                                     let response = ui
                                         .interact(action, ui.id().with((&key, "install")),
-                                            if updating { Sense::hover() } else { Sense::click() })
-                                        .on_hover_cursor(if updating { CursorIcon::Default } else { CursorIcon::PointingHand });
+                                            if updating || checking_kind { Sense::hover() } else { Sense::click() })
+                                        .on_hover_cursor(if updating || checking_kind { CursorIcon::Default } else { CursorIcon::PointingHand });
+                                    let response = if let Some(error) = type_error {
+                                        response.on_hover_text(format!("Could not check package type: {error}\nClick to retry. No project files have been changed."))
+                                    } else { response };
                                     response.widget_info(|| WidgetInfo::labeled(
-                                        WidgetType::Button, response.enabled() && !updating, label));
+                                        WidgetType::Button, response.enabled() && !updating && !checking_kind, label));
                                     let update_action = has_update && item.plugin();
                                     let update_colors = buttons::update_colors(&theme, response.hovered() && !updating);
                                     let fill = if update_action {
@@ -1071,9 +1180,13 @@ impl Workspace {
                                     );
                                     if response.clicked()
                                         && !updating
+                                        && !checking_kind
                                         && (!self.library.installing || (item.plugin() && !has_update))
                                     {
-                                        if has_update && item.plugin() {
+                                        if unknown_kind && !self.demo {
+                                            self.library.kind_errors.remove(&item.key());
+                                            self.library.kind_attempted.remove(&fab::project_kind::signature(item));
+                                        } else if has_update && item.plugin() {
                                             update_item = Some(item.clone());
                                         } else {
                                             choose = Some(item.clone());
@@ -1127,6 +1240,7 @@ impl Workspace {
             }
         }
         if let Some(item) = choose {
+            self.reset_plugin_download_cache();
             self.library.create_name = item
                 .title
                 .chars()
@@ -1162,7 +1276,7 @@ impl Workspace {
             .library
             .selected
             .as_ref()
-            .is_some_and(|i| i.distribution_method == "COMPLETE_PROJECT")
+            .is_some_and(Item::complete_project)
         {
             self.library_create_dialog(ui.ctx());
         } else {
@@ -1668,10 +1782,33 @@ fn engine_install_row(
 
 fn library_kind(item: &Item, filter: usize) -> bool {
     match filter {
-        1 => item.distribution_method == "ASSET_PACK",
+        1 => item.distribution_method == "ASSET_PACK" && !item.complete_project(),
         2 => item.plugin(),
-        3 => item.distribution_method == "COMPLETE_PROJECT",
+        3 => item.complete_project(),
         _ => true,
+    }
+}
+fn library_action_label(
+    item: &Item,
+    updating: bool,
+    has_update: bool,
+    checking: bool,
+    failed: bool,
+) -> &'static str {
+    if checking {
+        "Checking package…"
+    } else if failed {
+        "Check package"
+    } else if updating {
+        "Updating"
+    } else if has_update && item.plugin() {
+        "Update"
+    } else if item.plugin() {
+        "Install to engine"
+    } else if item.complete_project() {
+        "Create project"
+    } else {
+        "Add to project"
     }
 }
 fn library_type_icon(ui: &Ui, origin: Pos2, kind: &str, tint: Color32) {
@@ -1846,6 +1983,57 @@ impl Workspace {
 #[cfg(test)]
 mod update_state_tests {
     use super::*;
+
+    #[test]
+    fn manifest_evidence_controls_card_action_and_category_for_any_asset_pack() {
+        let mut city: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"any-id",
+            "assetNamespace":"any-publisher",
+            "title":"Mislabelled full project",
+            "distributionMethod":"ASSET_PACK",
+            "url":"https://www.fab.com/listings/4898e707-7855-404b-af0e-a505ee690e68"
+        }))
+        .unwrap();
+        city.project_detection = Some(
+            serde_json::from_value(serde_json::json!({
+                "fingerprint": fab::project_kind::signature(&city),
+                "contains_project": true, "checked_at": engine_workspace::epic::now(),
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            library_action_label(&city, false, false, false, false),
+            "Create project"
+        );
+        assert!(
+            library_kind(&city, 3),
+            "Any verified project package must use the Projects category"
+        );
+        assert!(
+            !library_kind(&city, 1),
+            "Project packages must not appear as importable assets"
+        );
+        city.title = "Renamed listing".into();
+        assert!(
+            library_kind(&city, 3),
+            "Manifest evidence must survive a title change"
+        );
+        city.asset_id = "separate-buildings-pack".into();
+        city.title = "City Sample Buildings".into();
+        assert!(!library_kind(&city, 3));
+        assert!(
+            library_kind(&city, 1),
+            "Separate asset packs must remain importable"
+        );
+        assert_eq!(
+            library_action_label(&city, false, false, true, false),
+            "Checking package…"
+        );
+        assert_eq!(
+            library_action_label(&city, false, false, false, true),
+            "Check package"
+        );
+    }
     fn item() -> Item {
         serde_json::from_value(serde_json::json!({"assetId":"example", "assetNamespace":"publisher", "title":"Example", "distributionMethod":"CODE_PLUGIN"})).unwrap()
     }
@@ -2037,6 +2225,7 @@ impl Workspace {
             account: account.clone(),
             attempted: true,
             list_view: step == 2,
+            sort: self.prefs.library_sort,
             ..Default::default()
         };
         for (index, (title, kind)) in [
@@ -2055,6 +2244,14 @@ impl Workspace {
                 "projectVersions":[{"artifactId":"preview", "engineVersions":["5.8"], "targetPlatforms":["Windows"]}]
             })).unwrap());
         }
+        for item in &mut self.library.items {
+            if item.distribution_method == "ASSET_PACK" {
+                item.project_detection = Some(serde_json::from_value(serde_json::json!({
+                    "fingerprint": fab::project_kind::signature(item), "contains_project": false,
+                    "checked_at": engine_workspace::epic::now(),
+                })).unwrap());
+            }
+        }
         let mut org = engine_workspace::library_organization::Organization::default();
         org.create_folder("Environments").unwrap();
         org.create_folder("Tools and plugins").unwrap();
@@ -2065,10 +2262,38 @@ impl Workspace {
         org.set_hidden("preview:item-3", true);
         self.prefs.library_organization.insert(account, org);
         self.library.organization.preview(step);
+        if std::env::args().any(|a| a == "--cache-health-library-menu-preview") {
+            self.library.filter = 1;
+            self.library.organization.show_hidden = false;
+        }
         if std::env::args().any(|a| a == "--library-acquisition-preview") {
             self.library.sort = Sort::LatestAdded;
             self.library.items[0].acquired_at = Some(1704067200);
             self.library.items[1].acquired_at = Some(1735689600);
+        }
+        // Optional local fixture for rendering metadata regressions. This only
+        // runs in the explicit render-only library preview with a fake account.
+        if let Some(path) = std::env::args().find_map(|arg| {
+            arg.strip_prefix("--library-item-preview=")
+                .map(str::to_owned)
+        }) {
+            let item: Item =
+                serde_json::from_slice(&std::fs::read(path).expect("Read library preview item"))
+                    .expect("Parse library preview item");
+            if std::env::args().any(|arg| arg == "--library-package-check-failed-preview") {
+                self.library
+                    .kind_errors
+                    .insert(item.key(), "Temporary network failure".into());
+            }
+            if std::env::args().any(|arg| arg == "--library-item-dialog-preview") {
+                self.library.selected = Some(item.clone());
+                self.library.create_name = "SampleProject".into();
+                self.library.create_folder = "C:/Preview/Projects".into();
+            }
+            self.library.items = vec![item];
+            self.library.organization.filter =
+                engine_workspace::library_organization::FolderFilter::All;
+            self.library.organization.show_hidden = false;
         }
         self.rebuild_library_search();
     }
