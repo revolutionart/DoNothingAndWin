@@ -74,14 +74,11 @@ pub fn engine_branches<'a>(items: impl IntoIterator<Item = &'a Item>) -> Vec<Str
 pub fn listing_id(item: &Item) -> Option<String> {
     listing_url_id(item.url.as_deref()?)
 }
-/// The owned Unreal catalog also includes legacy Marketplace entitlements.
-/// Keep those for installed-package matching, but do not present them as Fab
-/// listings. Epic's launcher-distributed Fab integration is the one exception.
+/// Presentation of the signed-in account's owned Unreal catalog. Every owned
+/// code plugin remains visible, including legacy plugins without a public Fab
+/// listing. Other item types continue to require a public listing.
 pub fn visible_in_library(item: &Item) -> bool {
-    listing_id(item).is_some()
-        || (item.plugin()
-            && item.asset_namespace == "ue"
-            && item.asset_id == "c5c30696e4e0482f9c0a170873975230")
+    item.plugin() || listing_id(item).is_some()
 }
 pub(crate) fn listing_url_id(raw: &str) -> Option<String> {
     let url = reqwest::Url::parse(raw).ok()?;
@@ -385,6 +382,34 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn owned_quixel_bridge_is_visible_without_a_public_fab_listing() {
+        let bridge: Item = serde_json::from_value(json!({
+            "assetId":"1ce536b653df463bb2492f529d832b71",
+            "assetNamespace":"ue",
+            "title":"Quixel Bridge",
+            "distributionMethod":"CODE_PLUGIN",
+            "url":"",
+            "projectVersions":[{
+                "artifactId":"QuixelBridge_5.8",
+                "engineVersions":["UE_5.8"],
+                "targetPlatforms":["Windows","Mac"]
+            }]
+        }))
+        .unwrap();
+        assert!(listing_id(&bridge).is_none());
+        assert!(bridge.compatible("5.8.4").is_some());
+        assert!(
+            visible_in_library(&bridge),
+            "Owned Quixel Bridge must appear in the Library"
+        );
+        let mut other_namespace = bridge.clone();
+        other_namespace.asset_namespace = "another-publisher".into();
+        assert!(visible_in_library(&other_namespace));
+        let mut same_title = bridge.clone();
+        same_title.asset_id = "unrelated".into();
+        assert!(visible_in_library(&same_title));
+    }
+    #[test]
     fn latest_added_uses_acquisition_not_publication_and_puts_unknown_dates_last() {
         let mut old = item("Old acquisition", Some(999));
         old.acquired_at = Some(10);
@@ -401,38 +426,37 @@ mod tests {
         assert_eq!(items[0].title, "A missing date");
     }
     #[test]
-    fn library_visibility_keeps_fab_listings_and_only_the_official_integration() {
-        let mut legacy = item("Legacy plugin", None);
-        legacy.distribution_method = "CODE_PLUGIN".into();
-        assert!(!visible_in_library(&legacy));
-        legacy.url = Some("https://www.unrealengine.com/marketplace/en/product/old-plugin".into());
-        assert!(!visible_in_library(&legacy));
-        let mut listing = legacy.clone();
+    fn library_visibility_keeps_all_owned_plugins_regardless_of_listing_url() {
+        // These are entries from the signed-in account's owned library, not
+        // public search results. Visibility must not depend on a known product ID.
+        for namespace in ["ue", "arbitrary-publisher"] {
+            for url in [
+                None,
+                Some(""),
+                Some("https://www.unrealengine.com/marketplace/en/product/old-plugin"),
+                Some("https://www.fab.com/listings/not-a-public-listing"),
+            ] {
+                let mut plugin = item("Unrecognized owned plugin", None);
+                plugin.asset_namespace = namespace.into();
+                plugin.distribution_method = "CODE_PLUGIN".into();
+                plugin.url = url.map(str::to_owned);
+                assert!(
+                    visible_in_library(&plugin),
+                    "Owned plugin hidden: {namespace}, {url:?}"
+                );
+                assert!(listing_id(&plugin).is_none());
+                let mut asset = plugin.clone();
+                asset.distribution_method = "ASSET_PACK".into();
+                assert!(!visible_in_library(&asset));
+            }
+        }
+        let mut listing = item("Public asset", None);
+        listing.distribution_method = "ASSET_PACK".into();
         listing.url =
             Some("https://www.fab.com/listings/907039cf-f267-489e-afe4-7e74768e9b7a".into());
         // Missing optional metadata is not evidence that a listing is unavailable.
         assert!(listing.listing_search.is_none());
         assert!(visible_in_library(&listing));
-        let mut fab = legacy.clone();
-        fab.url = None;
-        fab.asset_namespace = "ue".into();
-        fab.asset_id = "c5c30696e4e0482f9c0a170873975230".into();
-        assert!(visible_in_library(&fab));
-        let mut impostor = fab.clone();
-        impostor.asset_namespace = "another-publisher".into();
-        assert!(!visible_in_library(&impostor));
-        let catalog = [legacy, listing, fab, impostor];
-        let visible: Vec<_> = catalog
-            .iter()
-            .filter(|item| visible_in_library(item))
-            .collect();
-        assert_eq!(visible.len(), 2);
-        assert_eq!(visible.iter().filter(|item| item.plugin()).count(), 2);
-        assert_eq!(
-            catalog.len(),
-            4,
-            "raw entitlements remain available for installed-plugin matching"
-        );
     }
     #[test]
     fn failed_details_back_off_but_manual_retry_bypasses_cooldown() {

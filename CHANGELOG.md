@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.4 - 2026-10-27
+
+### Library
+
+- Show all owned code plugins in the Library, including Quixel Bridge and legacy Marketplace plugins without a public Fab listing URL.
+- Remove product-specific visibility exceptions. Plugin visibility no longer depends on a particular catalog ID, publisher namespace or public listing link.
+
+### Known limitations
+
+- Installation and Download only still require an available package compatible with the selected Unreal Engine version. A visible owned plugin may not have a public listing or update date.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.3.3 - 2026-10-27
 
 ### Plugin packages
