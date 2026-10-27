@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.3 - 2026-10-27
+
+### Plugin packages
+
+- Skip non-Windows binaries and platform-specific Intermediate build files when installing, updating or using **Download only**. Apply the same file selection to all three operations.
+- Keep Windows precompiled manifests and object files required for packaging games, along with source code, content, configuration, shaders and resources.
+- Keep older full-platform cache downloads verifiable. Give filtered downloads their own file-based identity and expected-file records so omitted platforms are not reported as missing or damaged.
+- Display release versions without SemVer build metadata, such as **0.79.3** for a package labelled `0.79.3+0.1`. Preserve the original descriptor and complete package label for verification and detailed information. Build metadata alone does not become a higher release version.
+
+### Download progress
+
+- Keep byte totals visible when advancing between files, fixing the flickering downloaded/prepared information and jumping activity panel.
+- Show **Network received**, **Package download size** and **Files prepared** separately, using readable binary units. A compressed package download can expand to a much larger set of files; cached chunks can also reduce the amount received over the network.
+- Label file preparation progress explicitly rather than presenting it as the percentage downloaded from the network. Use the same size presentation for Download only.
+
+### Known limitations
+
+- Precompiled files for other target platforms are omitted. Building for another platform may require rebuilding the plugin from publisher-supplied source or obtaining a separate package.
+- Existing installed files and older standalone cache downloads are not automatically pruned or refreshed. An engine plugin and a Download only cache copy can contain different versions.
+- Windows 10/11 x64 only. Installer and portable builds remain unsigned.
+
 ## 1.3.2 - 2026-10-23
 
 ### Startup and preferences

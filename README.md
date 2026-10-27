@@ -58,7 +58,7 @@ Click any screenshot to view it at full size.
 
 Download the Windows installer, portable ZIP and SHA-256 checksums from the **[latest release](https://github.com/revolutionart/DoNothingAndWin/releases/latest)**. See the [changelog](CHANGELOG.md) for changes.
 
-Current release: **1.3.2** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/DoNothingAndWin-Setup-1.3.2.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/DoNothingAndWin-Portable-1.3.2.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.2/SHA256SUMS.txt)
+Current release: **1.3.3** — [Installer](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.3/DoNothingAndWin-Setup-1.3.3.exe) · [Portable ZIP](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.3/DoNothingAndWin-Portable-1.3.3.zip) · [SHA-256 checksums](https://github.com/revolutionart/DoNothingAndWin/releases/download/v1.3.3/SHA256SUMS.txt)
 
 - Windows 10/11, 64-bit. Embedded Epic sign-in needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - Setup installs for your Windows user; administrator access is not required for the launcher itself. Writing to protected engine folders may require appropriate folder permissions.
@@ -116,6 +116,8 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 - Add assets to an existing project, create projects from supported library templates, and install plugins into multiple selected engines. Each engine gets its latest eligible compatible package.
 - Asset packs containing a `.uproject` are detected from package manifests and use **Create project**. Complete project packages cannot be added into an existing project.
 - Choose **Install to engine → Download only** to select a UE version and save an extracted plugin to the plugin cache or a custom folder without an installed engine. Follow progress in Downloads and use **Open plugin folder** when complete. Source builds may need to rebuild the plugin; source code is included only when supplied by the publisher.
+- Plugin installs, updates and Download only skip non-Windows platform binaries and Intermediate build artifacts. Windows `.precompiled` manifests and object files are retained for game packaging, along with shared source and content. Building for another platform may require rebuilding from source or obtaining a separate package.
+- Release labels omit SemVer build metadata, such as the `+0.1` in `0.79.3+0.1`. Original descriptors and package identities remain intact for verification.
 - Enable **Show all projects** when choosing an asset destination. Projects too old for every available asset version are greyed out, with a reason on hover.
 - Manage plugins separately for each engine: search installed plugins, see installed and available versions, check for updates, update, or remove them.
 - Plugin updates are checked automatically after startup/sign-in. Each affected engine card shows an orange **Manage plugins** link with a circled exclamation; the Library badge covers updates across engines.
@@ -125,6 +127,7 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 ### Downloads and activity
 
 - Follow installation progress, transferred bytes, and the active-download indicator beside Downloads in the sidebar.
+- Library transfers distinguish **Network received**, compressed **Package download size**, and expanded **Files prepared**. Reusing cached chunks can reduce network traffic below the full package size. File preparation progress does not represent the network download percentage.
 - Stop an engine transfer and resume it using the same destination to reuse verified files and cached chunks.
 - **Dismiss** clears a stopped installation’s resume entry without deleting retained files. Removing its pending engine card also clears the entry.
 - Search installation, removal, and verification history; inspect operation details, mark entries as seen, or clear history.
@@ -145,6 +148,7 @@ Right-click a project, or open its **three-dot menu**, for these actions:
 - Use **Verify cache now** in Settings, or Verify in a cache/Library item's right-click menu, to check cached files without changing them. Results distinguish healthy payloads, files needing a redownload, missing verification information and metadata-only folders.
 - Verification is manual by default. Enable the startup verification switch in Settings for a check at most once a day. Checks run without a speed limit and show file/byte progress, Details and Stop controls; they wait during downloads and file operations.
 - Verification covers cached downloads rather than installed engines, plugins or project copies. It requires trusted expected hashes and does not repair payloads automatically. Downloading one asset preserves verification results for other unchanged cache entries.
+- Download only copies are separate snapshots. Updating an installed engine plugin does not automatically refresh or remove an older cached copy.
 
 This does not include Unreal Engine, paid assets, plugins, or games. You use your own Epic account and entitlements. Engine and asset license terms remain their owners' terms. Older assets may be offered for explicit import into a newer project; compatibility is not guaranteed. Assets requiring a newer engine are blocked from older projects.
 

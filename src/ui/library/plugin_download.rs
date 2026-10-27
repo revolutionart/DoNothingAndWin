@@ -24,14 +24,13 @@ impl Library {
                 ProgressBar::new((p.prepared as f32 / p.total as f32).clamp(0., 1.))
                     .show_percentage(),
             );
-            ui.label(format!(
-                "{:.1} / {:.1} MB • {:.1} MB downloaded • {} / {} files verified",
-                p.prepared as f64 / 1_048_576.,
-                p.total as f64 / 1_048_576.,
-                p.downloaded as f64 / 1_048_576.,
-                p.files,
-                p.total_files
+            ui.label(fab::transfer_totals(
+                p.prepared,
+                p.total,
+                p.downloaded,
+                p.download_bytes,
             ));
+            ui.label(format!("{} / {} files verified", p.files, p.total_files));
         }
         if !p.file.is_empty() {
             ui.add(Label::new(&p.file).truncate())
@@ -264,6 +263,7 @@ impl Workspace {
             prepared: 42_000_000,
             total: 100_000_000,
             downloaded: 15_000_000,
+            download_bytes: Some(35_000_000),
             files: 12,
             total_files: 30,
         };

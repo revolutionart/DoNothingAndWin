@@ -201,7 +201,7 @@ pub fn install_many(
                     serde_json::from_slice(&raw).map_err(|_| "Invalid plugin descriptor")?;
                 Ok((manifest, bases, descriptor))
             })?;
-            let name = candidate.name.clone();
+            let name = crate::plugins::display_version(&candidate.name);
             super::install_package(
                 item,
                 &candidate.version,
@@ -209,10 +209,15 @@ pub fn install_many(
                 &engine.version,
                 || Ok((candidate.manifest, candidate.bases)),
                 control,
-                |status| progress(format!("{} {name} • {label} • {status}", item.title)),
+                |status| {
+                    progress(format!(
+                        "{} • Version {name} • {label} • {status}",
+                        item.title
+                    ))
+                },
             )?;
             Ok(format!(
-                "Installed {} {name} for Unreal Engine {}",
+                "Installed {} (version {name}) for Unreal Engine {}",
                 item.title, engine.version
             ))
         },
@@ -224,6 +229,79 @@ pub fn install_many(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[ignore = "Read-only manifest and descriptor audit; requires connected Epic and PLUGIN_PACKAGE_AUDIT_TITLE"]
+    fn owned_windows_package_size_audit() {
+        let title = std::env::var("PLUGIN_PACKAGE_AUDIT_TITLE").unwrap();
+        let branch = std::env::var("PLUGIN_PACKAGE_AUDIT_ENGINE").unwrap();
+        let session = crate::storage::load_session().expect("Connect Epic first");
+        let item = crate::fab::load_library_cache(&session.account_id)
+            .into_iter()
+            .find(|i| i.title == title && i.plugin())
+            .expect("Owned plugin");
+        let candidate = resolve_with(&item, &branch, true, |version| {
+            let (manifest, bases) = crate::fab::package(&session, &item, version)?;
+            let file = descriptor_file(&manifest)?;
+            let raw = crate::plugins::payload(&manifest, &bases, file, &mut Default::default())?;
+            let descriptor =
+                serde_json::from_slice(&raw).map_err(|e| format!("Descriptor: {e}"))?;
+            Ok((manifest, bases, descriptor))
+        })
+        .unwrap();
+        let manifest = candidate.manifest;
+        let descriptor =
+            crate::installer::relative(&descriptor_file(&manifest).unwrap().name).unwrap();
+        let prefix = descriptor.parent().unwrap();
+        let mut all = Vec::new();
+        let mut windows = Vec::new();
+        for file in &manifest.files {
+            let path = crate::installer::relative(&file.name).unwrap();
+            if let Ok(relative) = path.strip_prefix(prefix) {
+                all.push(file);
+                if crate::plugins::package_files::windows_file(relative) {
+                    windows.push(file);
+                }
+            }
+        }
+        let size = |files: &[&crate::buildpatch::File]| -> (u64, u64) {
+            let mut ids = HashSet::new();
+            let raw = files.iter().map(|f| f.size()).sum();
+            let compressed = files
+                .iter()
+                .flat_map(|f| &f.parts)
+                .filter(|p| ids.insert(p.guid.clone()))
+                .map(|p| manifest.chunks[&p.guid].size)
+                .sum();
+            (raw, compressed)
+        };
+        println!(
+            "{} publisher version {} | artifact {} | build {}",
+            item.title, candidate.name, manifest.app, manifest.build
+        );
+        let (raw, compressed) = size(&all);
+        println!(
+            "Complete package: {} files | {} prepared bytes ({:.3} GB) | {} compressed chunk bytes ({:.3} GB / {:.3} GiB)",
+            all.len(),
+            raw,
+            raw as f64 / 1e9,
+            compressed,
+            compressed as f64 / 1e9,
+            compressed as f64 / 1073741824.
+        );
+        let (raw, compressed) = size(&windows);
+        println!(
+            "Windows selection: {} files | {} prepared bytes ({:.3} GB) | {} compressed chunk bytes ({:.3} GB / {:.3} GiB)",
+            windows.len(),
+            raw,
+            raw as f64 / 1e9,
+            compressed,
+            compressed as f64 / 1e9,
+            compressed as f64 / 1073741824.
+        );
+        crate::storage::write_json(Path::new("target/pcgex-current-manifest.json"), &manifest)
+            .unwrap();
+    }
 
     fn item() -> Item {
         serde_json::from_value(json!({"assetId":"pcgex","assetNamespace":"test","title":"PCGEx","distributionMethod":"CODE_PLUGIN","projectVersions":[

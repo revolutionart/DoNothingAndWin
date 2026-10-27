@@ -93,6 +93,10 @@ impl Workspace {
         {
             if probe.library_queue
                 || std::env::args().any(|a| a == "--plugin-download-activity-preview")
+                || std::env::args().any(|a| {
+                    a == "--plugin-install-progress-preview"
+                        || a == "--plugin-install-streaming-preview"
+                })
             {
                 self.finish_library_preview();
             }
@@ -103,6 +107,14 @@ impl Workspace {
         }
         let (width, height, plugins) = CASES[probe.step];
         if probe.phase == 0 {
+            if std::env::args().any(|a| {
+                a == "--plugin-install-progress-preview"
+                    || a == "--plugin-install-streaming-preview"
+            }) {
+                self.preview_install_progress(
+                    std::env::args().any(|a| a == "--plugin-install-streaming-preview"),
+                );
+            }
             if std::env::args().any(|arg| arg == "--multi-cache-preview") {
                 self.prefs.vault_cache_paths =
                     vec!["E:/Epic Vault Cache".into(), "F:/Studio/Vault Cache".into()];

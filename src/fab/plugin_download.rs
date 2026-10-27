@@ -22,6 +22,7 @@ pub struct Progress {
     pub prepared: u64,
     pub total: u64,
     pub downloaded: u64,
+    pub download_bytes: Option<u64>,
     pub files: usize,
     pub total_files: usize,
 }
@@ -31,6 +32,12 @@ pub fn cache_directory(fab_cache: &str) -> PathBuf {
 }
 /// Identity used by existing Download only folders; keep it shared with verification.
 pub(crate) fn cache_fingerprint(manifest: &Manifest) -> Result<String, String> {
+    fingerprint(manifest, false)
+}
+pub(crate) fn windows_cache_fingerprint(manifest: &Manifest) -> Result<String, String> {
+    fingerprint(manifest, true)
+}
+fn fingerprint(manifest: &Manifest, windows_only: bool) -> Result<String, String> {
     let descriptor = installer::relative(&descriptor_file(manifest)?.name)?;
     let prefix = descriptor.parent().ok_or("Invalid plugin root")?;
     let mut files = Vec::new();
@@ -39,6 +46,9 @@ pub(crate) fn cache_fingerprint(manifest: &Manifest) -> Result<String, String> {
         let full = installer::relative(&file.name)?;
         if let Ok(relative) = full.strip_prefix(prefix) {
             if relative.as_os_str().is_empty() {
+                continue;
+            }
+            if windows_only && !crate::plugins::package_files::windows_file(relative) {
                 continue;
             }
             if !names.insert(relative.to_string_lossy().to_lowercase()) {
@@ -130,6 +140,9 @@ fn extract(
             if relative.as_os_str().is_empty() {
                 continue;
             }
+            if !crate::plugins::package_files::windows_file(relative) {
+                continue;
+            }
             if !names.insert(relative.to_string_lossy().to_lowercase()) {
                 return Err("Duplicate plugin package path".into());
             }
@@ -137,7 +150,7 @@ fn extract(
         }
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    let fingerprint = cache_fingerprint(manifest)?;
+    let fingerprint = windows_cache_fingerprint(manifest)?;
     if !location.is_absolute() {
         return Err("Choose an absolute download folder.".into());
     }
@@ -157,6 +170,10 @@ fn extract(
             .try_fold(0u64, |n, (f, _)| n.checked_add(f.size()))
             .ok_or("Plugin is too large")?,
         total_files: files.len(),
+        download_bytes: crate::plugins::package_files::compressed_size(
+            manifest,
+            files.iter().map(|(f, _)| *f),
+        ),
         ..Default::default()
     };
     if destination.exists() {
@@ -181,7 +198,12 @@ fn extract(
         }
         state.phase = "Plugin already downloaded and verified".into();
         progress(state);
-        crate::vault_health::write_download_index(&destination, manifest, prefix, Path::new(name))?;
+        crate::vault_health::write_windows_download_index(
+            &destination,
+            manifest,
+            prefix,
+            Path::new(name),
+        )?;
         return Ok(plugin);
     }
     if fs2::available_space(&root).map_err(|e| e.to_string())?
@@ -236,7 +258,12 @@ fn extract(
         state.phase = "Saving verified plugin…".into();
         progress(state.clone());
         control.check()?;
-        crate::vault_health::write_download_index(&stage, manifest, prefix, Path::new(name))?;
+        crate::vault_health::write_windows_download_index(
+            &stage,
+            manifest,
+            prefix,
+            Path::new(name),
+        )?;
         installer::no_links(&destination)?;
         if destination.exists() {
             return Err(
@@ -360,6 +387,78 @@ mod tests {
             cache.insert(guid, data);
         }
         (manifest, cache)
+    }
+    #[test]
+    fn windows_plugin_package_excludes_other_platforms_but_keeps_source_and_windows_build_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manifest, mut cache) = fixture();
+        let included = [
+            "Intermediate/Build/Win64/x64/UnrealGame/Test.cpp.obj",
+            "Intermediate/Build/Win64/UnrealGame/Test.precompiled",
+            "Source/Mac/Platform.cpp",
+            "Content/Mac/Example.uasset",
+        ];
+        let excluded = [
+            "Binaries/Mac/Test.dylib",
+            "Intermediate/Build/Mac/arm64/UnrealGame/Test.cpp.o",
+            "Intermediate/Build/IOS/arm64/UnrealGame/Test.cpp.o",
+            "Intermediate/Build/Android/a/UnrealGame/Test.cpp.o",
+            "Binaries/Linux/libTest.so",
+        ];
+        let original_bytes: u64 = manifest.files.iter().map(|f| f.size()).sum();
+        for (i, name) in included.iter().chain(&excluded).enumerate() {
+            let bytes = vec![i as u8; 1024];
+            let guid = format!("platform-{i}");
+            manifest.files.push(buildpatch::File {
+                name: format!("Engine/Plugins/Marketplace/Test/{name}"),
+                sha: buildpatch::digest(&bytes),
+                parts: vec![buildpatch::Part {
+                    guid: guid.clone(),
+                    offset: 0,
+                    size: bytes.len() as u32,
+                }],
+                ..Default::default()
+            });
+            manifest.chunks.insert(guid.clone(), Default::default());
+            cache.insert(guid, bytes);
+        }
+        let mut progress = Progress::default();
+        let plugin = extract(
+            &manifest,
+            &[],
+            "5.8",
+            dir.path(),
+            &Control::default(),
+            &mut cache,
+            |p| progress = p,
+        )
+        .unwrap();
+        for file in excluded {
+            assert!(
+                !plugin.join(file).exists(),
+                "Downloaded non-Windows artifact: {file}"
+            );
+        }
+        for file in included {
+            assert!(plugin.join(file).is_file(), "Dropped required file: {file}");
+        }
+        assert_eq!(
+            progress.total,
+            original_bytes + included.len() as u64 * 1024
+        );
+        assert_eq!(progress.total_files, 3 + included.len());
+        let health = crate::vault_health::verify_roots(
+            &[dir.path().to_string_lossy().into()],
+            &crate::vault_health::Selection::All,
+            &crate::vault_health::Gate::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            health[0].health,
+            crate::vault_health::Health::Healthy,
+            "Skipped platforms must not become missing-file errors"
+        );
     }
     #[test]
     fn extracts_without_an_engine_preserves_source_and_binaries_and_reuses_verified_files() {

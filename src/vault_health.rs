@@ -174,12 +174,19 @@ struct FileIndex {
     files: Vec<SavedFile>,
 }
 
-fn download_index(manifest: &Manifest, prefix: &Path, output: &Path) -> Result<FileIndex, String> {
+fn download_index(
+    manifest: &Manifest,
+    prefix: &Path,
+    output: &Path,
+    windows_only: bool,
+) -> Result<FileIndex, String> {
     let mut files = Vec::new();
     for file in &manifest.files {
         let name = installer::relative(&file.name)?;
         if let Ok(relative) = name.strip_prefix(prefix) {
-            if !relative.as_os_str().is_empty() {
+            if !relative.as_os_str().is_empty()
+                && (!windows_only || crate::plugins::package_files::windows_file(relative))
+            {
                 files.push(SavedFile {
                     name: output.join(relative).to_string_lossy().replace('\\', "/"),
                     sha: file.sha,
@@ -204,7 +211,18 @@ pub fn write_download_index(
 ) -> Result<(), String> {
     crate::storage::write_json(
         &root.join(INDEX),
-        &download_index(manifest, prefix, output)?,
+        &download_index(manifest, prefix, output, false)?,
+    )
+}
+pub fn write_windows_download_index(
+    root: &Path,
+    manifest: &Manifest,
+    prefix: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    crate::storage::write_json(
+        &root.join(INDEX),
+        &download_index(manifest, prefix, output, true)?,
     )
 }
 fn legacy_plugin(path: &Path) -> Option<(String, String)> {
@@ -221,13 +239,10 @@ fn original_plugin_index(path: &Path, manifest: &Manifest) -> Result<Option<File
         return Ok(None);
     };
     let fingerprint = crate::fab::plugin_download::cache_fingerprint(manifest)?;
-    let suffix = format!("-{}", &fingerprint[..16]);
-    if !path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .ends_with(&suffix)
-    {
+    let windows_fingerprint = crate::fab::plugin_download::windows_cache_fingerprint(manifest)?;
+    let folder = path.file_name().unwrap_or_default().to_string_lossy();
+    let windows_only = folder.ends_with(&format!("-{}", &windows_fingerprint[..16]));
+    if !windows_only && !folder.ends_with(&format!("-{}", &fingerprint[..16])) {
         return Ok(None);
     }
     let descriptors: Vec<_> = manifest
@@ -246,6 +261,7 @@ fn original_plugin_index(path: &Path, manifest: &Manifest) -> Result<Option<File
         manifest,
         descriptor.parent().ok_or("Invalid plugin root")?,
         Path::new(&name),
+        windows_only,
     )?))
 }
 fn expected_index_path(path: &Path) -> PathBuf {
@@ -874,6 +890,36 @@ fn verify_roots_using(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    #[test]
+    fn original_manifest_recovery_distinguishes_full_and_windows_only_cache_folders() {
+        let cache = tempfile::tempdir().unwrap();
+        let manifest = crate::plugins::package_files::cached_fixture(cache.path(), "5.7.0");
+        let all = crate::fab::plugin_download::cache_fingerprint(&manifest).unwrap();
+        let windows = crate::fab::plugin_download::windows_cache_fingerprint(&manifest).unwrap();
+        assert_ne!(
+            all, windows,
+            "Windows payload must not silently reuse an old full-platform folder"
+        );
+        for (fingerprint, expected) in [(all, 9), (windows, 5)] {
+            let entry = cache.path().join(format!(
+                "EngineWorkspace/Plugins/Test/UE_5.7-{}",
+                &fingerprint[..16]
+            ));
+            let index = original_plugin_index(&entry, &manifest).unwrap().unwrap();
+            assert_eq!(index.files.len(), expected);
+            assert_eq!(
+                index.files.iter().any(|f| f.name.contains("Binaries/Mac/")),
+                expected == 9
+            );
+            assert!(
+                index.files.iter().any(|f| f.name.contains("Source/Mac/")),
+                "Preserve source code"
+            );
+            let mut wrong = manifest.clone();
+            wrong.build = "another-build".into();
+            assert!(original_plugin_index(&entry, &wrong).unwrap().is_none());
+        }
+    }
 
     #[test]
     fn read_progress_has_no_rate_delay_and_still_honors_stop() {

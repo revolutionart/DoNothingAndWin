@@ -2363,4 +2363,19 @@ impl Workspace {
         self.library.install_control = None;
         self.library.install_queue = Default::default();
     }
+    pub(super) fn preview_install_progress(&mut self, streaming: bool) {
+        self.library.installing = true;
+        self.library.install_control = Some(engine_workspace::installer::Control::default());
+        let file = if streaming { 1471 } else { 1472 };
+        self.library.status = format!(
+            "PCGEx • Version {} • UE 5.8.4 • Engine 1 of 1 • Preparing file {file} / 7076 - 20.8%\n{}",
+            engine_workspace::plugins::display_version("0.79.3+0.1"),
+            fab::transfer_totals(
+                2_824_509_988,
+                13_579_374_942,
+                515_000_000,
+                Some(2_829_795_131)
+            )
+        );
+    }
 }

@@ -2,6 +2,7 @@ pub mod catalogue;
 use std::path::{Path, PathBuf};
 pub mod backups;
 mod check_cache;
+pub(crate) mod package_files;
 mod parallel_checks;
 pub(crate) mod receipt;
 use std::{
@@ -463,6 +464,8 @@ pub(crate) fn compare_versions(
     if number != other_number {
         return Some(number.cmp(&other_number));
     }
+    let name = display_version(name);
+    let other_name = display_version(other_name);
     if name.trim() == other_name.trim() {
         return Some(Ordering::Equal);
     }
@@ -486,6 +489,41 @@ pub(crate) fn compare_versions(
         Some(parts)
     }
     Some(parts(name)?.cmp(&parts(other_name)?))
+}
+/// Present SemVer's release/prerelease label while retaining package build
+/// metadata in the original descriptor and all integrity records.
+pub fn display_version(name: &str) -> &str {
+    let trimmed = name.trim();
+    let plain = trimmed.trim_start_matches(['v', 'V']);
+    if semver::Version::parse(plain).is_ok() {
+        if let Some((release, _)) = trimmed.split_once('+') {
+            return release;
+        }
+    }
+    trimmed
+}
+#[cfg(test)]
+mod version_label_tests {
+    use super::*;
+    #[test]
+    fn package_build_metadata_does_not_become_another_release_version() {
+        assert_eq!(display_version("0.79.3+0.1"), "0.79.3");
+        assert_eq!(display_version("v0.79.3+build.1"), "v0.79.3");
+        assert_eq!(display_version("0.79.3-preview.1+0.1"), "0.79.3-preview.1");
+        assert_eq!(display_version("C++ Tools + Extras"), "C++ Tools + Extras");
+        assert_eq!(
+            compare_versions(1, "0.79.3+0.1", 1, "0.79.3"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            compare_versions(1, "0.79.3+0.1", 1, "0.79.2"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_versions(1, "0.79.3-preview.1+0.1", 1, "0.79.3"),
+            None
+        );
+    }
 }
 // The descriptor can retain a legacy Marketplace ID after Epic changes the
 // entitled catalog item ID. Never rewrite the user's descriptor to bridge it.
@@ -1708,6 +1746,9 @@ pub fn update_plugin_with_progress(
             if relative.as_os_str().is_empty() {
                 continue;
             }
+            if !package_files::windows_file(relative) {
+                continue;
+            }
             if !names.insert(relative.to_string_lossy().to_lowercase()) {
                 return Err("Duplicate plugin paths".into());
             }
@@ -1941,6 +1982,56 @@ mod operation_tests {
             !Path::new(&e.path)
                 .join(".engine-workspace-plugin-backups")
                 .exists()
+        );
+    }
+    #[test]
+    fn windows_update_retains_required_build_files_and_skips_foreign_artifacts() {
+        let (_dir, engine, plugin) = fixture();
+        let cache = tempfile::tempdir().unwrap();
+        let manifest = package_files::cached_fixture(cache.path(), "5.7.0");
+        let update = Update {
+            version: "2.0".into(),
+            number: 2,
+            manifest,
+            bases: vec![],
+            prefix: PathBuf::from("Test"),
+        };
+        let mut total = 0;
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            update_plugin_with_progress(&engine, &plugin, &update, |p| {
+                if p.phase == "Preparing and verifying files" {
+                    total = p.total;
+                }
+            })
+        })
+        .unwrap();
+        let root = plugin.descriptor.parent().unwrap();
+        assert!(
+            total < 1024,
+            "Progress must exclude the foreign package files"
+        );
+        assert!(root.join("Binaries/Win64/Test.dll").is_file());
+        assert!(
+            root.join("Intermediate/Build/Win64/x64/UnrealGame/Test.cpp.obj")
+                .is_file()
+        );
+        assert!(
+            root.join("Intermediate/Build/Win64/UnrealGame/Test.precompiled")
+                .is_file()
+        );
+        assert!(root.join("Source/Mac/Module.cpp").is_file());
+        for path in [
+            "Binaries/Mac",
+            "Intermediate/Build/Mac",
+            "Intermediate/Build/IOS",
+            "Intermediate/Build/Android",
+        ] {
+            assert!(!root.join(path).exists(), "Copied {path}");
+        }
+        assert_eq!(
+            backups::list(&engine).unwrap().len(),
+            1,
+            "Previous plugin must remain backed up"
         );
     }
     #[test]

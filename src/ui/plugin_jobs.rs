@@ -284,8 +284,8 @@ impl Workspace {
                     let title = format!(
                         "{} {} → {} • UE {} • Plugin {} of {}",
                         p.name,
-                        p.version,
-                        u.version,
+                        plugins::display_version(&p.version),
+                        plugins::display_version(&u.version),
                         engine.version,
                         index + 1,
                         count
@@ -717,7 +717,7 @@ impl Workspace {
                             plugin_cell(
                                 ui,
                                 cell(columns[1], columns[2]),
-                                RichText::new(&p.version),
+                                RichText::new(plugins::display_version(&p.version)),
                                 &p.version,
                             );
                             let available = checked
@@ -727,7 +727,7 @@ impl Workspace {
                             plugin_cell(
                                 ui,
                                 cell(columns[2], columns[3]),
-                                RichText::new(available),
+                                RichText::new(plugins::display_version(available)),
                                 available,
                             );
                             let detail = checked

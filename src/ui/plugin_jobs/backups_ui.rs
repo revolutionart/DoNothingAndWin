@@ -188,9 +188,13 @@ impl Workspace {
                             .show(ui, |ui| {
                                 ui.set_width((ui.available_width() - 2.).max(200.));
                                 ui.label(
-                                    RichText::new(format!("{} • {}", backup.name, backup.version))
-                                        .strong()
-                                        .color(color(theme.text)),
+                                    RichText::new(format!(
+                                        "{} • {}",
+                                        backup.name,
+                                        plugins::display_version(&backup.version)
+                                    ))
+                                    .strong()
+                                    .color(color(theme.text)),
                                 );
                                 let age =
                                     engine_workspace::epic::now().saturating_sub(backup.created);
@@ -265,9 +269,9 @@ impl Workspace {
                         ui.separator();
                         let restoring = matches!(confirm, Action::Restore(..));
                         ui.label(if restoring {
-                            format!("Restore {} {} in UE {}? The current plugin will be saved as another backup. Close Unreal Editor first.",backup.name,backup.version,engine.version)
+                            format!("Restore {} {} in UE {}? The current plugin will be saved as another backup. Close Unreal Editor first.",backup.name,plugins::display_version(&backup.version),engine.version)
                         } else {
-                            format!("Permanently delete the backup of {} {}? The installed plugin will stay unchanged.",backup.name,backup.version)
+                            format!("Permanently delete the backup of {} {}? The installed plugin will stay unchanged.",backup.name,plugins::display_version(&backup.version))
                         });
                         ui.horizontal(|ui| {
                             let mut danger = theme.clone();

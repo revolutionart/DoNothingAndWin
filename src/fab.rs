@@ -543,6 +543,9 @@ fn install_package(
             if relative.as_os_str().is_empty() {
                 continue;
             }
+            if item.plugin() && !crate::plugins::package_files::windows_file(&relative) {
+                continue;
+            }
             if !names.insert(relative.to_string_lossy().to_lowercase()) {
                 return Err("Duplicate package path".into());
             }
@@ -561,6 +564,8 @@ fn install_package(
         return Err("Package contains no importable content".into());
     }
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
+    let download_bytes =
+        crate::plugins::package_files::compressed_size(&manifest, files.iter().map(|(f, _)| *f));
     if fs2::available_space(&target).map_err(|e| e.to_string())? < bytes + 64 * 1024 * 1024 {
         return Err("Not enough disk space".into());
     }
@@ -578,7 +583,14 @@ fn install_package(
         let mut downloaded = 0u64;
         for (i, (file, relative)) in files.iter().enumerate() {
             control.check()?;
-            progress(format!("Downloading {} / {} files", i + 1, files.len()));
+            progress(transfer_status(
+                i + 1,
+                files.len(),
+                prepared,
+                bytes,
+                downloaded,
+                download_bytes,
+            ));
             let path = stage.join(relative);
             fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
             let mut file_downloaded = 0;
@@ -599,6 +611,7 @@ fn install_package(
                             prepared + written,
                             bytes,
                             downloaded + received,
+                            download_bytes,
                         ));
                         last_report = std::time::Instant::now();
                     }
@@ -658,6 +671,129 @@ fn install_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_install_keeps_windows_precompiled_files_and_does_not_copy_other_platforms() {
+        let target = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let manifest = crate::plugins::package_files::cached_fixture(cache.path(), "5.7.0");
+        let item:Item = serde_json::from_value(serde_json::json!({"assetId":"test","assetNamespace":"test","title":"Test","distributionMethod":"CODE_PLUGIN","projectVersions":[{"artifactId":"fixture-artifact","engineVersions":["5.7"],"targetPlatforms":["Windows"]}]})).unwrap();
+        let version = item.compatible("5.7.4").unwrap();
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            install_package(
+                &item,
+                &version,
+                target.path(),
+                "5.7.4",
+                || Ok((manifest, vec![])),
+                &installer::Control::default(),
+                |_| {},
+            )
+        })
+        .unwrap();
+        let plugin = target.path().join("Engine/Plugins/Marketplace/Test");
+        assert!(plugin.join("Binaries/Win64/Test.dll").is_file());
+        assert!(
+            plugin
+                .join("Intermediate/Build/Win64/x64/UnrealGame/Test.cpp.obj")
+                .is_file()
+        );
+        assert!(
+            plugin
+                .join("Intermediate/Build/Win64/UnrealGame/Test.precompiled")
+                .is_file()
+        );
+        assert!(plugin.join("Source/Mac/Module.cpp").is_file());
+        for path in [
+            "Binaries/Mac",
+            "Intermediate/Build/Mac",
+            "Intermediate/Build/IOS",
+            "Intermediate/Build/Android",
+        ] {
+            assert!(!plugin.join(path).exists(), "Copied {path}");
+        }
+    }
+
+    #[test]
+    fn compressed_download_size_is_not_presented_as_the_expanded_file_size() {
+        let status = transfer_status(
+            18101,
+            21146,
+            29_802_320_691,
+            34_854_983_557,
+            2_752_302_284,
+            Some(7_628_572_581),
+        );
+        assert!(status.contains("Package download size: 7.10 GiB"));
+        assert!(status.contains("Network received: 2.56 GiB"));
+        assert!(status.contains("Files prepared: 27.76 GiB / 32.46 GiB"));
+        assert!(
+            !status.contains("Downloading file"),
+            "File preparation percentage must not imply network percentage"
+        );
+    }
+    #[test]
+    fn transfer_byte_totals_stay_visible_when_advancing_to_the_next_file() {
+        let root = tempfile::tempdir().unwrap();
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"test", "assetNamespace":"test", "title":"Test", "distributionMethod":"ASSET_PACK",
+            "projectVersions":[{"artifactId":"test58", "engineVersions":["5.8"], "targetPlatforms":["Windows"]}]
+        })).unwrap();
+        let version = item.compatible("5.8.4").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let payload = b"cached asset bytes";
+        let chunk = buildpatch::Chunk {
+            guid: "progress-test".into(),
+            sha: buildpatch::digest(payload),
+            window: payload.len() as u32,
+            ..Default::default()
+        };
+        let chunks = cache.path().join("EngineWorkspace/Chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join(buildpatch::hex(&chunk.sha)), payload).unwrap();
+        let manifest = buildpatch::Manifest {
+            files: (0..3)
+                .map(|index| buildpatch::File {
+                    name: format!("Content/File{index}.uasset"),
+                    sha: buildpatch::digest(payload),
+                    parts: vec![buildpatch::Part {
+                        guid: chunk.guid.clone(),
+                        size: payload.len() as u32,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            chunks: [(chunk.guid.clone(), chunk)].into(),
+            ..Default::default()
+        };
+        let statuses = std::cell::RefCell::new(Vec::new());
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            install_package(
+                &item,
+                &version,
+                root.path(),
+                "5.8.4",
+                || Ok((manifest, vec![])),
+                &installer::Control::default(),
+                |status| statuses.borrow_mut().push(status),
+            )
+        })
+        .unwrap();
+        let statuses = statuses.into_inner();
+        let downloading: Vec<_> = statuses
+            .iter()
+            .filter(|status| status.starts_with("Preparing file"))
+            .collect();
+        assert!(downloading.len() >= 6);
+        assert!(downloading.iter().any(|s| s.contains("Network received:")));
+        for status in downloading {
+            assert!(
+                status.contains("Files prepared:") && status.contains("Network received:"),
+                "File-boundary event hid the byte counters: {status}"
+            );
+        }
+    }
+
     #[test]
     fn asset_import_rejects_project_manifest_before_copying_any_content() {
         let root = tempfile::tempdir().unwrap();
@@ -942,6 +1078,8 @@ pub fn create_project_with_control(
     let (manifest, bases) = package_result?;
     let files = template_files(&manifest)?;
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
+    let download_bytes =
+        crate::plugins::package_files::compressed_size(&manifest, files.iter().map(|(f, _)| *f));
     if fs2::available_space(&parent).map_err(|e| e.to_string())?
         < bytes.saturating_add(64 * 1024 * 1024)
     {
@@ -957,10 +1095,13 @@ pub fn create_project_with_control(
         let mut project = None;
         for (i, (file, relative)) in files.iter().enumerate() {
             control.check()?;
-            progress(format!(
-                "Downloading project file {} / {}",
+            progress(transfer_status(
                 i + 1,
-                files.len()
+                files.len(),
+                prepared,
+                bytes,
+                downloaded,
+                download_bytes,
             ));
             let path = destination.join(relative);
             installer::no_links(&path)?;
@@ -983,6 +1124,7 @@ pub fn create_project_with_control(
                             prepared + written,
                             bytes,
                             downloaded + received,
+                            download_bytes,
                         ));
                         last_report = std::time::Instant::now();
                     }
@@ -1188,18 +1330,45 @@ fn transfer_status(
     prepared: u64,
     total: u64,
     downloaded: u64,
+    download_bytes: Option<u64>,
 ) -> String {
-    let mib = 1024. * 1024.;
     let percent = if total == 0 {
         100.
     } else {
         prepared as f64 / total as f64 * 100.
     };
     format!(
-        "Downloading file {file} / {files} - {percent:.1}%\n{:.1} / {:.1} MiB prepared • {:.1} MiB downloaded",
-        prepared as f64 / mib,
-        total as f64 / mib,
-        downloaded as f64 / mib
+        "Preparing file {file} / {files} - {percent:.1}%\n{}",
+        transfer_totals(prepared, total, downloaded, download_bytes)
+    )
+}
+
+/// Keep compressed network traffic distinct from expanded, verified output.
+pub fn transfer_totals(
+    prepared: u64,
+    total: u64,
+    downloaded: u64,
+    download_bytes: Option<u64>,
+) -> String {
+    fn size(bytes: u64, reference: u64) -> String {
+        if reference >= 1024 * 1024 * 1024 {
+            format!("{:.2} GiB", bytes as f64 / 1073741824.)
+        } else if reference >= 1024 * 1024 {
+            format!("{:.1} MiB", bytes as f64 / 1048576.)
+        } else if reference >= 1024 {
+            format!("{:.1} KiB", bytes as f64 / 1024.)
+        } else {
+            format!("{bytes} B")
+        }
+    }
+    let network = size(downloaded, download_bytes.unwrap_or(downloaded));
+    let package = download_bytes
+        .map(|bytes| format!(" • Package download size: {}", size(bytes, bytes)))
+        .unwrap_or_default();
+    format!(
+        "Network received: {network}{package}\nFiles prepared: {} / {}",
+        size(prepared, total),
+        size(total, total)
     )
 }
 
