@@ -41,6 +41,7 @@ $installer = $installer.Replace('Source: "..\dist\app\*"', 'Source: "' + $payloa
 $installer = $installer.Replace('OutputDir=..\dist', 'OutputDir=' + $probe)
 $installer = $installer.Replace('LicenseFile=..\LICENSE', 'LicenseFile=' + (Join-Path $repo 'LICENSE'))
 $installer = $installer.Replace('InfoBeforeFile=welcome.txt', 'InfoBeforeFile=' + (Join-Path $repo 'installer/welcome.txt'))
+$installer = $installer.Replace('SetupIconFile=..\assets\brand_icon.ico', 'SetupIconFile=' + (Join-Path $repo 'assets/brand_icon.ico'))
 $script = Join-Path $probe 'launcher.iss'
 Set-Content -LiteralPath $script -Value $installer -Encoding UTF8
 & $Iscc /Q /DAppVersion=9.9.9 $script

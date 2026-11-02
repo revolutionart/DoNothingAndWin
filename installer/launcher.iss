@@ -21,6 +21,7 @@ OutputBaseFilename=DoNothingAndWin-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\brand_icon.ico
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 InfoBeforeFile=welcome.txt

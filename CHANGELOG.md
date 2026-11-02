@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.5 - 2026-11-02
+
+### App icon
+
+- Replace the crown app icon with the new gold-and-black launcher artwork across the app window, taskbar, tray, desktop/Start menu shortcuts and installer.
+- Include Windows icon sizes from 16 to 256 pixels for small icons and larger desktop views. Keep the original 400-pixel PNG for the app window.
+
 ## 1.3.4 - 2026-10-27
 
 ### Library
