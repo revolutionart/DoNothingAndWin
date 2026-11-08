@@ -17,6 +17,7 @@ pub(super) struct LayoutProbe {
     library_organization: bool,
     plugin_install: bool,
     library_queue: bool,
+    pub(super) project_menu: bool,
     empty_projects: bool,
     page: Option<Page>,
 }
@@ -53,10 +54,18 @@ impl LayoutProbe {
             plugin_install: std::env::args().any(|a| {
                 a == "--plugin-install-preview"
                     || a == "--queued-install-preview"
+                    || a == "--queued-asset-preview"
                     || a == "--plugin-download-preview"
             }),
-            library_queue: std::env::args()
-                .any(|a| a == "--library-queue-preview" || a == "--queued-install-preview"),
+            library_queue: std::env::args().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "--library-queue-preview"
+                        | "--queued-install-preview"
+                        | "--queued-asset-preview"
+                )
+            }),
+            project_menu: std::env::args().any(|a| a == "--project-menu-preview"),
             library_organization: std::env::args().any(|a| a == "--library-organization-preview"),
             empty_projects: std::env::args().any(|a| a == "--empty-projects-preview"),
             page: std::env::args().find_map(|a| match a.as_str() {
@@ -64,13 +73,16 @@ impl LayoutProbe {
                 "--library-organization-preview"
                 | "--plugin-install-preview"
                 | "--plugin-download-preview"
-                | "--queued-install-preview" => Some(Page::Library),
+                | "--queued-install-preview"
+                | "--queued-asset-preview"
+                | "--asset-overwrite-preview"
+                | "--asset-failure-preview" => Some(Page::Library),
                 "--page-preview=downloads" | "--library-queue-preview" => Some(Page::Downloads),
                 "--page-preview=library" => Some(Page::Library),
                 "--page-preview=free-offers" => Some(Page::FreeOffers),
                 "--page-preview=vault-cache" => Some(Page::VaultCache),
                 "--page-preview=engines" => Some(Page::Engines),
-                "--page-preview=projects" => Some(Page::Projects),
+                "--page-preview=projects" | "--project-menu-preview" => Some(Page::Projects),
                 "--page-preview=workspace" => Some(Page::Workspace),
                 _ => None,
             }),
@@ -265,6 +277,15 @@ impl Workspace {
             if probe.library_organization {
                 self.preview_library_organization(probe.step);
             }
+            if std::env::args().any(|arg| arg == "--asset-overwrite-preview") {
+                self.preview_asset_overwrite();
+            }
+            if std::env::args().any(|arg| arg == "--asset-failure-preview") {
+                self.show_toast(
+                    "Installation failed: Unable to write to the project folder.",
+                    true,
+                );
+            }
             if probe.plugin_install {
                 self.preview_plugin_install();
                 if std::env::args().any(|a| a == "--plugin-download-preview") {
@@ -276,6 +297,26 @@ impl Workspace {
             }
             if probe.library_queue {
                 self.preview_library_queue();
+                if std::env::args().any(|a| a == "--queued-asset-preview") {
+                    self.preview_queued_asset();
+                }
+            }
+            if probe.project_menu {
+                self.demo = true;
+                self.projects = vec![Project {
+                    name: "Sample Project".into(),
+                    path: "C:/Preview/SampleProject/SampleProject.uproject".into(),
+                    description: String::new(),
+                    engine: "5.8".into(),
+                    pinned: false,
+                    last_opened: 0,
+                    artwork: None,
+                }];
+                self.search.clear();
+                self.filter = "All versions".into();
+                self.pinned_only = false;
+                self.category_filter = None;
+                self.list_view = false;
             }
             if let Some(page) = probe.page {
                 self.page = page;

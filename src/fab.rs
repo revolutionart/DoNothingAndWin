@@ -439,6 +439,28 @@ pub fn install_with_control(
     control: &installer::Control,
     progress: impl Fn(String),
 ) -> Result<String, String> {
+    install_with_conflict_check(
+        session,
+        item,
+        version,
+        target,
+        engine_version,
+        control,
+        progress,
+        reject_conflicts,
+    )
+}
+
+pub fn install_with_conflict_check(
+    session: &Session,
+    item: &Item,
+    version: &Version,
+    target: &Path,
+    engine_version: &str,
+    control: &installer::Control,
+    progress: impl Fn(String),
+    approve: impl FnMut(&[PathBuf]) -> Result<(), String>,
+) -> Result<String, String> {
     install_package(
         item,
         version,
@@ -447,7 +469,15 @@ pub fn install_with_control(
         || package(session, item, version),
         control,
         progress,
+        approve,
     )
+}
+
+fn reject_conflicts(paths: &[PathBuf]) -> Result<(), String> {
+    Err(format!(
+        "Existing file would be overwritten: {}",
+        paths[0].display()
+    ))
 }
 
 fn install_package(
@@ -458,6 +488,7 @@ fn install_package(
     package: impl FnOnce() -> Result<(buildpatch::Manifest, Vec<reqwest::Url>), String>,
     control: &installer::Control,
     progress: impl Fn(String),
+    mut approve: impl FnMut(&[PathBuf]) -> Result<(), String>,
 ) -> Result<String, String> {
     control.check()?;
     if item.complete_project() {
@@ -549,20 +580,31 @@ fn install_package(
             if !names.insert(relative.to_string_lossy().to_lowercase()) {
                 return Err("Duplicate package path".into());
             }
-            let dest = destination.join(&relative);
-            installer::no_links(&dest)?;
-            if dest.exists() {
-                return Err(format!(
-                    "Existing file would be overwritten: {}. Choose another project.",
-                    dest.display()
-                ));
-            }
             files.push((file, relative));
         }
     }
     if files.is_empty() {
         return Err("Package contains no importable content".into());
     }
+    let mut approved = HashSet::new();
+    let mut check_conflicts = |approved: &mut HashSet<PathBuf>| -> Result<(), String> {
+        let mut conflicts = Vec::new();
+        for (_, relative) in &files {
+            if asset_file_exists(&destination.join(relative))? && !approved.contains(relative) {
+                conflicts.push(relative.clone());
+            }
+        }
+        if !conflicts.is_empty() {
+            if item.plugin() {
+                return reject_conflicts(&conflicts);
+            }
+            approve(&conflicts)?;
+            control.check()?;
+            approved.extend(conflicts);
+        }
+        Ok(())
+    };
+    check_conflicts(&mut approved)?;
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
     let download_bytes =
         crate::plugins::package_files::compressed_size(&manifest, files.iter().map(|(f, _)| *f));
@@ -577,6 +619,7 @@ fn install_package(
             .as_nanos()
     ));
     fs::create_dir(&stage).map_err(|e| e.to_string())?;
+    let mut retain_stage = false;
     let result = (|| {
         let mut cache = HashMap::new();
         let mut prepared = 0u64;
@@ -620,6 +663,9 @@ fn install_package(
             prepared += file.size();
             downloaded += file_downloaded;
         }
+        if !item.plugin() {
+            check_conflicts(&mut approved)?;
+        }
         progress("Installing verified files...".into());
         control.check()?;
         let _change = crate::vault_health::changing(&destination);
@@ -634,43 +680,190 @@ fn install_package(
             control.check()?;
             fs::rename(&stage, &destination).map_err(|e| e.to_string())?;
         } else {
+            let originals = stage.join(".originals");
             let mut created = Vec::new();
+            let mut moved = Vec::new();
             let commit = (|| {
                 for (_, relative) in &files {
                     control.check()?;
                     let dest = destination.join(relative);
-                    installer::no_links(&dest)?;
+                    if asset_file_exists(&dest)? && approved.contains(relative) {
+                        let backup = originals.join(relative);
+                        fs::create_dir_all(backup.parent().unwrap()).map_err(|e| e.to_string())?;
+                        move_asset_file(&dest, &backup).map_err(|e| {
+                            format!("Could not back up {}: {e}", relative.display())
+                        })?;
+                        moved.push((backup, dest.clone()));
+                    }
                     fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-                    let mut out = fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&dest)
-                        .map_err(|e| e.to_string())?;
+                    move_asset_file(&stage.join(relative), &dest)
+                        .map_err(|e| format!("Could not install {}: {e}", relative.display()))?;
                     created.push(dest);
-                    let mut source =
-                        fs::File::open(stage.join(relative)).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut source, &mut out).map_err(|e| e.to_string())?;
                 }
                 Ok::<(), String>(())
             })();
             if let Err(e) = commit {
-                for p in created {
-                    let _ = fs::remove_file(p);
+                let mut rollback_error = None;
+                for path in created.into_iter().rev() {
+                    if let Err(error) = fs::remove_file(path) {
+                        rollback_error = Some(error);
+                    }
+                }
+                for (backup, dest) in moved.into_iter().rev() {
+                    if let Err(error) = move_asset_file(&backup, &dest) {
+                        rollback_error = Some(error);
+                    }
+                }
+                if let Some(error) = rollback_error {
+                    retain_stage = true;
+                    return Err(format!(
+                        "Could not fully undo the import. Recovery files are in {}. {error}. Import error: {e}",
+                        stage.display()
+                    ));
                 }
                 return Err(e);
             }
         }
         Ok(format!("Installed {} ({} files)", item.title, files.len()))
     })();
+    if retain_stage {
+        return result;
+    }
     if stage.exists() {
         let _ = fs::remove_dir_all(&stage);
     }
     transfer_result(result, control)
 }
 
+fn asset_file_exists(path: &Path) -> Result<bool, String> {
+    installer::no_links(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(format!("Expected a file at {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Could not inspect {}: {error}", path.display())),
+    }
+}
+
+// Activate and restore files without replacing a destination that appeared concurrently.
+fn move_asset_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::hard_link(from, to)?;
+        if let Err(error) = fs::remove_file(from) {
+            let _ = fs::remove_file(to);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overwrite_fixture() -> (Item, Version, buildpatch::Manifest) {
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "assetId":"test", "assetNamespace":"test", "title":"Test",
+            "distributionMethod":"ASSET_PACK",
+            "projectVersions":[{"artifactId":"test56", "engineVersions":["5.6"], "targetPlatforms":["Windows"]}]
+        })).unwrap();
+        let version = item.compatible("5.6.1").unwrap();
+        let manifest = buildpatch::Manifest {
+            files: ["Content/Existing.uasset", "Content/New/Added.uasset"]
+                .into_iter()
+                .map(|name| buildpatch::File {
+                    name: name.into(),
+                    sha: buildpatch::digest(&[]),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        (item, version, manifest)
+    }
+
+    #[test]
+    fn existing_assets_require_approval_before_any_files_are_prepared() {
+        for approve in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (item, version, manifest) = overwrite_fixture();
+            let content = root.path().join("Content");
+            fs::create_dir(&content).unwrap();
+            let existing = content.join("Existing.uasset");
+            fs::write(&existing, b"local edits").unwrap();
+            let untouched = content.join("Unrelated.uasset");
+            fs::write(&untouched, b"unrelated").unwrap();
+            let mut prompts = 0;
+            let result = install_package(
+                &item,
+                &version,
+                root.path(),
+                "5.6.1",
+                || Ok((manifest, vec![])),
+                &installer::Control::default(),
+                |_| {},
+                |paths| {
+                    prompts += 1;
+                    assert_eq!(paths, [PathBuf::from("Content").join("Existing.uasset")]);
+                    assert_eq!(fs::read(&existing).unwrap(), b"local edits");
+                    assert!(!content.join("New").exists());
+                    if approve {
+                        Ok(())
+                    } else {
+                        Err("Stopped. Asset import cancelled.".into())
+                    }
+                },
+            );
+            assert_eq!(prompts, 1);
+            assert_eq!(result.is_ok(), approve);
+            assert_eq!(content.join("New/Added.uasset").is_file(), approve);
+            let expected: &[u8] = if approve { b"" } else { b"local edits" };
+            assert_eq!(fs::read(existing).unwrap(), expected);
+            assert_eq!(fs::read(untouched).unwrap(), b"unrelated");
+        }
+    }
+
+    #[test]
+    fn failed_commit_restores_an_overwritten_asset() {
+        let root = tempfile::tempdir().unwrap();
+        let (item, version, manifest) = overwrite_fixture();
+        let content = root.path().join("Content");
+        fs::create_dir(&content).unwrap();
+        let existing = content.join("Existing.uasset");
+        fs::write(&existing, b"local edits").unwrap();
+        let result = install_package(
+            &item,
+            &version,
+            root.path(),
+            "5.6.1",
+            || Ok((manifest, vec![])),
+            &installer::Control::default(),
+            |status| {
+                if status == "Installing verified files..." {
+                    fs::write(content.join("New"), b"new blocker").unwrap();
+                }
+            },
+            |_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"local edits");
+        assert_eq!(fs::read(content.join("New")).unwrap(), b"new blocker");
+    }
+
     #[test]
     fn windows_install_keeps_windows_precompiled_files_and_does_not_copy_other_platforms() {
         let target = tempfile::tempdir().unwrap();
@@ -687,6 +880,7 @@ mod tests {
                 || Ok((manifest, vec![])),
                 &installer::Control::default(),
                 |_| {},
+                reject_conflicts,
             )
         })
         .unwrap();
@@ -776,6 +970,7 @@ mod tests {
                 || Ok((manifest, vec![])),
                 &installer::Control::default(),
                 |status| statuses.borrow_mut().push(status),
+                reject_conflicts,
             )
         })
         .unwrap();
@@ -824,6 +1019,7 @@ mod tests {
             || Ok((manifest, vec![])),
             &installer::Control::default(),
             |_| {},
+            reject_conflicts,
         );
         assert!(
             result
@@ -869,6 +1065,7 @@ mod tests {
                     control.stop();
                 }
             },
+            reject_conflicts,
         );
         assert!(result.unwrap_err().starts_with("Stopped."));
         assert_eq!(
@@ -895,6 +1092,7 @@ mod tests {
             },
             &control,
             |_| {},
+            reject_conflicts,
         );
         assert!(result.unwrap_err().starts_with("Stopped."));
     }

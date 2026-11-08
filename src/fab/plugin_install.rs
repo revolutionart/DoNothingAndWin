@@ -215,6 +215,7 @@ pub fn install_many(
                         item.title
                     ))
                 },
+                super::reject_conflicts,
             )?;
             Ok(format!(
                 "Installed {} (version {name}) for Unreal Engine {}",

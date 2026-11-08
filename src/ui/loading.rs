@@ -2,8 +2,8 @@ use super::*;
 
 pub(super) const SIZE: f32 = 16.;
 
-/// All circular loading indicators use this fixed geometry and contrast.
-/// Callers choose placement, never size or color.
+/// All circular loading indicators use this fixed geometry.
+/// The default contrast follows the theme.
 pub(super) fn spinner(theme: &Theme) -> Loader {
     Loader {
         color: if theme.dark {
@@ -13,6 +13,17 @@ pub(super) fn spinner(theme: &Theme) -> Loader {
         },
     }
 }
+
+pub(super) fn sidebar_spinner(theme: &Theme, highlighted: bool) -> Loader {
+    if highlighted {
+        Loader {
+            color: color(SIDEBAR_ON_HIGHLIGHT),
+        }
+    } else {
+        spinner(theme)
+    }
+}
+
 pub(super) struct Loader {
     color: Color32,
 }
@@ -42,6 +53,37 @@ impl Widget for Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_spinner_matches_highlighted_button_text() {
+        for theme in [Theme::dark(), Theme::light()] {
+            for highlighted in [false, true] {
+                let ctx = Context::default();
+                let output = ctx.run(RawInput::default(), |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        ui.add(sidebar_spinner(&theme, highlighted));
+                    });
+                });
+                let path = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        Shape::Path(path) => Some(path),
+                        _ => None,
+                    })
+                    .expect("sidebar spinner painted");
+                let expected = if highlighted {
+                    Color32::BLACK
+                } else if theme.dark {
+                    Color32::WHITE
+                } else {
+                    color(theme.text)
+                };
+                assert_eq!(path.stroke.color, egui::epaint::ColorMode::Solid(expected));
+            }
+        }
+    }
+
     #[test]
     fn animation_keeps_the_same_arc_instead_of_shrinking_to_a_dot() {
         for time in [0., 0.25, 1., std::f64::consts::PI] {

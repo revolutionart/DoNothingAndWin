@@ -1,11 +1,66 @@
-//! Session-scoped plugin installation queue. Downloaded packages are resolved only at dispatch.
-use engine_workspace::{fab::Item, model::Installation};
-use std::collections::VecDeque;
+//! Session-scoped Library transfer queue. Packages are fetched only at dispatch.
+use engine_workspace::{
+    fab::{Item, Version},
+    model::Installation,
+};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone)]
 pub(super) struct Request {
     pub item: Item,
-    pub engines: Vec<Installation>,
+    pub target: Target,
+}
+
+#[derive(Clone)]
+pub(super) enum Target {
+    Engines(Vec<Installation>),
+    Import {
+        project: PathBuf,
+        name: String,
+        version: Version,
+        branch: String,
+    },
+    Create {
+        folder: PathBuf,
+        name: String,
+        version: Version,
+        branch: String,
+    },
+}
+
+impl Target {
+    pub fn engine_label(&self) -> String {
+        match self {
+            Self::Engines(engines) => engines
+                .iter()
+                .map(|engine| engine.version.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Self::Import { branch, .. } | Self::Create { branch, .. } => branch.clone(),
+        }
+    }
+
+    pub fn description(&self) -> String {
+        let engine = self.engine_label();
+        match self {
+            Self::Engines(_) => format!("UE {engine}"),
+            Self::Import { name, .. } => format!("Add to {name} · UE {engine}"),
+            Self::Create { name, .. } => format!("Create {name} · UE {engine}"),
+        }
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    fn key(path: &Path) -> String {
+        path.components()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+    key(left).eq_ignore_ascii_case(&key(right))
 }
 #[derive(Default)]
 pub(super) struct Queue {
@@ -19,11 +74,33 @@ impl Queue {
     pub fn contains(&self, item: &Item, path: &str) -> bool {
         self.active.iter().chain(self.waiting.iter()).any(|job| {
             job.item.key() == item.key()
-                && job
-                    .engines
-                    .iter()
-                    .any(|e| e.path.eq_ignore_ascii_case(path))
+                && matches!(&job.target, Target::Engines(engines) if engines.iter().any(|e| e.path.eq_ignore_ascii_case(path)))
         })
+    }
+
+    pub fn contains_import(&self, item: &Item, path: &Path) -> bool {
+        self.active.iter().chain(self.waiting.iter()).any(|job| {
+            job.item.key() == item.key()
+                && matches!(&job.target, Target::Import { project, .. } if same_path(project, path))
+        })
+    }
+
+    pub fn contains_creation(&self, destination: &Path) -> bool {
+        self.active.iter().chain(self.waiting.iter()).any(|job| {
+            matches!(&job.target, Target::Create { folder, name, .. } if same_path(&folder.join(name), destination))
+        })
+    }
+
+    pub fn enqueue_project(&mut self, job: Request) -> bool {
+        let available = match &job.target {
+            Target::Import { project, .. } => !self.contains_import(&job.item, project),
+            Target::Create { folder, name, .. } => !self.contains_creation(&folder.join(name)),
+            Target::Engines(_) => false,
+        };
+        if available {
+            self.waiting.push_back(job);
+        }
+        available
     }
     pub fn enqueue(&mut self, item: Item, engines: Vec<Installation>) -> usize {
         let mut accepted: Vec<Installation> = vec![];
@@ -40,7 +117,7 @@ impl Queue {
         if count > 0 {
             self.waiting.push_back(Request {
                 item,
-                engines: accepted,
+                target: Target::Engines(accepted),
             });
         }
         count
@@ -85,19 +162,12 @@ mod tests {
         assert!(q.start_next(false).is_none());
         let first = q.start_next(true).unwrap();
         assert_eq!(first.item.title, "first");
-        assert_eq!(
-            first
-                .engines
-                .iter()
-                .map(|e| e.version.as_str())
-                .collect::<Vec<_>>(),
-            ["5.6.1", "5.8.3"]
-        );
+        assert_eq!(first.target.engine_label(), "5.6.1, 5.8.3");
         assert!(q.start_next(true).is_none(), "never overlap active jobs");
         q.finished(); // Success, failure and stopped completions all release the active job.
         let second = q.start_next(true).unwrap();
         assert_eq!(second.item.title, "second");
-        assert_eq!(second.engines[0].version, "5.7.4");
+        assert_eq!(second.target.engine_label(), "5.7.4");
         q.finished();
         assert!(q.start_next(true).is_none());
     }
@@ -118,7 +188,7 @@ mod tests {
         assert_eq!(q.enqueue(item("plugin"), vec![alias]), 0);
         assert_eq!(q.waiting().len(), 1);
         q.finished();
-        assert_eq!(q.start_next(true).unwrap().engines[0].version, "5.6.1");
+        assert_eq!(q.start_next(true).unwrap().target.engine_label(), "5.6.1");
     }
     #[test]
     fn removing_or_clearing_waiting_jobs_does_not_interrupt_the_active_job() {
@@ -134,5 +204,60 @@ mod tests {
         assert!(q.start_next(true).is_none());
         q.finished();
         assert!(q.start_next(true).is_none());
+    }
+
+    #[test]
+    fn project_jobs_wait_in_order_and_keep_their_original_choices() {
+        let version: Version = serde_json::from_value(serde_json::json!({
+            "artifactId": "chosen-build", "engineVersions": ["5.8"]
+        }))
+        .unwrap();
+        let mut queue = Queue::default();
+        queue.enqueue(item("plugin"), vec![engine("5.8.3")]);
+        queue.start_next(true).unwrap();
+
+        let import = Request {
+            item: item("asset"),
+            target: Target::Import {
+                project: "C:/Projects/Game/Game.uproject".into(),
+                name: "Game".into(),
+                version: version.clone(),
+                branch: "5.8".into(),
+            },
+        };
+        let create = Request {
+            item: item("template"),
+            target: Target::Create {
+                folder: "C:/Projects".into(),
+                name: "NewGame".into(),
+                version,
+                branch: "5.8".into(),
+            },
+        };
+        assert!(queue.enqueue_project(import.clone()));
+        assert!(queue.enqueue_project(create.clone()));
+        assert!(!queue.enqueue_project(import.clone()));
+        let mut same_folder = create.clone();
+        same_folder.item = item("different-template");
+        assert!(!queue.enqueue_project(same_folder));
+        assert!(queue.start_next(true).is_none());
+        queue.finished();
+
+        let next = queue.start_next(true).unwrap();
+        assert!(
+            matches!(next.target, Target::Import { project, version, .. }
+            if project == Path::new("C:/Projects/Game/Game.uproject") && version.artifact_id == "chosen-build")
+        );
+        assert!(!queue.enqueue_project(import));
+        queue.finished();
+        let next = queue.start_next(true).unwrap();
+        assert!(
+            matches!(next.target, Target::Create { folder, name, branch, .. }
+            if folder == Path::new("C:/Projects") && name == "NewGame" && branch == "5.8")
+        );
+        assert!(queue.contains_creation(Path::new("c:/projects/newgame")));
+        queue.finished();
+        assert!(!queue.contains_creation(Path::new("C:/Projects/NewGame")));
+        assert!(queue.start_next(true).is_none());
     }
 }

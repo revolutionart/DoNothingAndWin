@@ -109,6 +109,7 @@ struct Toast {
     message: String,
     created: Instant,
     scan_results: bool,
+    failed: bool,
 }
 pub struct Workspace {
     page: Page,
@@ -714,10 +715,14 @@ impl Workspace {
         }
     }
     fn notify(&mut self, s: impl Into<String>) {
+        self.show_toast(s, false);
+    }
+    fn show_toast(&mut self, s: impl Into<String>, failed: bool) {
         self.toast = Some(Toast {
             message: s.into(),
             created: Instant::now(),
             scan_results: false,
+            failed,
         });
     }
     fn persist(&mut self) {
@@ -1135,7 +1140,10 @@ impl Workspace {
             {
                 let rect = c.rect([200., y + 14., 20., 20.]);
                 let mut indicator = ui.new_child(UiBuilder::new().max_rect(rect));
-                indicator.put(rect, loading::spinner(&self.theme));
+                indicator.put(
+                    rect,
+                    loading::sidebar_spinner(&self.theme, active || r.hovered()),
+                );
                 ui.ctx().request_repaint();
             }
             if r.clone()
@@ -1666,23 +1674,27 @@ impl Workspace {
         }
         if let Some(toast) = &self.toast {
             if toast.created.elapsed() < Duration::from_secs(6) {
+                let (fill, foreground) = if toast.failed {
+                    (color(self.theme.danger), Color32::BLACK)
+                } else {
+                    (
+                        color(self.theme.launch_background),
+                        color(self.theme.launch_foreground),
+                    )
+                };
                 let width = ((c.width - 340.) * c.sx).min(1000.);
                 let galley = ui.painter().layout(
                     toast.message.clone(),
                     FontId::proportional(15. * c.scale()),
-                    color(self.theme.launch_foreground),
+                    foreground,
                     width - 32.,
                 );
                 let size = vec2(width, galley.size().y + 28.);
                 let center = c.point((271. + c.width - 26.) / 2., c.height - 82.);
                 let rect = Rect::from_center_size(center, size);
+                ui.painter().rect_filled(rect, 7., fill);
                 ui.painter()
-                    .rect_filled(rect, 7., color(self.theme.launch_background));
-                ui.painter().galley(
-                    rect.min + vec2(16., 14.),
-                    galley,
-                    color(self.theme.launch_foreground),
-                );
+                    .galley(rect.min + vec2(16., 14.), galley, foreground);
                 if toast.scan_results
                     && ui
                         .interact(rect, Id::new("scan-result-toast"), Sense::click())
@@ -2683,6 +2695,7 @@ impl eframe::App for Workspace {
             self.install_dialog(ctx);
             self.project_finder_dialog(ctx);
             self.cache_verification_dialog(ctx);
+            self.asset_overwrite_dialog(ctx);
         }
         if crate::window_frame::take_replace_request() {
             if self.transfer.busy()

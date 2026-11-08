@@ -35,6 +35,70 @@ pub(super) fn draw_icon(ui: &Ui, theme: &Theme, icon: Icon, rect: Rect, tint: [u
     };
     canvas.icon(ui, icon, 0., 0., rect.width(), tint);
 }
+
+fn transfer_activity_heading(ui: &mut Ui, theme: &Theme) {
+    ui.horizontal(|ui| {
+        let (icon, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
+        draw_icon(ui, theme, Icon::Download, icon, theme.accent);
+        let heading: WidgetText = RichText::new("Transfer activity")
+            .size(25.)
+            .strong()
+            .color(ui.visuals().text_color())
+            .into();
+        let heading = heading.into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            TextStyle::Heading,
+        );
+        ui.label(buttons::centered_galley(ui, heading));
+        ui.add(loading::spinner(theme));
+    });
+}
+
+#[cfg(test)]
+#[test]
+fn transfer_activity_heading_centers_icon_text_and_loader_on_one_row() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let ctx = Context::default();
+        theme.apply(&ctx);
+        let output = ctx.run(RawInput::default(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                transfer_activity_heading(ui, &theme);
+            });
+        });
+        let mut icon = Rect::NOTHING;
+        let mut title = None;
+        let mut spinner = Rect::NOTHING;
+        for shape in output.shapes {
+            match shape.shape {
+                Shape::LineSegment { points, stroke } if stroke.color == color(theme.accent) => {
+                    icon.extend_with(points[0]);
+                    icon.extend_with(points[1]);
+                }
+                Shape::Text(text) if text.galley.text() == "Transfer activity" => {
+                    assert_eq!(
+                        text.galley.job.sections[0].format.color,
+                        theme.visuals().text_color()
+                    );
+                    title = Some(text.galley.rect.translate(text.pos.to_vec2()));
+                }
+                Shape::Path(path) => {
+                    for point in path.points {
+                        spinner.extend_with(point);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let title = title.expect("transfer heading painted");
+        assert!(icon.is_positive() && spinner.is_positive());
+        assert!(icon.right() < title.left() && title.right() < spinner.left());
+        assert!((icon.center().y - title.center().y).abs() < 1.5);
+        assert!((spinner.center().y - title.center().y).abs() < 1.5);
+    }
+}
+
 fn icon_button(ui: &mut Ui, theme: &Theme, label: &str, icon: Icon) -> bool {
     let text = ui.painter().layout_no_wrap(
         label.into(),
@@ -294,19 +358,24 @@ impl Workspace {
                 ui.allocate_ui_with_layout(
                     vec2(main_width, 0.),
                     Layout::top_down(Align::Min),
-                    |ui| self.download_main(ui, t, active),
+                    |ui| self.download_main(ui, t, active, false),
                 );
                 ui.vertical(|ui| {
                     ui.set_width(270.);
-                    self.download_side(ui, t, active);
+                    self.download_queue(ui, t, active);
+                    self.download_storage(ui, t);
                 });
             });
         } else {
-            self.download_main(ui, t, active);
-            self.download_side(ui, t, active);
+            let show_queue_first = !self.library.install_queue.waiting().is_empty();
+            self.download_main(ui, t, active, show_queue_first);
+            if !show_queue_first {
+                self.download_queue(ui, t, active);
+            }
+            self.download_storage(ui, t);
         }
     }
-    fn download_main(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
+    fn download_main(&mut self, ui: &mut Ui, t: &Theme, active: usize, show_queue_first: bool) {
         let waiting = !self.library.install_queue.waiting().is_empty();
         if !self.downloads.recent {
             if self.plugin_work.mutating && self.plugin_work.progress.is_some() {
@@ -344,50 +413,38 @@ impl Workspace {
             } else {
                 highlighted_panel(t).show(ui, |ui| {
                     ui.set_width((ui.available_width() - 2.).max(200.));
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
-                        draw_icon(
-                            ui,
-                            t,
-                            if active == 0 && !waiting {
-                                Icon::Check
-                            } else {
-                                Icon::Download
-                            },
-                            r,
-                            t.accent,
-                        );
-                        ui.add_space(8.);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(if active == 0 && waiting {
-                                    "Waiting to install"
-                                } else if active == 0 {
-                                    "You're all caught up"
-                                } else {
-                                    "Transfer activity"
-                                })
-                                .size(25.)
-                                .strong()
-                                .color(ui.visuals().text_color()),
-                            );
-                            if active == 0 {
+                    if active > 0 {
+                        transfer_activity_heading(ui, t);
+                    } else {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(64., 64.), Sense::hover());
+                            let icon = if waiting { Icon::Download } else { Icon::Check };
+                            draw_icon(ui, t, icon, r, t.accent);
+                            ui.add_space(8.);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(if waiting {
+                                        "Waiting to install"
+                                    } else {
+                                        "You're all caught up"
+                                    })
+                                    .size(25.)
+                                    .strong()
+                                    .color(ui.visuals().text_color()),
+                                );
                                 ui.label(if waiting {
-                                    "Queued plugins will start when the current operation finishes."
+                                    "Queued downloads will start when the current operation finishes."
                                 } else {
                                     "No downloads in progress."
                                 });
-                            }
+                            });
                         });
-                    });
+                    }
                     if self.transfer.busy() {
                         ui.label(&self.transfer.state);
                         let p = self.transfer.operation.progress();
                         if p.total == 0 {
-                            ui.horizontal(|ui| {
-                                ui.add(loading::spinner(t));
-                                ui.label(&p.phase);
-                            });
+                            ui.label(&p.phase);
                             indeterminate_progress(
                                 ui,
                                 ui.available_width(),
@@ -432,16 +489,12 @@ impl Workspace {
                         }
                     }
                     if let Some(s) = self.library_transfer_status() {
-                        ui.add(loading::spinner(t));
                         ui.label(s);
                         self.library.show_plugin_download_progress(ui);
                         self.library.transfer_controls(ui);
                     }
                     if self.plugin_work.mutating {
-                        ui.horizontal(|ui| {
-                            ui.add(loading::spinner(t));
-                            ui.label(&self.plugin_work.status);
-                        });
+                        ui.label(&self.plugin_work.status);
                         self.plugin_work.show_progress(ui, t, &self.textures, true);
                     }
                 });
@@ -518,6 +571,9 @@ impl Workspace {
                     project_finder::skipped_folders(ui, t, &self.scan.skipped_folders);
                 }
             });
+        }
+        if show_queue_first {
+            self.download_queue(ui, t, active);
         }
         panel(ui, t, "Latest activity", None, |ui| {
             let wide = ui.available_width() > 900.;
@@ -723,7 +779,7 @@ impl Workspace {
             }
         });
     }
-    fn download_side(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
+    fn download_queue(&mut self, ui: &mut Ui, t: &Theme, active: usize) {
         panel(ui, t, "Download queue", None, |ui| {
             ui.label(
                 RichText::new(format!(
@@ -742,7 +798,7 @@ impl Workspace {
                 .cloned()
                 .collect();
             ui.label(if !waiting.is_empty() {
-                "Waiting plugins start automatically in the order below."
+                "Waiting downloads start automatically in the order below."
             } else if active == 0 {
                 "Your queue is empty."
             } else {
@@ -757,7 +813,7 @@ impl Workspace {
                 );
                 let mut remove = None;
                 AppScrollArea::vertical(t)
-                    .id_salt("waiting-plugin-installs")
+                    .id_salt("waiting-library-transfers")
                     .max_height(260.)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
@@ -766,19 +822,11 @@ impl Workspace {
                                 ui.label(RichText::new(&job.item.title).color(color(t.text)))
                                     .on_hover_text(&job.item.title);
                                 ui.label(
-                                    RichText::new(format!(
-                                        "UE {}",
-                                        job.engines
-                                            .iter()
-                                            .map(|e| e.version.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    ))
-                                    .color(color(t.muted)),
+                                    RichText::new(job.target.description()).color(color(t.muted)),
                                 );
                                 if ui
                                     .add(buttons::secondary_button("Remove"))
-                                    .on_hover_text("Remove this waiting installation")
+                                    .on_hover_text("Remove this waiting download")
                                     .clicked()
                                 {
                                     remove = Some(index);
@@ -801,6 +849,8 @@ impl Workspace {
                 }
             }
         });
+    }
+    fn download_storage(&mut self, ui: &mut Ui, t: &Theme) {
         panel(ui, t, "Storage", None, |ui| {
             let root = Path::new(&self.prefs.install_root);
             let existing = root.ancestors().find(|p| p.exists()).unwrap_or(root);

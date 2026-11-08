@@ -7,7 +7,7 @@ Use the `ui-control-consistency` skill when it is available. This guide contains
 - `src/ui/buttons.rs` owns the compact button style, fonts and glyph centering. Read its constants and helpers before changing a control.
 - `src/ui.rs` owns `search_field`, `Canvas::control_text`, `Canvas::styled_button`, icon geometry and canvas scaling. Use `search_field` for toolbar searches, including Vault Cache and Library. A plain `TextEdit` inherits body metrics and is not a toolbar search replacement.
 - `src/ui/scrollbar.rs` owns `AppComboBox` and themed scrolling. Use it for launcher dropdowns, with `buttons::selectable_value` for options so the open list retains the same glyph alignment as the selected label.
-- `src/ui/loading.rs` owns every circular loader through `loading::spinner(theme)`. It fixes the small size, stroke, animation and theme contrast. Callers only choose placement, including inside larger button/overlay slots. Every dark-theme loader is white; every light-theme loader is dark. Use this component for inline, sidebar, button, footer and dialog loaders. Run `scripts/check-ui-controls.ps1`; CI rejects standalone spinner construction elsewhere.
+- `src/ui/loading.rs` owns circular loaders. Use `loading::spinner(theme)` for white on dark surfaces and dark on light surfaces. Use `loading::sidebar_spinner(theme, highlighted)` on sidebar buttons so the loader matches the black text on the gold highlight. Both use the same size, stroke and animation. Run `scripts/check-ui-controls.ps1` to check for standalone spinners.
 - `src/theme.rs` and `themes/` own the other theme colors.
 
 ## Geometry contract

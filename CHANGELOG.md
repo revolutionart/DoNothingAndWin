@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.6 - 2026-11-08
+
+### Projects
+
+- Add **Open project** above **Hide project** in project menus.
+
+### Library and downloads
+
+- Queue asset imports and new projects alongside plugin installs. Keep adding items while a transfer runs, and remove waiting jobs from **Downloads**.
+- Ask before replacing existing project files with the original Fab files. Restore the previous files if applying the replacement fails, and keep recovery copies if Windows blocks restoration.
+- Show failed Library installations in red. Align the smaller download icon and spinner with the **Transfer activity** title, and use a black spinner on the highlighted **Downloads** button.
+
 ## 1.3.5 - 2026-11-02
 
 ### App icon

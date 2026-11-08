@@ -196,9 +196,18 @@ impl Workspace {
         if response.secondary_clicked() {
             self.selected = Some(index);
         }
-        Popup::menu(&menu)
-            .frame(menu_frame(&self.theme))
-            .show(|ui| self.project_options(ui, index));
+        let popup = Popup::menu(&menu).frame(menu_frame(&self.theme));
+        let popup = if self
+            .layout_probe
+            .as_ref()
+            .is_some_and(|probe| probe.project_menu)
+            && index == 0
+        {
+            popup.open(true)
+        } else {
+            popup
+        };
+        popup.show(|ui| self.project_options(ui, index));
         Popup::context_menu(&response)
             .frame(menu_frame(&self.theme))
             .show(|ui| self.project_options(ui, index));
@@ -208,6 +217,14 @@ impl Workspace {
         style_menu(ui, &self.theme);
         let p = self.projects[index].clone();
         self.project_category_menu(ui, &p.path);
+        if ui
+            .add(buttons::secondary_button("Open project"))
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked()
+        {
+            self.open_project(index);
+            ui.close();
+        }
         self.project_visibility_menu(ui, &p.path);
         if ui
             .add_enabled(
