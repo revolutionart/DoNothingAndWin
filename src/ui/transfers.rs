@@ -89,6 +89,7 @@ mod resume_tests {
             catalog_id: String::new(),
             channel: "Live".into(),
             platform: "Windows".into(),
+            preview: false,
             build: None,
             version: EngineVersion::parse("5.8.3"),
         };
@@ -546,8 +547,7 @@ impl Workspace {
         let current = self.prefs.pending_engines[index].clone();
         let selected = releases.iter().find(|r| r.app == current);
         let title = selected
-            .and_then(|r| r.version.as_ref())
-            .map(ToString::to_string)
+            .map(Release::version_label)
             .unwrap_or_else(|| "Choose version".into());
         let mut choice = current.clone();
         ui.scope_builder(
@@ -567,7 +567,7 @@ impl Workspace {
                                 ui,
                                 &mut choice,
                                 release.app.clone(),
-                                release.version.as_ref().unwrap().to_string(),
+                                release.version_label(),
                             );
                         }
                     });

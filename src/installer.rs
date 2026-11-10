@@ -107,12 +107,13 @@ fn valid_cdn(url: &Url) -> bool {
         })
 }
 pub fn fetch(c: &Client, url: Url, limit: u64) -> Result<Vec<u8>, String> {
-    fetch_progress(c, url, limit, &mut |_| {})
+    fetch_progress(c, url, limit, None, &mut |_| {})
 }
 fn fetch_progress(
     c: &Client,
     url: Url,
     limit: u64,
+    control: Option<&Control>,
     received: &mut impl FnMut(u64),
 ) -> Result<Vec<u8>, String> {
     if !valid_cdn(&url) {
@@ -129,6 +130,9 @@ fn fetch_progress(
     let mut stream = r.take(limit + 1);
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        if let Some(control) = control {
+            control.check()?;
+        }
         let n = stream
             .read(&mut buffer)
             .map_err(|_| "CDN transfer interrupted")?;
@@ -355,7 +359,7 @@ pub(crate) fn chunk_data_progress(
                 .join(&chunk.path(feature))
                 .map_err(|_| "Invalid chunk location")?;
             url.set_query(base.query());
-            match fetch_progress(client, url, 64 * 1024 * 1024, received)
+            match fetch_progress(client, url, 64 * 1024 * 1024, Some(control), received)
                 .and_then(|b| buildpatch::decode_chunk(&b, chunk))
             {
                 Ok(b) => return Ok(b),
@@ -363,6 +367,7 @@ pub(crate) fn chunk_data_progress(
             }
         }
         if attempt < 2 {
+            control.check()?;
             std::thread::sleep(Duration::from_millis(500 * (attempt + 1)));
         }
     }

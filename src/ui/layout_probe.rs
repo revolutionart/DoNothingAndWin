@@ -75,6 +75,7 @@ impl LayoutProbe {
                 | "--plugin-download-preview"
                 | "--queued-install-preview"
                 | "--queued-asset-preview"
+                | "--create-project-preview"
                 | "--asset-overwrite-preview"
                 | "--asset-failure-preview" => Some(Page::Library),
                 "--page-preview=downloads" | "--library-queue-preview" => Some(Page::Downloads),
@@ -118,7 +119,32 @@ impl Workspace {
             return;
         }
         let (width, height, plugins) = CASES[probe.step];
+        let create_project = std::env::args().any(|a| a == "--create-project-preview");
         if probe.phase == 0 {
+            if create_project {
+                self.preview_create_project();
+            }
+            if std::env::args().any(|a| a == "--engine-preview-notice") {
+                if std::env::args().any(|a| a == "--engine-preview-dismissed") {
+                    self.prefs.dismissed_engine_previews.insert("5.9".into());
+                }
+                self.snapshot.releases.retain(|r| r.app != "UE_5.9");
+                self.snapshot.releases.insert(
+                    0,
+                    Release {
+                        app: "UE_5.9".into(),
+                        catalog_id: String::new(),
+                        channel: "Live".into(),
+                        platform: "Windows".into(),
+                        version: EngineVersion::parse("5.9.0"),
+                        build: Some("5.9.0-60351404+++UE5+Release-5.9-Windows".into()),
+                        preview: true,
+                    },
+                );
+                if std::env::args().any(|a| a == "--engine-preview-card") {
+                    self.add_preview_card("UE_5.9");
+                }
+            }
             if std::env::args().any(|a| {
                 a == "--plugin-install-progress-preview"
                     || a == "--plugin-install-streaming-preview"
@@ -401,6 +427,9 @@ impl Workspace {
         }
         if probe.plugin_install {
             self.library_install_dialog(ctx);
+        }
+        if create_project {
+            self.library_create_dialog(ctx);
         }
         self.layout_probe = Some(probe);
         ctx.request_repaint_after(Duration::from_millis(40));

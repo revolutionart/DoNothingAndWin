@@ -1,5 +1,19 @@
 use super::*;
 impl Workspace {
+    pub(super) fn engine_preview(&self) -> Option<(&Release, String)> {
+        self.snapshot
+            .releases
+            .iter()
+            .filter(|r| {
+                r.preview
+                    && r.platform == "Windows"
+                    && !super::transfers::release_is_installed(r, &self.engines)
+            })
+            .filter_map(|r| EngineVersion::parse(&r.app).map(|version| (r, version)))
+            .max_by(|(_, left), (_, right)| left.cmp(right))
+            .map(|(release, version)| (release, version.branch()))
+    }
+
     pub(super) fn has_engine_updates(&self) -> bool {
         engine_updates_available(&self.engines, &self.snapshot.releases, |engine| {
             if self.demo {
@@ -669,6 +683,7 @@ fn engine_card_status<'a>(
             .iter()
             .filter(|release| {
                 release.platform == "Windows"
+                    && !release.preview
                     && release.channel == "Live"
                     && release
                         .build
@@ -707,6 +722,7 @@ mod engine_card_tests {
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
+            preview: false,
             channel: "Live".into(),
             build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),
@@ -770,6 +786,7 @@ mod engine_card_tests {
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
+            preview: false,
             channel: "Live".into(),
             build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),
@@ -832,6 +849,7 @@ mod engine_card_tests {
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
+            preview: false,
             channel: "Live".into(),
             build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),

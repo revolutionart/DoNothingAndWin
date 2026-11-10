@@ -7,6 +7,7 @@ mod dialog;
 mod downloads;
 mod engine_options;
 mod engine_order;
+mod engine_preview;
 mod free_offers;
 mod launcher_updates;
 mod layout_probe;
@@ -1381,7 +1382,8 @@ impl Workspace {
             ) {
                 self.page = Page::Engines;
             }
-            if self.has_engine_updates() {
+            let preview = self.engine_preview().map(|(_, branch)| branch);
+            if preview.is_some() || self.has_engine_updates() {
                 let x = c.width - 224.;
                 let y = header.actions_y + 15.5;
                 ui.painter().circle_stroke(
@@ -1404,7 +1406,10 @@ impl Workspace {
                     Id::new("settings-engine-update-badge"),
                     Sense::hover(),
                 )
-                .on_hover_text("Engine updates available for your installed engines");
+                .on_hover_text(preview.map_or_else(
+                    || "Engine updates available for your installed engines".to_owned(),
+                    |branch| format!("UE {branch} Preview Available"),
+                ));
             }
         }
         if matches!(self.page, Page::Workspace | Page::Projects) {
@@ -1714,11 +1719,18 @@ impl Workspace {
     }
     fn workspace_body(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
         let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
-        let rows = (self.engines.len() + self.prefs.pending_engines.len())
-            .div_ceil(columns)
-            .max(1);
-        let extra = (rows - 1) as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP);
         let top = PageHeaderLayout::new().divider_y + 1.;
+        let preview = self
+            .engine_preview()
+            .map(|(release, branch)| (release.app.clone(), branch));
+        let dismissed = preview
+            .as_ref()
+            .is_some_and(|(_, branch)| self.prefs.dismissed_engine_previews.contains(branch));
+        let banner_space = if preview.is_some() && !dismissed {
+            engine_preview::banner_height(c.width) + 28.
+        } else {
+            0.
+        };
         let viewport = c.rect([271., top, c.width - 277., (c.height - top - 50.).max(1.)]);
         let theme = self.theme.clone();
         ui.scope_builder(UiBuilder::new().max_rect(viewport), |ui| {
@@ -1726,16 +1738,52 @@ impl Workspace {
                 .id_salt("workspace-body")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let local = Canvas {
+                    let mut local = Canvas {
                         origin: pos2(c.origin.x, ui.cursor().top() - top),
                         width: c.width,
-                        height: c.height + extra,
+                        height: c.height,
                         sx: c.sx,
                         sy: c.sy,
                         theme: c.theme.clone(),
                     };
-                    ui.set_min_height(viewport.height() + extra);
-                    let divider = self.engine_section(ui, &local, c.height < 800.);
+                    let mut selected_draft = None;
+                    if let Some((app, branch)) = &preview {
+                        if !dismissed {
+                            match engine_preview::banner(ui, &local, top + 14., branch) {
+                                Some(engine_preview::Action::Dismiss) => {
+                                    self.prefs.dismissed_engine_previews.insert(branch.clone());
+                                    self.persist();
+                                    ctx.request_repaint();
+                                }
+                                Some(engine_preview::Action::Install) => {
+                                    selected_draft = Some(self.add_preview_card(app));
+                                }
+                                Some(engine_preview::Action::ReleaseNotes) => {
+                                    if let Err(error) =
+                                        platform::open_external(engine_preview::RELEASE_NOTES_URL)
+                                    {
+                                        self.notify(error);
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    local.origin.y += banner_space;
+                    let compact_preview = preview.as_ref().filter(|_| dismissed);
+                    let divider = self.engine_section(
+                        ui,
+                        &local,
+                        c.height < 800.,
+                        compact_preview,
+                        selected_draft,
+                    );
+                    let rows = (self.engines.len() + self.prefs.pending_engines.len())
+                        .div_ceil(columns)
+                        .max(1);
+                    let extra = (rows - 1) as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP);
+                    ui.set_min_height(viewport.height() + extra + banner_space);
+                    local.height += extra;
                     self.project_section(ui, &local, ctx, divider);
                     if DragAndDrop::payload::<engine_order::EngineCardDrag>(ui.ctx()).is_some() {
                         if let Some(pointer) = ui
@@ -1761,7 +1809,28 @@ impl Workspace {
         });
         engine_order::paint_drag_label(ctx, &self.engines, &self.theme);
     }
-    fn engine_section(&mut self, ui: &mut Ui, c: &Canvas, short: bool) -> f32 {
+    fn add_preview_card(&mut self, app: &str) -> usize {
+        if let Some(index) = self
+            .prefs
+            .pending_engines
+            .iter()
+            .position(|draft| draft == app)
+        {
+            return index;
+        }
+        let index = self.prefs.pending_engines.len();
+        self.prefs.pending_engines.push(app.to_owned());
+        self.persist();
+        index
+    }
+    fn engine_section(
+        &mut self,
+        ui: &mut Ui,
+        c: &Canvas,
+        short: bool,
+        compact_preview: Option<&(String, String)>,
+        mut selected_draft: Option<usize>,
+    ) -> f32 {
         let offset = PageHeaderLayout::new().divider_y
             - PAGE_HEADER_DIVIDER_Y
             - if short { 16. } else { 0. };
@@ -1775,6 +1844,34 @@ impl Workspace {
         };
         let c = &local;
         let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
+        c.icon(ui, Icon::Chip, 271., 132., 24., self.theme.muted);
+        let storage_right = self.engine_storage_badge(ui, c, 472.);
+        c.text(
+            ui,
+            309.,
+            144.,
+            "Engine versions",
+            21.,
+            true,
+            self.theme.text,
+            Align2::LEFT_CENTER,
+        );
+        if let Some((app, branch)) = compact_preview
+            && engine_preview::compact_notice(ui, c, storage_right + 18., branch)
+        {
+            selected_draft = Some(self.add_preview_card(app));
+        }
+        if c.button(
+            ui,
+            "install",
+            button_slot([c.width - 156., 126., 130., 31.]),
+            "Install engine",
+            Some(Icon::Plus),
+            false,
+        ) {
+            self.prefs.pending_engines.push(String::new());
+            self.persist();
+        }
         let rows = (self.engines.len() + self.prefs.pending_engines.len())
             .div_ceil(columns)
             .max(1);
@@ -1787,29 +1884,6 @@ impl Workspace {
             [c.width - 26., divider],
             self.theme.border,
         );
-        c.icon(ui, Icon::Chip, 271., 132., 24., self.theme.muted);
-        self.engine_storage_badge(ui, c);
-        c.text(
-            ui,
-            309.,
-            144.,
-            "Engine versions",
-            21.,
-            true,
-            self.theme.text,
-            Align2::LEFT_CENTER,
-        );
-        if c.button(
-            ui,
-            "install",
-            button_slot([c.width - 156., 126., 130., 31.]),
-            "Install engine",
-            Some(Icon::Plus),
-            false,
-        ) {
-            self.prefs.pending_engines.push(String::new());
-            self.persist();
-        }
         if self.engines.is_empty() && self.prefs.pending_engines.is_empty() {
             c.text(
                 ui,
@@ -1852,17 +1926,16 @@ impl Workspace {
                 if draft >= self.prefs.pending_engines.len() {
                     break;
                 }
-                self.pending_engine_card(
-                    ui,
-                    c,
-                    draft,
-                    [
-                        271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
-                        ENGINE_CARDS_TOP + row as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP),
-                        ENGINE_CARD_WIDTH,
-                        ENGINE_CARD_HEIGHT,
-                    ],
-                );
+                let card = [
+                    271. + slot as f32 * (ENGINE_CARD_WIDTH + ENGINE_CARD_GAP),
+                    ENGINE_CARDS_TOP + row as f32 * (ENGINE_CARD_HEIGHT + ENGINE_CARD_GAP),
+                    ENGINE_CARD_WIDTH,
+                    ENGINE_CARD_HEIGHT,
+                ];
+                if selected_draft == Some(draft) {
+                    ui.scroll_to_rect(c.rect(card).expand(8.), None);
+                }
+                self.pending_engine_card(ui, c, draft, card);
                 continue;
             }
             self.engine_card(
@@ -2467,17 +2540,25 @@ impl Workspace {
                 if ui.rect_contains_pointer(rect) {
                     p.rect_filled(rect, 0., table_row_hover_color(&self.theme));
                 }
-                let font=FontId::proportional(15.*c.scale());let v=r.version.as_ref().map(|v|v.to_string()).unwrap_or_else(||r.app.trim_start_matches("UE_").to_owned());
+                let font=FontId::proportional(15.*c.scale());let v=r.version_label();
                 p.text(rect.left_center()+vec2(10.*c.sx,0.),Align2::LEFT_CENTER,&v,FontId::new(19.*c.scale(),FontFamily::Name("semibold".into())),color(self.theme.text));
                 let build = r.build.as_deref().unwrap_or("Sign in to resolve hotfix version");
                 let build_rect = Rect::from_min_max(pos2(c.point(480., 0.).x, rect.top()), pos2(c.point(c.width - 356., 0.).x, rect.bottom()));
                 let mut build_ui = ui.new_child(UiBuilder::new().max_rect(build_rect).layout(Layout::left_to_right(Align::Center)));
                 build_ui.add(Label::new(RichText::new(build).font(font.clone()).color(color(self.theme.muted))).truncate()).on_hover_text(build);
                 let installed=self.engines.iter().find(|e|EngineVersion::parse(&e.version).zip(EngineVersion::parse(&r.app)).is_some_and(|(a,b)|a.major==b.major&&a.minor==b.minor));
-                let label=match installed{Some(e)=>if r.version.as_ref()>EngineVersion::parse(&e.version).as_ref(){"Update available"}else{"Installed"},None=>if r.build.is_some(){"Available"}else{"Catalog only"}};
-                p.text(pos2(c.point(c.width - 340., 0.).x, rect.center().y),Align2::LEFT_CENTER,label,font,color(if label=="Update available"{self.theme.warning}else if label=="Installed"{self.theme.success}else{self.theme.muted}));
-                let b=Rect::from_min_size(pos2(rect.right()-142.*c.sx, rect.center().y-COMPACT_BUTTON_HEIGHT*c.sy/2.),vec2(130.*c.sx,COMPACT_BUTTON_HEIGHT*c.sy));
                 let already_installed = transfers::release_is_installed(&r, &self.engines);
+                let (label, tint) = match installed {
+                    _ if r.preview && !already_installed => ("Preview available", self.theme.warning),
+                    Some(e) if r.version.as_ref() > EngineVersion::parse(&e.version).as_ref() => {
+                        ("Update available", self.theme.warning)
+                    }
+                    Some(_) => ("Installed", self.theme.success),
+                    None if r.build.is_some() => ("Available", self.theme.muted),
+                    None => ("Catalog only", self.theme.muted),
+                };
+                p.text(pos2(c.point(c.width - 340., 0.).x, rect.center().y), Align2::LEFT_CENTER, label, font, color(tint));
+                let b=Rect::from_min_size(pos2(rect.right()-142.*c.sx, rect.center().y-COMPACT_BUTTON_HEIGHT*c.sy/2.),vec2(130.*c.sx,COMPACT_BUTTON_HEIGHT*c.sy));
                 let response = ui.scope_builder(UiBuilder::new().max_rect(b), |ui| {
                     ui.add_enabled(!already_installed, buttons::secondary_button(if already_installed { "Installed" } else { "Install engine" }).min_size(b.size()))
                 }).inner;

@@ -47,10 +47,25 @@ pub struct Release {
     pub platform: String,
     pub build: Option<String>,
     pub version: Option<EngineVersion>,
+    #[serde(default)]
+    pub preview: bool,
 }
 impl Release {
     pub fn key(&self) -> String {
         format!("{}:{}:{}", self.platform, self.channel, self.app)
+    }
+
+    pub fn version_label(&self) -> String {
+        let version = self
+            .version
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.app.trim_start_matches("UE_").to_owned());
+        if self.preview {
+            format!("{version} Preview")
+        } else {
+            version
+        }
     }
 }
 
@@ -174,6 +189,7 @@ mod tests {
             catalog_id: "id".into(),
             channel: "Live".into(),
             platform: "Windows".into(),
+            preview: false,
             build: Some(build.into()),
             version: EngineVersion::parse(build),
         }

@@ -356,6 +356,7 @@ mod tests {
             catalog_id: "fixture-id".into(),
             channel: "Live".into(),
             platform: "Windows".into(),
+            preview: false,
             build: Some(build.into()),
             version: None,
         };

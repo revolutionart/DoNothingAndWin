@@ -50,7 +50,7 @@ impl Workspace {
         self.persist();
         self.start_scan(ctx.clone(), None);
     }
-    pub(super) fn engine_storage_badge(&mut self, ui: &mut Ui, c: &Canvas) {
+    pub(super) fn engine_storage_badge(&mut self, ui: &mut Ui, c: &Canvas, x: f32) -> f32 {
         let mut key: Vec<_> = self
             .engines
             .iter()
@@ -87,7 +87,7 @@ impl Workspace {
             self.engine_space.result = Some(result);
             self.engine_space.rx = None;
         }
-        let r = c.rect([510., 130., 180., 28.]);
+        let r = c.rect([x, 130., 30., 28.]);
         let p = ui.painter();
         let tint = color(self.theme.muted);
         let s = Stroke::new(1.5, tint);
@@ -121,15 +121,20 @@ impl Workspace {
                 )
             })
             .unwrap_or_else(|| "Calculating…".into());
-        p.text(
+        let label_rect = p.text(
             r.min + vec2(36., 14.),
             Align2::LEFT_CENTER,
             label,
             FontId::proportional(14.),
             tint,
         );
-        ui.interact(r, Id::new("installed-engine-size"), Sense::hover())
-            .on_hover_text("Total size of all installed engines");
+        ui.interact(
+            r.union(label_rect),
+            Id::new("installed-engine-size"),
+            Sense::hover(),
+        )
+        .on_hover_text("Total size of all installed engines");
+        (label_rect.right() - c.origin.x) / c.sx
     }
     pub(super) fn settings_flow(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
         let top = PageHeaderLayout::new().divider_y + 14.;

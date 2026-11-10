@@ -60,10 +60,13 @@ pub fn with_cache_root<T>(root: Option<PathBuf>, work: impl FnOnce() -> T) -> T 
     work()
 }
 
-fn cache_path(chunk: &Chunk) -> PathBuf {
+pub(crate) fn active_cache_root() -> PathBuf {
     CACHE_ROOT
         .with(|slot| slot.borrow().clone())
         .unwrap_or_else(|| PathBuf::from(storage::load_preferences().fab_cache))
+}
+fn cache_path(chunk: &Chunk) -> PathBuf {
+    active_cache_root()
         .join("EngineWorkspace/Chunks")
         .join(buildpatch::hex(&chunk.sha))
 }
@@ -138,6 +141,9 @@ pub(crate) fn cache_chunk_progress(chunk: &Chunk, bytes: &[u8], written: &mut im
         }
     }
     let _change = crate::vault_health::changing(path.parent().unwrap_or(&path));
+    // Cache entries with identical hashes share the same atomic temporary path.
+    static CACHE_WRITE: Mutex<()> = Mutex::new(());
+    let _write = CACHE_WRITE.lock().unwrap();
     if storage::write_atomic(&path, bytes).is_ok() {
         written(bytes.len() as u64);
     }

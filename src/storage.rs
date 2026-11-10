@@ -4,6 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -181,6 +182,7 @@ pub struct Preferences {
     pub projects: Vec<Project>,
     pub engine_paths: Vec<String>,
     pub engine_card_order: Vec<String>,
+    pub dismissed_engine_previews: BTreeSet<String>,
     pub pending_engines: Vec<String>,
     pub check_minutes: u64,
     pub wait_for_library_plugin_builds: bool,
@@ -192,6 +194,7 @@ pub struct Preferences {
     pub vault_cache_paths: Vec<String>,
     pub ask_vault_cache: bool,
     pub project_roots: Vec<String>,
+    pub project_creation_folder: Option<String>,
     pub manual_projects: Vec<String>,
 }
 impl Default for Preferences {
@@ -224,6 +227,7 @@ impl Default for Preferences {
             projects: vec![],
             engine_paths: vec![],
             engine_card_order: vec![],
+            dismissed_engine_previews: BTreeSet::new(),
             pending_engines: vec![],
             check_minutes: 15,
             wait_for_library_plugin_builds: true,
@@ -234,6 +238,7 @@ impl Default for Preferences {
             vault_cache_paths: vec![],
             ask_vault_cache: true,
             project_roots: vec![],
+            project_creation_folder: None,
             manual_projects: vec![],
         }
     }

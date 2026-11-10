@@ -16,6 +16,7 @@ pub mod acquisition;
 pub mod plugin_download;
 pub mod plugin_install;
 pub mod project_kind;
+mod template_chunks;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1265,6 +1266,10 @@ pub fn create_project_with_control(
         return Err("Choose a supported template version".into());
     }
     installer::no_links(parent)?;
+    if !parent.exists() && parent == crate::discovery::default_project_root() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        installer::no_links(parent)?;
+    }
     let parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
     let destination = parent.join(name);
     if destination.exists() {
@@ -1276,8 +1281,6 @@ pub fn create_project_with_control(
     let (manifest, bases) = package_result?;
     let files = template_files(&manifest)?;
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
-    let download_bytes =
-        crate::plugins::package_files::compressed_size(&manifest, files.iter().map(|(f, _)| *f));
     if fs2::available_space(&parent).map_err(|e| e.to_string())?
         < bytes.saturating_add(64 * 1024 * 1024)
     {
@@ -1287,58 +1290,9 @@ pub fn create_project_with_control(
     let _change = crate::vault_health::changing(&destination);
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
     let result = (|| {
-        let mut cache = HashMap::new();
-        let mut prepared = 0u64;
-        let mut downloaded = 0u64;
-        let mut project = None;
-        for (i, (file, relative)) in files.iter().enumerate() {
-            control.check()?;
-            progress(transfer_status(
-                i + 1,
-                files.len(),
-                prepared,
-                bytes,
-                downloaded,
-                download_bytes,
-            ));
-            let path = destination.join(relative);
-            installer::no_links(&path)?;
-            fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let mut file_downloaded = 0;
-            let mut last_report = std::time::Instant::now();
-            crate::plugins::payload_to_file_controlled(
-                &manifest,
-                &bases,
-                file,
-                &mut cache,
-                &path,
-                control,
-                &mut |written, received| {
-                    file_downloaded = received;
-                    if last_report.elapsed().as_millis() >= 150 || written == file.size() {
-                        progress(transfer_status(
-                            i + 1,
-                            files.len(),
-                            prepared + written,
-                            bytes,
-                            downloaded + received,
-                            download_bytes,
-                        ));
-                        last_report = std::time::Instant::now();
-                    }
-                },
-            )?;
-            prepared += file.size();
-            downloaded += file_downloaded;
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
-            {
-                project = Some(path);
-            }
-        }
-        control.check()?;
-        let project = project.ok_or("No project descriptor installed")?;
+        let project =
+            write_template_files(&manifest, &bases, &files, &destination, control, progress)?
+                .ok_or("No project descriptor installed")?;
         // Keep the publisher's descriptor/module names, including C++ module references.
         crate::platform::import_project(&project)?;
         let receipt = TemplateReceipt {
@@ -1355,9 +1309,150 @@ pub fn create_project_with_control(
     transfer_result(result, control)
 }
 
+fn write_template_files(
+    manifest: &buildpatch::Manifest,
+    bases: &[reqwest::Url],
+    files: &[(&buildpatch::File, PathBuf)],
+    destination: &Path,
+    control: &installer::Control,
+    progress: impl Fn(String),
+) -> Result<Option<PathBuf>, String> {
+    use std::sync::atomic::Ordering;
+    let bytes = files.iter().map(|(file, _)| file.size()).sum();
+    let download_bytes = crate::plugins::package_files::compressed_size(
+        manifest,
+        files.iter().map(|(file, _)| *file),
+    );
+    let mut seen = HashSet::new();
+    let chunks = files
+        .iter()
+        .flat_map(|(file, _)| &file.parts)
+        .filter(|part| seen.insert(part.guid.as_str()))
+        .map(|part| {
+            manifest
+                .chunks
+                .get(&part.guid)
+                .ok_or("Missing project template chunk".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    template_chunks::with_project_chunks(manifest, bases, chunks, control, |prefetch, network| {
+        let mut cache = HashMap::new();
+        let mut prepared = 0u64;
+        let mut project = None;
+        for (i, (file, relative)) in files.iter().enumerate() {
+            control.check()?;
+            progress(transfer_status(
+                i + 1,
+                files.len(),
+                prepared,
+                bytes,
+                network.load(Ordering::Relaxed),
+                download_bytes,
+            ));
+            let path = destination.join(relative);
+            installer::no_links(&path)?;
+            fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let mut last_report = std::time::Instant::now();
+            crate::plugins::payload_to_file_with_prefetch(
+                manifest,
+                bases,
+                file,
+                &mut cache,
+                &path,
+                control,
+                &mut |written, _| {
+                    if last_report.elapsed().as_millis() >= 150 || written == file.size() {
+                        progress(transfer_status(
+                            i + 1,
+                            files.len(),
+                            prepared + written,
+                            bytes,
+                            network.load(Ordering::Relaxed),
+                            download_bytes,
+                        ));
+                        last_report = std::time::Instant::now();
+                    }
+                },
+                |guid| {
+                    let chunk = manifest
+                        .chunks
+                        .get(guid)
+                        .ok_or("Missing project template chunk")?;
+                    prefetch.take(chunk).map(Some)
+                },
+            )?;
+            prepared += file.size();
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
+            {
+                project = Some(path);
+            }
+        }
+        control.check()?;
+        Ok(project)
+    })
+}
+
 #[cfg(test)]
 mod template_tests {
     use super::*;
+
+    #[test]
+    fn template_writer_reuses_verified_chunks_across_files_and_checks_file_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let destination = dir.path().join("project");
+        fs::create_dir(&destination).unwrap();
+        let data = b"abcd";
+        let chunk = buildpatch::Chunk {
+            guid: "shared".into(),
+            sha: buildpatch::digest(data),
+            window: data.len() as u32,
+            ..Default::default()
+        };
+        let file = |name: &str, offset: u32, expected: &[u8]| buildpatch::File {
+            name: name.into(),
+            sha: buildpatch::digest(expected),
+            parts: vec![buildpatch::Part {
+                guid: chunk.guid.clone(),
+                offset,
+                size: 2,
+            }],
+            ..Default::default()
+        };
+        let mut manifest = buildpatch::Manifest {
+            files: vec![
+                file("Example.uproject", 0, b"ab"),
+                file("Content/Map.umap", 2, b"cd"),
+            ],
+            chunks: [(chunk.guid.clone(), chunk.clone())].into(),
+            ..Default::default()
+        };
+        crate::download_policy::with_cache_root(Some(cache), || {
+            crate::download_policy::cache_chunk(&chunk, data);
+            let control = installer::Control::default();
+            let files = template_files(&manifest).unwrap();
+            let descriptor =
+                write_template_files(&manifest, &[], &files, &destination, &control, |_| {})
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(fs::read(descriptor).unwrap(), b"ab");
+            assert_eq!(
+                fs::read(destination.join("Content/Map.umap")).unwrap(),
+                b"cd"
+            );
+
+            manifest.files[1].sha = buildpatch::digest(b"wrong");
+            let broken = dir.path().join("broken");
+            fs::create_dir(&broken).unwrap();
+            let files = template_files(&manifest).unwrap();
+            let result = write_template_files(&manifest, &[], &files, &broken, &control, |_| {});
+            assert!(result.unwrap_err().contains("failed hash verification"));
+            assert!(!broken.join("Content/Map.umap").exists());
+        });
+    }
+
     #[test]
     fn template_keeps_config_source_and_descriptor() {
         let mut m = buildpatch::Manifest::default();

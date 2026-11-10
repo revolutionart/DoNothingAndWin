@@ -467,7 +467,12 @@ impl Epic {
             None
         };
         let mut snapshot = combine(&catalog, assets.as_ref())?;
-        if session.is_some() && !snapshot.missing_builds.is_empty() {
+        if session.is_some()
+            && snapshot
+                .releases
+                .iter()
+                .any(|r| !r.preview && r.build.is_none())
+        {
             return Err(format!(
                 "Epic's build feed is incomplete: {} catalog branches have no build metadata. Previous results are retained.",
                 snapshot.missing_builds.len()
@@ -510,6 +515,11 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
         let info = item["releaseInfo"]
             .as_array()
             .ok_or("Engine catalog item has no release information")?;
+        let preview = item["categories"].as_array().is_some_and(|categories| {
+            categories
+                .iter()
+                .any(|category| category["path"] == "engines/preview")
+        });
         for r in info {
             if !r["platform"]
                 .as_array()
@@ -532,6 +542,7 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
                     platform: "Windows".into(),
                     version: None,
                     build: None,
+                    preview,
                 },
             );
         }
@@ -557,6 +568,7 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
             let id = a["catalogItemId"]
                 .as_str()
                 .ok_or("Engine build has no catalog identity")?;
+            let preview = releases.get(app).is_some_and(|release| release.preview);
             releases.insert(
                 app.into(),
                 Release {
@@ -566,6 +578,7 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
                     platform: "Windows".into(),
                     version: EngineVersion::parse(build),
                     build: Some(build.into()),
+                    preview,
                 },
             );
             engine_count += 1;
@@ -645,6 +658,28 @@ mod tests {
         let s = combine(catalog()["elements"].as_array().unwrap(), None).unwrap();
         assert!(!s.verified());
         assert!(!s.missing_builds.is_empty());
+    }
+
+    #[test]
+    fn preview_category_survives_live_build_metadata_without_a_preview_suffix() {
+        let item = serde_json::json!({
+            "id":"catalog-id",
+            "categories":[{"path":"engines"},{"path":"engines/preview"}],
+            "releaseInfo":[{"platform":["Windows","Mac"],"appId":"UE_5.9"}]
+        });
+        let feed = serde_json::json!([{
+            "namespace":"ue","appName":"UE_5.9","catalogItemId":"catalog-id",
+            "buildVersion":"5.9.0-60351404+++UE5+Release-5.9-Windows"
+        }]);
+        let snapshot = combine(std::slice::from_ref(&item), None).unwrap();
+        assert_eq!(snapshot.releases[0].version_label(), "5.9 Preview");
+        let snapshot = combine(&[item.clone()], Some(&feed)).unwrap();
+        assert!(snapshot.verified());
+        assert_eq!(snapshot.releases[0].version_label(), "5.9.0 Preview");
+        let mut stable = item;
+        stable["categories"] = serde_json::json!([{"path":"engines"}]);
+        let snapshot = combine(&[stable], Some(&feed)).unwrap();
+        assert_eq!(snapshot.releases[0].version_label(), "5.9.0");
     }
 }
 

@@ -1279,6 +1279,9 @@ impl Workspace {
         }
         if let Some(item) = choose {
             self.reset_plugin_download_cache();
+            if item.complete_project() {
+                self.set_project_creation_folder();
+            }
             self.library.create_name = item
                 .title
                 .chars()
@@ -1737,10 +1740,10 @@ impl Workspace {
                                     Some(minimum) => format!("This project uses Unreal Engine {version}. The oldest available asset version is {minimum}; newer assets cannot be added to an older engine project."),
                                     None => "This asset has no available Windows version for this project.".into(),
                                 };
-                                response.on_hover_cursor(CursorIcon::NotAllowed).on_hover_text(reason);
+                                dialog::hover_help(&response.on_hover_cursor(CursorIcon::NotAllowed), reason);
                             } else {
                                 if response.clone().on_hover_cursor(CursorIcon::PointingHand).clicked() && !selected {self.library.project_target=Some(path.clone()); self.library.asset_version.clear();}
-                                response.on_hover_text(if compatible{path.clone()}else{format!("Choose an alternative asset version for this project ({version})")});
+                                dialog::hover_help(&response, if compatible{path.clone()}else{format!("Choose an alternative asset version for this project ({version})")});
                             }
                         }});ui.add_space(8.);}
                         if visible.is_empty(){ui.label("No matching compatible projects. Import a project or enable Show all projects.");}
@@ -2002,7 +2005,21 @@ fn library_type_icon(ui: &Ui, origin: Pos2, kind: &str, tint: Color32) {
     }
 }
 impl Workspace {
-    fn library_create_dialog(&mut self, ctx: &Context) {
+    fn set_project_creation_folder(&mut self) {
+        self.library.create_folder = self
+            .prefs
+            .project_creation_folder
+            .as_deref()
+            .filter(|path| Path::new(path).is_dir())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                engine_workspace::discovery::quick::project_creation_root()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+    }
+
+    pub(super) fn library_create_dialog(&mut self, ctx: &Context) {
         let Some(item) = self.library.selected.clone() else {
             return;
         };
@@ -2029,20 +2046,24 @@ impl Workspace {
                 );
                 ui.label("Destination folder");
                 ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [ui.available_width() - 115., 40.],
-                        TextEdit::singleline(&mut self.library.create_folder)
-                            .vertical_align(Align::Center)
-                            .margin(vec2(12., 8.)),
-                    );
+                    let width = ui.available_width() - 115.;
+                    dialog::path_input(ui, &mut self.library.create_folder, width);
                     if ui
                         .add(buttons::secondary_button("Browse"))
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
                     {
-                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                            self.library.create_folder = p.display().to_string();
+                        let mut picker =
+                            rfd::FileDialog::new().set_title("Choose a project destination");
+                        if let Some(directory) = Path::new(&self.library.create_folder)
+                            .ancestors()
+                            .find(|path| path.is_dir())
+                        {
+                            picker = picker.set_directory(directory);
+                        }
+                        if let Some(p) = picker.pick_folder() {
+                            self.library.create_folder = dialog::display_path(&p.to_string_lossy());
                         }
                     }
                 });
@@ -2063,8 +2084,8 @@ impl Workspace {
                         }
                     });
                 ui.label("The template's original project and module names are preserved inside your new folder. Existing projects stay untouched.");
-                let destination =
-                    Path::new(&self.library.create_folder).join(&self.library.create_name);
+                let folder = Path::new(&self.library.create_folder);
+                let destination = folder.join(&self.library.create_name);
                 ui.label(format!("New project folder: {}", destination.display()));
                 let reserved = self.library.install_queue.contains_creation(&destination);
                 if reserved {
@@ -2077,7 +2098,9 @@ impl Workspace {
                         .create_name
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && Path::new(&self.library.create_folder).is_dir()
+                    && (folder.is_dir()
+                        || (!folder.exists()
+                            && folder == engine_workspace::discovery::default_project_root()))
                     && !destination.exists()
                     && !reserved
                     && item.compatible(&self.library.asset_version).is_some();
@@ -2101,6 +2124,8 @@ impl Workspace {
             let Some(version) = item.compatible(&branch) else {
                 return;
             };
+            self.prefs.project_creation_folder = Some(self.library.create_folder.clone());
+            self.persist();
             self.enqueue_library_project(
                 ctx,
                 Request {
@@ -2522,15 +2547,26 @@ impl Workspace {
         self.library.selected = Some(self.library.items[0].clone());
         self.library.show_all_projects = false;
         self.library.project_target = None;
-        self.projects = vec![Project {
-            name: "Example Project".into(),
-            path: "C:/Preview/ExampleProject/ExampleProject.uproject".into(),
-            description: String::new(),
-            engine: "5.8".into(),
-            pinned: false,
-            last_opened: 0,
-            artwork: None,
-        }];
+        self.projects = (1..=9)
+            .map(|index| Project {
+                name: format!("Example Project {index}"),
+                path: format!("C:/Preview/ExampleProject{index}/ExampleProject{index}.uproject"),
+                description: String::new(),
+                engine: "5.8".into(),
+                pinned: false,
+                last_opened: 0,
+                artwork: None,
+            })
+            .collect();
+    }
+
+    pub(super) fn preview_create_project(&mut self) {
+        self.preview_library_organization(0);
+        self.demo = true;
+        self.library.selected = Some(self.library.items[2].clone());
+        self.library.create_name = "AdventureGame".into();
+        self.library.asset_version = "5.8".into();
+        self.set_project_creation_folder();
     }
 
     pub(super) fn preview_asset_overwrite(&mut self) {

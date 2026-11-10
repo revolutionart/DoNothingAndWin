@@ -816,7 +816,16 @@ fn stream_payload_io(
     output: &mut impl std::io::Write,
     progress: &mut impl FnMut(PayloadIo),
 ) -> Result<(), String> {
-    stream_payload_io_controlled(m, bases, file, cache, output, &Control::default(), progress)
+    stream_payload_io_controlled(
+        m,
+        bases,
+        file,
+        cache,
+        output,
+        &Control::default(),
+        progress,
+        |_| Ok(None),
+    )
 }
 fn stream_payload_io_controlled(
     m: &Manifest,
@@ -826,6 +835,7 @@ fn stream_payload_io_controlled(
     output: &mut impl std::io::Write,
     control: &Control,
     progress: &mut impl FnMut(PayloadIo),
+    mut prefetched: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<(), String> {
     control.check()?;
     let mut written = 0u64;
@@ -841,11 +851,14 @@ fn stream_payload_io_controlled(
             {
                 cache.clear();
             }
-            let bytes = if let Some(bytes) =
+            let bytes = if let Some(bytes) = prefetched(&p.guid)? {
+                bytes
+            } else if let Some(bytes) =
                 crate::download_policy::cached_chunk_progress(chunk, &mut |n| {
                     io.read += n;
                     progress(io);
-                }) {
+                })
+            {
                 bytes
             } else {
                 let bytes = installer::chunk_data_progress(
@@ -923,6 +936,19 @@ pub(crate) fn payload_to_file_controlled(
     control: &Control,
     progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
+    payload_to_file_with_prefetch(m, bases, file, cache, path, control, progress, |_| Ok(None))
+}
+
+pub(crate) fn payload_to_file_with_prefetch(
+    m: &Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    path: &Path,
+    control: &Control,
+    progress: &mut impl FnMut(u64, u64),
+    prefetched: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+) -> Result<(), String> {
     control.check()?;
     installer::no_links(path)?;
     let mut output = fs::OpenOptions::new()
@@ -930,11 +956,17 @@ pub(crate) fn payload_to_file_controlled(
         .create_new(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    let result =
-        stream_payload_io_controlled(m, bases, file, cache, &mut output, control, &mut |p| {
-            progress(p.prepared, p.downloaded)
-        })
-        .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
+    let result = stream_payload_io_controlled(
+        m,
+        bases,
+        file,
+        cache,
+        &mut output,
+        control,
+        &mut |p| progress(p.prepared, p.downloaded),
+        prefetched,
+    )
+    .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
     drop(output);
     if result.is_err() {
         let _ = fs::remove_file(path);
@@ -976,6 +1008,7 @@ fn load_package(
             .into(),
         channel: "Live".into(),
         platform: "Windows".into(),
+        preview: false,
         build: asset["buildVersion"].as_str().map(str::to_owned),
         version: None,
     };

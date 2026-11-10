@@ -517,6 +517,7 @@ mod tests {
             build: Some("5.8.4-123+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),
             platform: "Windows".into(),
+            preview: false,
             channel: "Live".into(),
             catalog_id: "".into(),
         };

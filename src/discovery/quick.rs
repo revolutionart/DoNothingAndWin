@@ -21,6 +21,28 @@ pub fn preferred_roots() -> Vec<PathBuf> {
     local_unique(candidates, &drives)
 }
 
+pub fn project_creation_root() -> PathBuf {
+    local_app_data()
+        .and_then(|local| epic_project_root(&local, &roots()))
+        .unwrap_or_else(super::default_project_root)
+}
+
+fn epic_project_root(local: &Path, drives: &[PathBuf]) -> Option<PathBuf> {
+    let config = local.join("EpicGamesLauncher/Saved/Config");
+    let candidates = ["WindowsEditor", "Windows"]
+        .iter()
+        .filter_map(|platform| {
+            crate::project_history::read_settings(
+                &config.join(platform).join("GameUserSettings.ini"),
+            )
+        })
+        .flat_map(|text| parse_locations(&text))
+        .collect();
+    local_unique(candidates, drives)
+        .into_iter()
+        .find(|path| path.is_dir())
+}
+
 fn local_app_data() -> Option<PathBuf> {
     // Use the actual user's Epic/Unreal settings even with an isolated launcher
     // test profile. No settings from these applications are modified.
@@ -125,6 +147,29 @@ fn parse_locations(text: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_creation_uses_the_first_accessible_epic_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root
+            .path()
+            .join("EpicGamesLauncher/Saved/Config/WindowsEditor");
+        let projects = root.path().join("Studio Projects");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir(&projects).unwrap();
+        std::fs::write(
+            config.join("GameUserSettings.ini"),
+            format!(
+                "[Launcher]\nCreatedProjectPaths={}\n+CreatedProjectPaths=\"{}\"\n",
+                root.path().join("Missing").display(),
+                projects.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            epic_project_root(root.path(), &[root.path().to_owned()]),
+            Some(projects)
+        );
+    }
     #[test]
     #[ignore = "Read-only benchmark of project discovery on the current PC"]
     fn benchmark_local_quick_search() {

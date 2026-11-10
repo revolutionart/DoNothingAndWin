@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.7 - 2026-11-10
+
+### Engine previews
+
+- Identify preview releases from Epic's catalog and label them in the engine list and version picker.
+- Show an available preview in a dismissible gold Workspace banner. Remember dismissal and keep a compact notice beside the engine storage total.
+- Use either preview install control to add or reveal an install card with that release selected. Bring the card into view and reuse it on repeat clicks.
+- Move the cloud storage badge closer to the Engine versions heading. Open Unreal Engine announcements from **Release notes**.
+
+### Projects and downloads
+
+- Fill the Create project destination from the last used folder, Epic Launcher's configured project location, or the default Unreal Projects folder.
+- Download project template chunks concurrently with bounded memory use, retain file hash verification, and respond to Stop during chunk downloads.
+- Wait for the pointer to pause before showing project-card path tooltips and dialog close help, reducing flashing while moving across the project picker.
+
 ## 1.3.6 - 2026-11-08
 
 ### Projects

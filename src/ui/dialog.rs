@@ -125,9 +125,8 @@ pub(super) fn show_with_icon(
             ui.painter()
                 .galley(start + vec2(62., 45.), subtitle_text, color(theme.muted));
             let x = Rect::from_min_size(pos2(header.right() - 28., header.top()), vec2(28., 28.));
-            let hover = ui
-                .interact(x, Id::new((id, "close")), Sense::click())
-                .on_hover_text("Close");
+            let hover = ui.interact(x, Id::new((id, "close")), Sense::click());
+            hover_help(&hover, "Close");
             let col = color(if hover.hovered() {
                 theme.text
             } else {
@@ -156,6 +155,18 @@ pub(super) fn show_with_icon(
         });
     if close || response.should_close() {
         *open = false;
+    }
+}
+
+pub(super) fn hover_help(response: &Response, text: impl Into<WidgetText>) {
+    const DELAY: f32 = 0.2;
+    if response.hovered() {
+        let elapsed = response.ctx.input(|i| i.pointer.time_since_last_movement());
+        if elapsed >= DELAY {
+            response.clone().on_hover_text(text);
+        } else {
+            response.ctx.request_repaint_after_secs(DELAY - elapsed);
+        }
     }
 }
 
@@ -283,6 +294,53 @@ pub(super) fn path_input(ui: &mut Ui, value: &mut String, width: f32) -> Respons
 #[cfg(test)]
 mod tests {
     use super::display_path;
+
+    #[test]
+    fn hover_help_waits_for_the_pointer_to_stop() {
+        use super::*;
+
+        let ctx = Context::default();
+        ctx.style_mut(|style| {
+            style.interaction.tooltip_delay = 0.;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let path = "C:/Projects/Example/Example.uproject";
+        let mut tooltip_seen = false;
+        for frame in 0..48 {
+            let events = if frame < 24 {
+                vec![Event::PointerMoved(pos2(30. + frame as f32, 45.))]
+            } else {
+                Vec::new()
+            };
+            let output = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800., 600.))),
+                    events,
+                    time: Some(frame as f64 / 60.),
+                    ..Default::default()
+                },
+                |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        let (_, response) =
+                            ui.allocate_exact_size(vec2(200., 100.), Sense::click());
+                        hover_help(&response, path);
+                    });
+                },
+            );
+            let shown = output.shapes.iter().any(
+                |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == path),
+            );
+            assert!(
+                !shown || frame >= 24,
+                "tooltip appeared while the pointer was moving"
+            );
+            tooltip_seen |= shown;
+        }
+        assert!(
+            tooltip_seen,
+            "tooltip should appear after the pointer stops"
+        );
+    }
 
     #[test]
     fn display_windows_paths_without_device_prefix() {
