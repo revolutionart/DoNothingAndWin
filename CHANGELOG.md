@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.8 - 2026-11-13
+
+- Refresh the engine builds Epic returns when some catalog branches lack build details. Show the missing coverage and preserve hotfix history across partial checks.
+- Label the installed Unreal Engine 5.9 MegaJam build **5.9.0 Preview** on its Workspace card.
+- Fix dialogs shifting sideways at fractional display scaling, including **Add to project**.
+
 ## 1.3.7 - 2026-11-10
 
 ### Engine previews
