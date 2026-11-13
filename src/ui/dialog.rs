@@ -147,11 +147,23 @@ pub(super) fn show_with_icon(
                 .clone()
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .clicked();
+            // Scroll areas round their content to pixels and can report a slightly
+            // wider layout. Keep that width out of the centered modal's measurement.
+            let bounds = ui.available_rect_before_wrap();
+            let mut body_ui = ui.new_child(UiBuilder::new().max_rect(bounds));
+            body_ui.shrink_clip_rect(Rect::from_x_y_ranges(
+                bounds.x_range(),
+                ui.clip_rect().y_range(),
+            ));
             AppScrollArea::vertical(theme)
                 .id_salt((id, "body"))
                 .max_height((ctx.content_rect().height() - 200.).max(160.))
                 .auto_shrink([false, true])
-                .show(ui, body);
+                .show(&mut body_ui, body);
+            ui.advance_cursor_after_rect(Rect::from_min_size(
+                bounds.min,
+                vec2(bounds.width(), body_ui.min_size().y),
+            ));
         });
     if close || response.should_close() {
         *open = false;
@@ -294,6 +306,77 @@ pub(super) fn path_input(ui: &mut Ui, value: &mut String, width: f32) -> Respons
 #[cfg(test)]
 mod tests {
     use super::display_path;
+
+    #[test]
+    fn centered_dialog_stays_still_at_fractional_dpi() {
+        use super::*;
+
+        let ctx = Context::default();
+        let mut fonts = FontDefinitions::default();
+        fonts.families.insert(
+            FontFamily::Name("semibold".into()),
+            fonts.families[&FontFamily::Proportional].clone(),
+        );
+        ctx.set_fonts(fonts);
+        let size = vec2(1255., 1124.) / 1.25;
+        let theme = Theme::dark();
+        let mut settled = None;
+        for frame in 0..24 {
+            let mut input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                events: vec![Event::PointerMoved(pos2(480. + frame as f32, 400.))],
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&ViewportId::ROOT)
+                .unwrap()
+                .native_pixels_per_point = Some(1.25);
+            let output = ctx.run(input, |ctx| {
+                let mut open = true;
+                show(
+                    ctx,
+                    &theme,
+                    "dialog-stability",
+                    "Add to project",
+                    "",
+                    &mut open,
+                    |ui| {
+                        AppScrollArea::vertical(&theme)
+                            .max_height(300.)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                let width = (ui.available_width() - 24.) / 3.;
+                                for _ in 0..3 {
+                                    ui.horizontal(|ui| {
+                                        for _ in 0..3 {
+                                            ui.allocate_exact_size(
+                                                vec2(width, 150.),
+                                                Sense::hover(),
+                                            );
+                                        }
+                                    });
+                                }
+                            });
+                    },
+                );
+                assert!(open);
+            });
+            if frame >= 8 {
+                let title = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        Shape::Text(text) if text.galley.text() == "Add to project" => {
+                            Some(text.pos)
+                        }
+                        _ => None,
+                    })
+                    .expect("dialog title");
+                assert_eq!(*settled.get_or_insert(title), title, "frame {frame}");
+            }
+        }
+    }
 
     #[test]
     fn hover_help_waits_for_the_pointer_to_stop() {

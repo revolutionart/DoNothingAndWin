@@ -3,6 +3,17 @@ use super::*;
 pub(super) const RELEASE_NOTES_URL: &str =
     "https://forums.unrealengine.com/tags/c/general/announcements/49/unreal-engine/705";
 
+pub(super) fn is_installed_preview(build: &str, releases: &[Release]) -> bool {
+    // The 5.9 MegaJam Preview's installed metadata has no preview marker.
+    // Recognize its exact Windows build even when no release feed is cached.
+    build == "5.9.0-60351404+++UE5+Release-5.9-Windows"
+        || releases.iter().any(|release| {
+            release.preview
+                && release.platform == "Windows"
+                && release.build.as_deref() == Some(build)
+        })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Action {
     Dismiss,
@@ -210,6 +221,27 @@ pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, branch: &str) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_preview_requires_an_exact_build() {
+        let megajam = "5.9.0-60351404+++UE5+Release-5.9-Windows";
+        let other = "5.9.0-60351405+++UE5+Release-5.9-Windows";
+        assert!(is_installed_preview(megajam, &[]));
+        assert!(!is_installed_preview(other, &[]));
+
+        let mut release = Release {
+            app: "UE_5.9".into(),
+            catalog_id: String::new(),
+            channel: "Live".into(),
+            platform: "Windows".into(),
+            build: Some(other.into()),
+            version: EngineVersion::parse(other),
+            preview: true,
+        };
+        assert!(is_installed_preview(other, std::slice::from_ref(&release)));
+        release.preview = false;
+        assert!(!is_installed_preview(other, &[release]));
+    }
 
     #[test]
     fn banner_actions_are_separate_in_compact_and_wide_layouts() {

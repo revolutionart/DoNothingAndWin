@@ -128,6 +128,13 @@ impl Workspace {
         let v = EngineVersion::parse(&engine.version)
             .map(|v| v.to_string())
             .unwrap_or(engine.version.clone());
+        let preview = self
+            .workspace_cache
+            .engine_builds
+            .get(&engine.path)
+            .is_some_and(|build| {
+                engine_preview::is_installed_preview(build, &self.snapshot.releases)
+            });
         let label_width = ui
             .painter()
             .layout_no_wrap(
@@ -138,23 +145,39 @@ impl Workspace {
             .size()
             .x
             / c.scale();
-        let version_x = tx + label_width + 18.;
+        let version_x = tx + label_width + if preview { 12. } else { 18. };
         let version_right = x + w - if selected { 100. } else { 18. };
         let version_rect = c.rect([version_x, y + 8., version_right - version_x, 44.]);
         let version_painter = ui.painter().with_clip_rect(version_rect);
-        version_painter.text(
+        let version_label = version_painter.text(
             c.point(version_x, heading_y),
             Align2::LEFT_CENTER,
             &v,
             FontId::new(28. * c.scale(), FontFamily::Name("semibold".into())),
             color(t.text),
         );
+        if preview {
+            version_painter.text(
+                pos2(
+                    version_label.right() + 7. * c.scale(),
+                    version_label.center().y,
+                ),
+                Align2::LEFT_CENTER,
+                "Preview",
+                buttons::primary_font(c.scale()),
+                color(t.warning),
+            );
+        }
         ui.interact(
             version_rect,
             Id::new(("engine-version-tip", i)),
             Sense::hover(),
         )
-        .on_hover_text(&engine.version);
+        .on_hover_text(if preview {
+            format!("{v} Preview")
+        } else {
+            engine.version.clone()
+        });
         if selected {
             c.fill(ui, [x + w - 86., y + 15., 70., 30.], t.selection, 5.);
             c.text(

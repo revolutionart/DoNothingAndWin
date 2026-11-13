@@ -828,15 +828,12 @@ impl Workspace {
                     self.status = if self.snapshot.verified() {
                         format!(
                             "{} engine builds checked • hotfix tracking active",
-                            self.snapshot.releases.len()
+                            self.snapshot.build_count()
                         )
                     } else if self.session.is_none() {
                         "Engine catalog checked • sign in to check hotfixes".into()
                     } else {
-                        format!(
-                            "Check incomplete • {} builds unavailable",
-                            self.snapshot.missing_builds.len()
-                        )
+                        self.partial_release_status()
                     };
                     let account = self
                         .session
@@ -1585,8 +1582,10 @@ impl Workspace {
                     format!(
                         "Verified against Epic • {} catalog branches • {} account-visible builds • hotfix tracking active",
                         self.snapshot.catalog_count,
-                        self.snapshot.releases.len()
+                        self.snapshot.build_count()
                     )
+                } else if self.snapshot.authenticated {
+                    self.partial_release_status()
                 } else {
                     "Sign in with Epic to verify hotfixes and account-visible builds.".into()
                 }
@@ -2459,6 +2458,13 @@ impl Workspace {
         }
         let _ = ctx;
     }
+    fn partial_release_status(&self) -> String {
+        format!(
+            "{} engine builds checked • {} catalog branches without build details",
+            self.snapshot.build_count(),
+            self.snapshot.missing_builds.len()
+        )
+    }
     fn release_page(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
         let header = PageHeaderLayout::new();
         let actions_y = header.actions_y;
@@ -2542,7 +2548,11 @@ impl Workspace {
                 }
                 let font=FontId::proportional(15.*c.scale());let v=r.version_label();
                 p.text(rect.left_center()+vec2(10.*c.sx,0.),Align2::LEFT_CENTER,&v,FontId::new(19.*c.scale(),FontFamily::Name("semibold".into())),color(self.theme.text));
-                let build = r.build.as_deref().unwrap_or("Sign in to resolve hotfix version");
+                let build = r.build.as_deref().unwrap_or(if self.snapshot.authenticated {
+                    "Epic did not return build details"
+                } else {
+                    "Sign in to resolve hotfix version"
+                });
                 let build_rect = Rect::from_min_max(pos2(c.point(480., 0.).x, rect.top()), pos2(c.point(c.width - 356., 0.).x, rect.bottom()));
                 let mut build_ui = ui.new_child(UiBuilder::new().max_rect(build_rect).layout(Layout::left_to_right(Align::Center)));
                 build_ui.add(Label::new(RichText::new(build).font(font.clone()).color(color(self.theme.muted))).truncate()).on_hover_text(build);

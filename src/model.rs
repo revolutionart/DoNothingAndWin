@@ -124,16 +124,49 @@ pub struct Snapshot {
     pub notices: Vec<ReleaseChange>,
     #[serde(default)]
     pub seen: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) last_known_builds: Vec<Release>,
 }
 impl Snapshot {
     pub fn verified(&self) -> bool {
         self.authenticated && !self.releases.is_empty() && self.missing_builds.is_empty()
     }
+    pub fn build_count(&self) -> usize {
+        self.releases.iter().filter(|r| r.build.is_some()).count()
+    }
     pub fn merge_history(&mut self, previous: &Self) {
         self.seen = previous.seen.clone();
         self.notices = previous.notices.clone();
         if self.authenticated && previous.authenticated {
-            for c in changes(&previous.releases, &self.releases) {
+            let mut baseline = previous.releases.clone();
+            for prior in &mut baseline {
+                if prior.build.is_none()
+                    && let Some(last) = previous
+                        .last_known_builds
+                        .iter()
+                        .find(|r| r.key() == prior.key() && r.catalog_id == prior.catalog_id)
+                {
+                    *prior = last.clone();
+                }
+            }
+            // Compare a returning build to the last build Epic supplied, while
+            // keeping the release list limited to the current feed's metadata.
+            self.last_known_builds = self
+                .releases
+                .iter()
+                .filter(|r| r.build.is_none())
+                .filter_map(|r| {
+                    baseline
+                        .iter()
+                        .find(|prior| {
+                            prior.build.is_some()
+                                && prior.key() == r.key()
+                                && prior.catalog_id == r.catalog_id
+                        })
+                        .cloned()
+                })
+                .collect();
+            for c in changes(&baseline, &self.releases) {
                 let key = format!("Windows:Live:{}:{}", c.app, c.current);
                 if self.seen.insert(key) {
                     self.notices.push(c);
@@ -266,6 +299,42 @@ mod tests {
             ..Default::default()
         };
         assert!(!s.verified());
+    }
+
+    #[test]
+    fn partial_checks_keep_the_baseline_when_a_build_returns() {
+        let old = rel("UE_5.7", "5.7.1");
+        let previous = Snapshot {
+            authenticated: true,
+            releases: vec![old.clone()],
+            ..Default::default()
+        };
+        let mut partial = Snapshot {
+            authenticated: true,
+            releases: vec![Release {
+                build: None,
+                version: None,
+                ..old
+            }],
+            missing_builds: vec!["UE_5.7".into()],
+            ..Default::default()
+        };
+        partial.merge_history(&previous);
+        assert_eq!(partial.build_count(), 0);
+        assert!(partial.notices.is_empty());
+
+        let saved = serde_json::to_string(&partial).unwrap();
+        let saved: Snapshot = serde_json::from_str(&saved).unwrap();
+        partial.merge_history(&saved);
+        let mut updated = Snapshot {
+            authenticated: true,
+            releases: vec![rel("UE_5.7", "5.7.2")],
+            ..Default::default()
+        };
+        updated.merge_history(&partial);
+        assert_eq!(updated.notices.len(), 1);
+        assert_eq!(updated.notices[0].kind, ChangeKind::Hotfix);
+        assert_eq!(updated.notices[0].previous.as_deref(), Some("5.7.1"));
     }
 }
 

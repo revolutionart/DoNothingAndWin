@@ -3,6 +3,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct WorkspaceCache {
     pub engines: HashMap<String, bool>,
+    pub engine_builds: HashMap<String, String>,
     pub projects: HashMap<String, bool>,
     revision: u64,
     applied: Option<(u64, Paths)>,
@@ -11,7 +12,12 @@ pub(super) struct WorkspaceCache {
 }
 
 enum Event {
-    Engines(u64, Paths, HashMap<String, bool>),
+    Engines {
+        revision: u64,
+        paths: Paths,
+        ready: HashMap<String, bool>,
+        builds: HashMap<String, String>,
+    },
     Complete(Snapshot),
 }
 
@@ -51,12 +57,18 @@ impl Workspace {
         };
         if let Some(rx) = &self.workspace_cache.pending {
             match rx.try_recv() {
-                Ok(Event::Engines(revision, scanned, engines)) => {
+                Ok(Event::Engines {
+                    revision,
+                    paths: scanned,
+                    ready,
+                    builds,
+                }) => {
                     if self
                         .workspace_cache
                         .accepts_revision(revision, &scanned, &paths)
                     {
-                        self.workspace_cache.engines = engines;
+                        self.workspace_cache.engines = ready;
+                        self.workspace_cache.engine_builds = builds;
                     }
                 }
                 Ok(Event::Complete(snapshot)) => {
@@ -121,9 +133,20 @@ fn scan_workspace(
         .iter()
         .map(|e| (e.path.clone(), platform::engine_ready(e)))
         .collect();
-    // Publish the cheap readiness check before plugin receipt parsing and
-    // project history. Those must not leave installed engines "Checking...".
-    emit(Event::Engines(revision, paths.clone(), ready.clone()));
+    let engine_builds = engines
+        .iter()
+        .filter_map(|e| {
+            let build = engine_workspace::maintenance::promoted_engine_build(Path::new(&e.path))?;
+            Some((e.path.clone(), build))
+        })
+        .collect();
+    // Publish engine information before plugin receipt parsing and project history.
+    emit(Event::Engines {
+        revision,
+        paths: paths.clone(),
+        ready: ready.clone(),
+        builds: engine_builds,
+    });
     let projects = paths
         .projects
         .iter()
@@ -173,7 +196,12 @@ mod tests {
             paths.clone(),
             vec![engine.clone()],
             |event| match event {
-                Event::Engines(revision, scanned, ready) => {
+                Event::Engines {
+                    revision,
+                    paths: scanned,
+                    ready,
+                    ..
+                } => {
                     assert!(!completed);
                     assert!(WorkspaceCache::default().accepts_revision(revision, &scanned, &paths));
                     assert_eq!(ready.get(&engine.path), Some(&true));
@@ -204,7 +232,7 @@ mod tests {
         let start = Instant::now();
         let mut ready = false;
         scan_workspace(0, paths, engines, |event| {
-            if let Event::Engines(..) = event {
+            if let Event::Engines { .. } = event {
                 eprintln!("Engine readiness published in {:?}", start.elapsed());
                 assert!(start.elapsed() < Duration::from_secs(2));
                 ready = true;

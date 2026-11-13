@@ -466,21 +466,14 @@ impl Epic {
         } else {
             None
         };
-        let mut snapshot = combine(&catalog, assets.as_ref())?;
-        if session.is_some()
-            && snapshot
-                .releases
-                .iter()
-                .any(|r| !r.preview && r.build.is_none())
-        {
-            return Err(format!(
-                "Epic's build feed is incomplete: {} catalog branches have no build metadata. Previous results are retained.",
-                snapshot.missing_builds.len()
-            ));
-        }
-        snapshot.checked_at = now();
-        Ok((snapshot, renewed))
+        Ok((checked_snapshot(&catalog, assets.as_ref())?, renewed))
     }
+}
+
+fn checked_snapshot(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, String> {
+    let mut snapshot = combine(catalog, assets)?;
+    snapshot.checked_at = now();
+    Ok(snapshot)
 }
 
 pub fn parse_catalog_page(v: &Value, start: usize) -> Result<(Vec<Value>, usize), String> {
@@ -632,6 +625,33 @@ mod tests {
         assert_eq!(s.releases.len(), 39);
         let newest = s.releases.iter().find(|r| r.app == "UE_5.8").unwrap();
         assert_eq!(newest.version.as_ref().unwrap().to_string(), "5.8.3");
+    }
+    #[test]
+    fn release_check_accepts_builds_visible_to_the_account() {
+        let catalog = catalog();
+        let items = catalog["elements"].as_array().unwrap();
+        let assets: Value = serde_json::from_str(
+            include_str!("../tests/fixtures/builds.json").trim_start_matches('\u{feff}'),
+        )
+        .unwrap();
+        let visible: Vec<_> = assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|asset| {
+                asset["namespace"] == "ue"
+                    && asset["appName"]
+                        .as_str()
+                        .is_some_and(|app| app.starts_with("UE_"))
+            })
+            .take(8)
+            .cloned()
+            .collect();
+        let snapshot = checked_snapshot(items, Some(&Value::Array(visible))).unwrap();
+        assert_eq!(snapshot.missing_builds.len(), 30);
+        assert_eq!(snapshot.build_count(), 8);
+        assert!(!snapshot.verified());
+        assert!(checked_snapshot(items, Some(&serde_json::json!([]))).is_err());
     }
     #[test]
     fn empty_page_is_failure() {

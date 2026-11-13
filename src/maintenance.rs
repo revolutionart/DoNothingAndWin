@@ -227,13 +227,27 @@ fn official_release_build(v: &serde_json::Value) -> bool {
             .as_str()
             .is_some_and(|s| s.starts_with("++UE") && s.contains("+Release-"))
 }
+fn windows_build_version(v: &serde_json::Value) -> Option<String> {
+    let branch = v["BranchName"].as_str()?.trim_start_matches('+');
+    if branch.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}.{}.{}-{}+++{branch}-Windows",
+        v["MajorVersion"].as_u64()?,
+        v["MinorVersion"].as_u64()?,
+        v["PatchVersion"].as_u64()?,
+        v["Changelist"].as_u64()?,
+    ))
+}
+pub fn promoted_engine_build(root: &Path) -> Option<String> {
+    let version = storage::read_json(&root.join("Engine/Build/Build.version"))?;
+    official_release_build(&version)
+        .then(|| windows_build_version(&version))
+        .flatten()
+}
 pub(crate) fn matches_build_version(m: &Manifest, v: &serde_json::Value) -> bool {
-    let prefix = format!(
-        "{}.{}.{}-{}+++",
-        v["MajorVersion"], v["MinorVersion"], v["PatchVersion"], v["Changelist"]
-    );
-    let branch = v["BranchName"].as_str().unwrap_or("");
-    !branch.is_empty() && m.build == format!("{prefix}{}-Windows", branch.trim_start_matches('+'))
+    windows_build_version(v).as_deref() == Some(m.build.as_str())
 }
 /// Shared files do not prove that every component sharing them was installed.
 fn inferred_tags(manifest: &Manifest, root: &Path) -> Vec<String> {
@@ -942,10 +956,17 @@ mod identity_recovery_tests {
         assert!(official_release_build(&v));
         let mut m: Manifest=serde_json::from_value(serde_json::json!({"app":"UE_5.7","build":"5.7.4-51494982+++UE5+Release-5.7-Windows","files":[],"chunks":{},"feature":22,"prereq":""})).unwrap();
         assert!(matches_build_version(&m, &v));
+        let engine = tempfile::tempdir().unwrap();
+        let metadata = engine.path().join("Engine/Build/Build.version");
+        fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        storage::write_json(&metadata, &v).unwrap();
+        assert_eq!(promoted_engine_build(engine.path()), Some(m.build.clone()));
         m.build = "5.7.4-51494983+++UE5+Release-5.7-Windows".into();
         assert!(!matches_build_version(&m, &v));
         v["IsLicenseeVersion"] = 1.into();
         assert!(!official_release_build(&v));
+        storage::write_json(&metadata, &v).unwrap();
+        assert_eq!(promoted_engine_build(engine.path()), None);
         v["IsLicenseeVersion"] = 0.into();
         v["IsPromotedBuild"] = 0.into();
         assert!(!official_release_build(&v));
