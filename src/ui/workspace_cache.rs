@@ -18,6 +18,12 @@ enum Event {
         ready: HashMap<String, bool>,
         builds: HashMap<String, String>,
     },
+    Projects {
+        revision: u64,
+        paths: Paths,
+        existing: HashMap<String, bool>,
+        associations: HashMap<String, String>,
+    },
     Complete(Snapshot),
 }
 
@@ -30,9 +36,24 @@ struct Snapshot {
     revision: u64,
     paths: Paths,
     engines: HashMap<String, bool>,
-    projects: HashMap<String, bool>,
     counts: HashMap<String, usize>,
     last_opened: HashMap<String, u64>,
+}
+
+fn refresh_project_associations(
+    projects: &mut [Project],
+    associations: &HashMap<String, String>,
+) -> bool {
+    let mut changed = false;
+    for project in projects {
+        if let Some(association) = associations.get(&project.path)
+            && project.engine != *association
+        {
+            project.engine.clone_from(association);
+            changed = true;
+        }
+    }
+    changed
 }
 impl WorkspaceCache {
     pub fn invalidate(&mut self) {
@@ -71,6 +92,22 @@ impl Workspace {
                         self.workspace_cache.engine_builds = builds;
                     }
                 }
+                Ok(Event::Projects {
+                    revision,
+                    paths: scanned,
+                    existing,
+                    associations,
+                }) => {
+                    if self
+                        .workspace_cache
+                        .accepts_revision(revision, &scanned, &paths)
+                    {
+                        self.workspace_cache.projects = existing;
+                        if refresh_project_associations(&mut self.projects, &associations) {
+                            self.persist();
+                        }
+                    }
+                }
                 Ok(Event::Complete(snapshot)) => {
                     self.workspace_cache.pending = None;
                     // An install, removal or rescan may have finished while this worker ran.
@@ -83,7 +120,6 @@ impl Workspace {
                             self.persist();
                         }
                         self.workspace_cache.engines = snapshot.engines;
-                        self.workspace_cache.projects = snapshot.projects;
                         self.plugin_counts = snapshot.counts;
                         self.workspace_cache.applied = Some((snapshot.revision, snapshot.paths));
                         self.workspace_cache.next_refresh =
@@ -147,11 +183,25 @@ fn scan_workspace(
         ready: ready.clone(),
         builds: engine_builds,
     });
+    let mut project_associations = HashMap::new();
     let projects = paths
         .projects
         .iter()
-        .map(|p| (p.clone(), Path::new(p).is_file()))
+        .map(|p| {
+            let path = Path::new(p);
+            let exists = path.is_file();
+            if exists && let Ok(association) = platform::project_engine_association(path) {
+                project_associations.insert(p.clone(), association);
+            }
+            (p.clone(), exists)
+        })
         .collect();
+    emit(Event::Projects {
+        revision,
+        paths: paths.clone(),
+        existing: projects,
+        associations: project_associations,
+    });
     let counts = engines
         .iter()
         .map(|e| {
@@ -166,7 +216,6 @@ fn scan_workspace(
         revision,
         paths,
         engines: ready,
-        projects,
         counts,
     }));
 }
@@ -207,6 +256,7 @@ mod tests {
                     assert_eq!(ready.get(&engine.path), Some(&true));
                     readiness_published = true;
                 }
+                Event::Projects { .. } => {}
                 Event::Complete(snapshot) => {
                     assert!(
                         readiness_published,
@@ -253,7 +303,6 @@ mod tests {
             revision: 0,
             paths: paths("project"),
             engines: HashMap::new(),
-            projects: HashMap::new(),
             counts: HashMap::new(),
             last_opened: HashMap::new(),
         };
@@ -263,5 +312,47 @@ mod tests {
         assert!(!cache.accepts(&snapshot, &paths("project")));
         assert!(!cache.accepts_revision(0, &paths("project"), &paths("project")));
         assert!(!cache.accepts_revision(1, &paths("old"), &paths("new")));
+    }
+
+    #[test]
+    fn workspace_refresh_reads_changed_project_association() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("Example.uproject");
+        std::fs::write(&path, br#"{"FileVersion":3,"EngineAssociation":"5.3"}"#).unwrap();
+        let mut project = platform::import_project(&path).unwrap();
+        project.pinned = true;
+        project.last_opened = 123;
+        let paths = paths(&project.path);
+
+        for (contents, expected, changed) in [
+            (
+                r#"{"FileVersion":3,"EngineAssociation":"5.7"}"#,
+                "5.7",
+                true,
+            ),
+            ("{", "5.7", false),
+            (
+                r#"{"FileVersion":3,"EngineAssociation":"{CUSTOM}"}"#,
+                "{CUSTOM}",
+                true,
+            ),
+            (r#"{"FileVersion":3}"#, "", true),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            scan_workspace(0, paths.clone(), vec![], |event| {
+                if let Event::Projects { associations, .. } = event {
+                    assert_eq!(
+                        refresh_project_associations(
+                            std::slice::from_mut(&mut project),
+                            &associations,
+                        ),
+                        changed
+                    );
+                    assert_eq!(project.engine, expected);
+                    assert!(project.pinned);
+                    assert_eq!(project.last_opened, 123);
+                }
+            });
+        }
     }
 }

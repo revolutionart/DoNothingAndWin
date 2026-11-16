@@ -222,6 +222,7 @@ impl Workspace {
         if self.scan.receiver.is_some() {
             return;
         }
+        self.workspace_cache.invalidate();
         if discovery::prune_missing_projects(&mut self.projects) > 0 {
             self.persist();
         }

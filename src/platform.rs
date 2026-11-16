@@ -234,7 +234,7 @@ pub fn project_thumbnail(project: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-pub fn import_project(path: &Path) -> Result<Project, String> {
+fn read_project_descriptor(path: &Path) -> Result<Value, String> {
     if !path
         .extension()
         .and_then(|s| s.to_str())
@@ -249,6 +249,22 @@ pub fn import_project(path: &Path) -> Result<Project, String> {
     if v["FileVersion"].as_u64().is_none() {
         return Err("This file does not contain an Unreal project descriptor.".into());
     }
+    Ok(v)
+}
+
+fn engine_association(descriptor: &Value) -> String {
+    descriptor["EngineAssociation"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned()
+}
+
+pub fn project_engine_association(path: &Path) -> Result<String, String> {
+    read_project_descriptor(path).map(|descriptor| engine_association(&descriptor))
+}
+
+pub fn import_project(path: &Path) -> Result<Project, String> {
+    let v = read_project_descriptor(path)?;
     let art = project_thumbnail(path);
     Ok(Project {
         name: path
@@ -264,7 +280,7 @@ pub fn import_project(path: &Path) -> Result<Project, String> {
             .as_str()
             .unwrap_or("Unreal Engine project")
             .into(),
-        engine: v["EngineAssociation"].as_str().unwrap_or("").into(),
+        engine: engine_association(&v),
         pinned: false,
         last_opened: 0,
         artwork: art,

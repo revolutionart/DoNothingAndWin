@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.9 - 2026-11-16
+
+- Refresh engine version labels for known projects when their `.uproject` files change, even with startup project scanning turned off.
+- Read the current engine association before opening a project so the launcher selects the correct Unreal Editor.
+
 ## 1.3.8 - 2026-11-13
 
 - Refresh the engine builds Epic returns when some catalog branches lack build details. Show the missing coverage and preserve hotfix history across partial checks.

@@ -901,6 +901,19 @@ impl Workspace {
             self.notify("Design preview. Import a real .uproject to launch it.");
             return;
         }
+        let path = Path::new(&self.projects[index].path);
+        let association = match platform::project_engine_association(path) {
+            Ok(association) => association,
+            Err(error) => {
+                self.notify(format!("Could not read the project file. {error}"));
+                return;
+            }
+        };
+        if self.projects[index].engine != association {
+            self.projects[index].engine = association;
+            self.workspace_cache.invalidate();
+            self.persist();
+        }
         let p = &self.projects[index];
         let engine = project_engine(p, &self.engines).map(|i| &self.engines[i]);
         match engine {
