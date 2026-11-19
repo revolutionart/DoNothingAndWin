@@ -1075,7 +1075,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let entry = fixture(dir.path());
         let payload = vec![42u8; 4 * 1024 * 1024];
-        fs::write(entry.join("Content/example.uasset"), &payload).unwrap();
+        let path = entry.join("Content/example.uasset");
+        fs::write(&path, &payload).unwrap();
+        let sha = buildpatch::digest(&payload);
         crate::storage::write_json(
             &entry.join(INDEX),
             &FileIndex {
@@ -1084,36 +1086,35 @@ mod tests {
                 build: "test".into(),
                 files: vec![SavedFile {
                     name: "Content/example.uasset".into(),
-                    sha: buildpatch::digest(&payload),
+                    sha,
                     size: payload.len() as u64,
                 }],
             },
         )
         .unwrap();
+
+        // Observe the real read callback synchronously. A cached file can finish
+        // before a second thread ever gets scheduled to poll its progress.
         let gate = Gate::default();
-        let worker_gate = gate.clone();
-        let roots = vec![dir.path().to_string_lossy().into_owned()];
-        let worker =
-            std::thread::spawn(move || verify_roots(&roots, &Selection::All, &worker_gate, |_| {}));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        gate.begin_file(&path, payload.len() as u64);
         let mut streamed = false;
-        while Instant::now() < deadline && !worker.is_finished() {
-            let p = gate.progress();
-            if p.files_total == 1
-                && p.files_completed == 0
-                && p.file_bytes > 0
-                && p.file_bytes < p.file_total
-            {
-                streamed = true;
-                assert!(p.file.ends_with("Content/example.uasset"));
-                assert_eq!(p.entries_total, 1);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert_eq!(worker.join().unwrap().unwrap()[0].health, Health::Healthy);
+        let actual = installer::hash_file_progress(&path, &mut |bytes| {
+            gate.read(bytes)?;
+            let progress = gate.progress();
+            streamed |= progress.file_bytes > 0 && progress.file_bytes < progress.file_total;
+            assert_eq!(progress.file, path);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(actual, sha);
         assert!(streamed, "No progress was exposed during a large file read");
+
+        let gate = Gate::default();
+        let roots = vec![dir.path().to_string_lossy().into_owned()];
+        let records = verify_roots(&roots, &Selection::All, &gate, |_| {}).unwrap();
+        assert_eq!(records[0].health, Health::Healthy);
         let p = gate.progress();
+        assert_eq!(p.entries_total, 1);
         assert_eq!(p.entries_completed, 1);
         assert_eq!(p.files_completed, 1);
         assert_eq!(

@@ -17,6 +17,11 @@ fn cache_root(build: &str) -> PathBuf {
         .join("epic-registration")
         .join(key(build))
 }
+pub(crate) fn is_cached_preview(build: &str) -> bool {
+    storage::read_json::<Release>(&cache_root(build).join("release.json"))
+        .is_some_and(|release| release.preview && release.build.as_deref() == Some(build))
+}
+
 pub fn cache(release: &Release, manifest: &Manifest, bytes: &[u8]) -> Result<(), String> {
     let root = cache_root(&manifest.build);
     storage::write_atomic(&root.join("original.manifest"), bytes)?;

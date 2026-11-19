@@ -16,7 +16,6 @@ pub mod acquisition;
 pub mod plugin_download;
 pub mod plugin_install;
 pub mod project_kind;
-mod template_chunks;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1317,81 +1316,71 @@ fn write_template_files(
     control: &installer::Control,
     progress: impl Fn(String),
 ) -> Result<Option<PathBuf>, String> {
-    use std::sync::atomic::Ordering;
+    use crate::package_chunks::{self, ChunkSource};
     let bytes = files.iter().map(|(file, _)| file.size()).sum();
     let download_bytes = crate::plugins::package_files::compressed_size(
         manifest,
         files.iter().map(|(file, _)| *file),
     );
-    let mut seen = HashSet::new();
-    let chunks = files
-        .iter()
-        .flat_map(|(file, _)| &file.parts)
-        .filter(|part| seen.insert(part.guid.as_str()))
-        .map(|part| {
-            manifest
-                .chunks
-                .get(&part.guid)
-                .ok_or("Missing project template chunk".to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    template_chunks::with_project_chunks(manifest, bases, chunks, control, |prefetch, network| {
-        let mut cache = HashMap::new();
-        let mut prepared = 0u64;
-        let mut project = None;
-        for (i, (file, relative)) in files.iter().enumerate() {
-            control.check()?;
-            progress(transfer_status(
-                i + 1,
-                files.len(),
-                prepared,
-                bytes,
-                network.load(Ordering::Relaxed),
-                download_bytes,
-            ));
-            let path = destination.join(relative);
-            installer::no_links(&path)?;
-            fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let mut last_report = std::time::Instant::now();
-            crate::plugins::payload_to_file_with_prefetch(
-                manifest,
-                bases,
-                file,
-                &mut cache,
-                &path,
-                control,
-                &mut |written, _| {
-                    if last_report.elapsed().as_millis() >= 150 || written == file.size() {
-                        progress(transfer_status(
-                            i + 1,
-                            files.len(),
-                            prepared + written,
-                            bytes,
-                            network.load(Ordering::Relaxed),
-                            download_bytes,
-                        ));
-                        last_report = std::time::Instant::now();
-                    }
-                },
-                |guid| {
-                    let chunk = manifest
-                        .chunks
-                        .get(guid)
-                        .ok_or("Missing project template chunk")?;
-                    prefetch.take(chunk).map(Some)
-                },
-            )?;
-            prepared += file.size();
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
-            {
-                project = Some(path);
+    let chunks = package_chunks::ordered_chunks(manifest, files.iter().map(|(file, _)| *file))?;
+    let source = ChunkSource::new(manifest, bases, control)?;
+    package_chunks::with_prefetch(
+        chunks,
+        4,
+        control,
+        |chunk| source.load(chunk),
+        |prefetch| {
+            let mut cache = HashMap::new();
+            let mut prepared = 0u64;
+            let mut project = None;
+            for (i, (file, relative)) in files.iter().enumerate() {
+                control.check()?;
+                progress(transfer_status(
+                    i + 1,
+                    files.len(),
+                    prepared,
+                    bytes,
+                    source.io().downloaded,
+                    download_bytes,
+                ));
+                let path = destination.join(relative);
+                installer::no_links(&path)?;
+                fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+                let mut last_report = std::time::Instant::now();
+                crate::plugins::payload_to_file_with_prefetch(
+                    manifest,
+                    bases,
+                    file,
+                    &mut cache,
+                    &path,
+                    control,
+                    &mut |written, _| {
+                        if last_report.elapsed().as_millis() >= 150 || written == file.size() {
+                            progress(transfer_status(
+                                i + 1,
+                                files.len(),
+                                prepared + written,
+                                bytes,
+                                source.io().downloaded,
+                                download_bytes,
+                            ));
+                            last_report = std::time::Instant::now();
+                        }
+                    },
+                    |chunk| prefetch.take(chunk).map(Some),
+                )?;
+                prepared += file.size();
+                if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
+                {
+                    project = Some(path);
+                }
             }
-        }
-        control.check()?;
-        Ok(project)
-    })
+            control.check()?;
+            Ok(project)
+        },
+    )
 }
 
 #[cfg(test)]

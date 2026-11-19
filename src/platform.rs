@@ -174,20 +174,27 @@ fn consolidate_engines(mut engines: Vec<Installation>, preferred: &str) -> Vec<I
     });
     let mut paths = std::collections::HashSet::new();
     let mut branches = std::collections::HashSet::new();
+    let mut previews = std::collections::HashSet::new();
     engines.retain(|e| {
         if !paths.insert(path_key(&e.path)) {
             return false;
         }
         // GUID/custom associations identify distinct source builds and must be retained.
+        let root = Path::new(&e.path);
         let managed: Option<Value> =
-            crate::storage::read_json(&Path::new(&e.path).join(".engine-workspace-install.json"));
-        let managed_binary = managed
-            .as_ref()
-            .and_then(|v| v["build"].as_str())
-            .and_then(EngineVersion::parse)
-            == EngineVersion::parse(&e.version)
-            && managed.is_some();
+            crate::storage::read_json(&root.join(".engine-workspace-install.json"));
+        let managed_build = managed.as_ref().and_then(|v| v["build"].as_str());
+        let managed_binary = managed_build.is_some()
+            && managed_build.and_then(EngineVersion::parse) == EngineVersion::parse(&e.version);
         if EngineVersion::parse(&e.association).is_some() || managed_binary {
+            if let Some(build) = crate::maintenance::promoted_engine_build(root)
+                .or_else(|| managed_build.map(str::to_owned))
+                && (crate::model::numbered_preview_label(&build).is_some()
+                    || crate::epic_registration::is_cached_preview(&build))
+            {
+                // Side-by-side preview revisions are distinct builds, even at the same version.
+                return previews.insert(build);
+            }
             // Once a hotfix is installed, an older managed copy must not return
             // as another card. Custom/source builds remain distinct below.
             branches.insert(
@@ -803,6 +810,31 @@ mod display_tests {
 #[cfg(test)]
 mod managed_display_test {
     use super::*;
+    #[test]
+    fn distinct_previews_and_stable_engine_share_a_branch_without_hiding_cards() {
+        let d = tempfile::tempdir().unwrap();
+        let engines = [
+            ("UE_5.9-Preview-1", 60351404),
+            ("UE_5.9-Preview-2", 60738873),
+            ("UE_5.9", 61999999),
+            ("AnotherStable", 61999999),
+        ].map(|(name, changelist)| {
+            let root = d.path().join(name);
+            fs::create_dir_all(root.join("Engine/Build")).unwrap();
+            fs::create_dir_all(root.join("Engine/Binaries/Win64")).unwrap();
+            fs::write(root.join("Engine/Binaries/Win64/UnrealEditor.exe"), b"test").unwrap();
+            crate::storage::write_json(&root.join("Engine/Build/Build.version"), &serde_json::json!({
+                "MajorVersion": 5, "MinorVersion": 9, "PatchVersion": 0, "Changelist": changelist,
+                "IsLicenseeVersion": 0, "IsPromotedBuild": 1, "BranchName": "++UE5+Release-5.9",
+            })).unwrap();
+            inspect_engine(&root, "5.9").unwrap()
+        });
+        let display = consolidate_engines(engines.to_vec(), "");
+        assert_eq!(display.len(), 3);
+        for engine in &engines[..3] {
+            assert!(display.iter().any(|shown| shown.path == engine.path));
+        }
+    }
     #[test]
     fn updated_branch_replaces_old_managed_card_even_when_old_copy_was_default() {
         let d = tempfile::tempdir().unwrap();

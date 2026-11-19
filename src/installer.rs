@@ -63,13 +63,25 @@ pub struct Progress {
 #[derive(Clone, Default)]
 pub struct Control {
     pub cancel: Arc<AtomicBool>,
+    parent_cancel: Option<Arc<AtomicBool>>,
 }
 impl Control {
+    pub(crate) fn child(&self) -> Self {
+        Self {
+            parent_cancel: Some(self.cancel.clone()),
+            ..Default::default()
+        }
+    }
     pub fn stop(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
     pub(crate) fn check(&self) -> Result<(), String> {
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.cancel.load(Ordering::Relaxed)
+            || self
+                .parent_cancel
+                .as_ref()
+                .is_some_and(|parent| parent.load(Ordering::Relaxed))
+        {
             Err(
                 "Stopped. Verified files and chunks are retained; restart the operation with the same destination."
                     .into(),
@@ -189,8 +201,8 @@ pub fn prepare(session: &Session, release: &Release, parent: &Path) -> Result<Pl
     let mut tags: Vec<_> = manifest.files.iter().flat_map(|f| f.tags.clone()).collect();
     tags.sort();
     tags.dedup();
-    let default = parent.join(&manifest.app);
-    let target = if default.exists() {
+    let default = parent.join(release.install_directory_name());
+    let target = if !release.preview && default.exists() {
         parent.join(format!(
             "{}-{}-Workspace",
             manifest.app,

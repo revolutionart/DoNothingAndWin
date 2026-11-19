@@ -695,7 +695,7 @@ mod tests {
         assert_eq!(snapshot.releases[0].version_label(), "5.9 Preview");
         let snapshot = combine(&[item.clone()], Some(&feed)).unwrap();
         assert!(snapshot.verified());
-        assert_eq!(snapshot.releases[0].version_label(), "5.9.0 Preview");
+        assert_eq!(snapshot.releases[0].version_label(), "5.9.0 Preview 1");
         let mut stable = item;
         stable["categories"] = serde_json::json!([{"path":"engines"}]);
         let snapshot = combine(&[stable], Some(&feed)).unwrap();

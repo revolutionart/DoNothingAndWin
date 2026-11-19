@@ -3,7 +3,8 @@ use crate::{
     storage,
 };
 use std::{
-    path::PathBuf,
+    io::Write,
+    path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -60,47 +61,57 @@ pub fn with_cache_root<T>(root: Option<PathBuf>, work: impl FnOnce() -> T) -> T 
     work()
 }
 
-pub(crate) fn active_cache_root() -> PathBuf {
-    CACHE_ROOT
-        .with(|slot| slot.borrow().clone())
-        .unwrap_or_else(|| PathBuf::from(storage::load_preferences().fab_cache))
+fn selected_cache_root() -> Option<PathBuf> {
+    CACHE_ROOT.with(|slot| slot.borrow().clone())
 }
+
+fn cache_directory(root: impl AsRef<Path>) -> PathBuf {
+    root.as_ref().join("EngineWorkspace/Chunks")
+}
+
+pub(crate) struct ChunkCache {
+    directories: Vec<PathBuf>,
+}
+impl ChunkCache {
+    pub(crate) fn new() -> Self {
+        let prefs = storage::load_preferences();
+        let primary = selected_cache_root().unwrap_or_else(|| PathBuf::from(&prefs.fab_cache));
+        let mut directories = vec![cache_directory(primary)];
+        for dir in prefs.vault_cache_roots().into_iter().map(cache_directory) {
+            if !directories.contains(&dir) {
+                directories.push(dir);
+            }
+        }
+        Self { directories }
+    }
+
+    pub(crate) fn read(&self, chunk: &Chunk, read: &mut impl FnMut(u64)) -> Option<Vec<u8>> {
+        // Legacy chunks with only a rolling hash have no SHA-1 cache key.
+        if chunk.rolling_only {
+            return None;
+        }
+        let key = buildpatch::hex(&chunk.sha);
+        self.directories
+            .iter()
+            .find_map(|dir| read_cached_chunk_progress(&dir.join(&key), chunk, read))
+    }
+
+    // The decoder already verified these bytes. Keep the content-addressed cache
+    // atomic without a synchronous disk flush for every rebuildable chunk.
+    pub(crate) fn store_verified(&self, chunk: &Chunk, bytes: &[u8]) -> bool {
+        !chunk.rolling_only && store_chunk(&self.directories[0], chunk, bytes)
+    }
+}
+
+#[cfg(test)]
 fn cache_path(chunk: &Chunk) -> PathBuf {
-    active_cache_root()
-        .join("EngineWorkspace/Chunks")
-        .join(buildpatch::hex(&chunk.sha))
+    ChunkCache::new().directories[0].join(buildpatch::hex(&chunk.sha))
 }
 pub fn cached_chunk(chunk: &Chunk) -> Option<Vec<u8>> {
     cached_chunk_progress(chunk, &mut |_| {})
 }
 pub(crate) fn cached_chunk_progress(chunk: &Chunk, read: &mut impl FnMut(u64)) -> Option<Vec<u8>> {
-    let prefs = storage::load_preferences();
-    let root = CACHE_ROOT
-        .with(|slot| slot.borrow().clone())
-        .unwrap_or_else(|| PathBuf::from(&prefs.fab_cache));
-    let primary = root
-        .join("EngineWorkspace/Chunks")
-        .join(buildpatch::hex(&chunk.sha));
-    read_chunk_paths(
-        chunk,
-        std::iter::once(primary).chain(prefs.vault_cache_roots().into_iter().map(|root| {
-            PathBuf::from(root)
-                .join("EngineWorkspace/Chunks")
-                .join(buildpatch::hex(&chunk.sha))
-        })),
-        read,
-    )
-}
-fn read_chunk_paths(
-    chunk: &Chunk,
-    paths: impl IntoIterator<Item = PathBuf>,
-    read: &mut impl FnMut(u64),
-) -> Option<Vec<u8>> {
-    let mut seen = std::collections::HashSet::new();
-    paths
-        .into_iter()
-        .filter(|path| seen.insert(path.clone()))
-        .find_map(|path| read_cached_chunk_progress(&path, chunk, read))
+    ChunkCache::new().read(chunk, read)
 }
 #[cfg(test)]
 fn read_cached_chunk(path: &std::path::Path, chunk: &Chunk) -> Option<Vec<u8>> {
@@ -128,25 +139,40 @@ pub fn cache_chunk(chunk: &Chunk, bytes: &[u8]) {
     cache_chunk_progress(chunk, bytes, &mut |_| {});
 }
 pub(crate) fn cache_chunk_progress(chunk: &Chunk, bytes: &[u8], written: &mut impl FnMut(u64)) {
-    let path = cache_path(chunk);
-    if bytes.len() != chunk.window as usize
-        || buildpatch::digest(bytes) != chunk.sha
-        || crate::installer::no_links(&path).is_err()
-    {
+    if bytes.len() != chunk.window as usize || buildpatch::digest(bytes) != chunk.sha {
         return;
     }
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    let _change = crate::vault_health::changing(path.parent().unwrap_or(&path));
-    // Cache entries with identical hashes share the same atomic temporary path.
-    static CACHE_WRITE: Mutex<()> = Mutex::new(());
-    let _write = CACHE_WRITE.lock().unwrap();
-    if storage::write_atomic(&path, bytes).is_ok() {
+    let root = selected_cache_root()
+        .unwrap_or_else(|| PathBuf::from(storage::load_preferences().fab_cache));
+    if store_chunk(&cache_directory(root), chunk, bytes) {
         written(bytes.len() as u64);
     }
+}
+
+fn store_chunk(directory: &Path, chunk: &Chunk, bytes: &[u8]) -> bool {
+    use std::fs;
+    let path = directory.join(buildpatch::hex(&chunk.sha));
+    if crate::installer::no_links(&path).is_err() || fs::create_dir_all(directory).is_err() {
+        return false;
+    }
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+    let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let temp = path.with_extension(format!("{}-{id}.tmp", std::process::id()));
+    let Ok(mut output) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+    else {
+        return false;
+    };
+    let _change = crate::vault_health::changing(directory);
+    let result = output.write_all(bytes);
+    drop(output);
+    if result.and_then(|()| fs::rename(&temp, &path)).is_ok() {
+        return true;
+    }
+    let _ = fs::remove_file(&temp);
+    false
 }
 pub fn check_install_allowed() -> Result<(), String> {
     if storage::load_preferences().downloads.allow_editors {
@@ -277,17 +303,23 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let a = root.path().join("first");
         let b = root.path().join("second");
-        fs::write(&a, b"bad!").unwrap();
-        fs::write(&b, b"good").unwrap();
         let chunk = Chunk {
             sha: buildpatch::digest(b"good"),
             window: 4,
             ..Default::default()
         };
+        let key = buildpatch::hex(&chunk.sha);
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join(&key), b"bad!").unwrap();
+        fs::write(b.join(&key), b"good").unwrap();
+        let cache = ChunkCache {
+            directories: vec![a, b],
+        };
         let mut read = 0;
-        let bytes = read_chunk_paths(&chunk, vec![a.clone(), a, b], &mut |n| read += n).unwrap();
+        let bytes = cache.read(&chunk, &mut |n| read += n).unwrap();
         assert_eq!(bytes, b"good");
-        assert_eq!(read, 8, "Repeated roots must not read corrupt data twice");
+        assert_eq!(read, 8);
     }
     #[test]
     fn startup_defaults_to_tray_but_can_show_the_window() {

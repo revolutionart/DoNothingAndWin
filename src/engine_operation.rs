@@ -45,7 +45,6 @@ pub struct Operation {
     phase: Phase,
     kind: Kind,
     receiver: Option<Receiver<Event>>,
-    parent: PathBuf,
     plan: Option<Plan>,
     installed: Option<PathBuf>,
     engine: Option<Installation>,
@@ -102,12 +101,11 @@ impl Operation {
         *self = Self::default();
         true
     }
-    pub fn prepare(&mut self, parent: PathBuf) -> Option<Worker> {
+    pub fn prepare(&mut self) -> Option<Worker> {
         if self.busy() {
             return None;
         }
         *self = Self {
-            parent,
             phase: Phase::Preparing,
             ..Self::default()
         };
@@ -161,9 +159,7 @@ impl Operation {
         self.receiver = None;
         match &event {
             Event::Prepared(Ok(plan)) => {
-                let mut plan = plan.clone();
-                plan.target = self.parent.join(&plan.manifest.app);
-                self.plan = Some(plan);
+                self.plan = Some(plan.clone());
                 self.phase = Phase::Ready;
             }
             Event::Finished(Ok(path)) => {
@@ -190,7 +186,7 @@ impl Operation {
 mod tests {
     use super::*;
     fn prepared(op: &mut Operation) {
-        let worker = op.prepare("destination".into()).unwrap();
+        let worker = op.prepare().unwrap();
         worker
             .events
             .send(Event::Prepared(Ok(Plan {
@@ -199,7 +195,7 @@ mod tests {
                     ..Default::default()
                 },
                 bases: vec![],
-                target: "ignored".into(),
+                target: PathBuf::from("destination").join("UE_5.4"),
                 tags: vec![],
                 selected: vec![],
             })))
@@ -246,7 +242,7 @@ mod tests {
     #[test]
     fn disconnected_workers_do_not_stay_busy_and_preparation_can_retry() {
         let mut op = Operation::default();
-        drop(op.prepare("destination".into()).unwrap());
+        drop(op.prepare().unwrap());
         assert!(matches!(op.poll(), Some(Event::Prepared(Err(_)))));
         assert!(!op.busy());
         assert!(!op.can_resume());

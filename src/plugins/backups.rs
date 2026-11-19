@@ -38,6 +38,9 @@ pub(super) struct Prepared {
     pub directory: PathBuf,
 }
 impl Prepared {
+    pub(super) fn discard(&self, engine: &Path) {
+        let _ = delete_scoped_tree(&self.directory, &engine.join(DIRECTORY));
+    }
     pub fn content(&self) -> PathBuf {
         self.directory.join("files")
     }
@@ -135,6 +138,7 @@ pub(super) fn prepare(
     plugin: &Plugin,
     root: &Path,
     days: u64,
+    control: &Control,
     report: &mut impl FnMut(UpdateProgress),
 ) -> Result<Prepared, String> {
     let eng = engine_root(engine)?;
@@ -145,23 +149,26 @@ pub(super) fn prepare(
         ..Default::default()
     };
     report(state.clone());
+    control.check()?;
     let files = inventory(&root)?;
     state.total = files.iter().map(|(_, size)| size).sum();
     state.files_total = files.len();
     let mut saved = Vec::with_capacity(files.len());
     for (name, size) in files {
+        control.check()?;
         state.file = name.clone();
         let sha =
             installer::hash_file_progress(&root.join(installer::relative(&name)?), &mut |bytes| {
                 state.prepared += bytes;
                 state.read += bytes;
                 report(state.clone());
-                Ok(())
+                control.check()
             })?;
         state.files_done += 1;
         report(state.clone());
         saved.push(SavedFile { name, size, sha });
     }
+    control.check()?;
     let created = crate::epic::now();
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -342,7 +349,14 @@ pub fn restore(
         if let Some(receipt) = &record.package_receipt {
             crate::storage::write_json(&stage.join(".dnw-plugin-install.json"), receipt)?;
         }
-        let mut current = prepare(engine, &plugin, &root, days, &mut report)?;
+        let mut current = prepare(
+            engine,
+            &plugin,
+            &root,
+            days,
+            &Control::default(),
+            &mut report,
+        )?;
         crate::maintenance::ensure_closed(&eng)?;
         report(UpdateProgress {
             phase: "Restoring plugin backup",
@@ -417,7 +431,15 @@ mod tests {
     }
     fn update(engine: &Installation, root: &Path, version: &str, days: u64) -> String {
         let plugin = installed(Path::new(&engine.path)).remove(0);
-        let mut prepared = prepare(engine, &plugin, root, days, &mut |_| {}).unwrap();
+        let mut prepared = prepare(
+            engine,
+            &plugin,
+            root,
+            days,
+            &Control::default(),
+            &mut |_| {},
+        )
+        .unwrap();
         let stage = Path::new(&engine.path).join("test-stage");
         write_plugin(&stage, version, b"new binary");
         replace(root, &stage, &mut prepared).unwrap();
@@ -542,7 +564,8 @@ mod tests {
     fn failed_activation_puts_original_back_and_never_expires_recovery_files() {
         let (_temp, engine, root) = fixture();
         let plugin = installed(Path::new(&engine.path)).remove(0);
-        let mut backup = prepare(&engine, &plugin, &root, 7, &mut |_| {}).unwrap();
+        let mut backup =
+            prepare(&engine, &plugin, &root, 7, &Control::default(), &mut |_| {}).unwrap();
         assert!(replace(&root, &root.join("nonexistent-stage"), &mut backup).is_err());
         assert!(root.join("Test.uplugin").exists());
         assert!(!backup.content().exists());

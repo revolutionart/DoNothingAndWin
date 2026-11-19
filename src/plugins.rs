@@ -5,6 +5,7 @@ mod check_cache;
 pub(crate) mod package_files;
 mod parallel_checks;
 pub(crate) mod receipt;
+mod update_files;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex, OnceLock},
@@ -824,18 +825,21 @@ fn stream_payload_io(
         output,
         &Control::default(),
         progress,
-        |_| Ok(None),
+        |_, _| Ok(None),
     )
 }
-fn stream_payload_io_controlled(
-    m: &Manifest,
+fn stream_payload_io_controlled<'a>(
+    m: &'a Manifest,
     bases: &[reqwest::Url],
     file: &buildpatch::File,
     cache: &mut HashMap<String, Vec<u8>>,
     output: &mut impl std::io::Write,
     control: &Control,
     progress: &mut impl FnMut(PayloadIo),
-    mut prefetched: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+    mut prefetched: impl FnMut(
+        &'a buildpatch::Chunk,
+        &mut dyn FnMut(),
+    ) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<(), String> {
     control.check()?;
     let mut written = 0u64;
@@ -851,7 +855,7 @@ fn stream_payload_io_controlled(
             {
                 cache.clear();
             }
-            let bytes = if let Some(bytes) = prefetched(&p.guid)? {
+            let bytes = if let Some(bytes) = prefetched(chunk, &mut || progress(io))? {
                 bytes
             } else if let Some(bytes) =
                 crate::download_policy::cached_chunk_progress(chunk, &mut |n| {
@@ -923,9 +927,7 @@ pub(crate) fn payload_to_file_progress(
     path: &Path,
     progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
-    payload_to_file_io(m, bases, file, cache, path, &mut |p| {
-        progress(p.prepared, p.downloaded)
-    })
+    payload_to_file_controlled(m, bases, file, cache, path, &Control::default(), progress)
 }
 pub(crate) fn payload_to_file_controlled(
     m: &Manifest,
@@ -939,15 +941,37 @@ pub(crate) fn payload_to_file_controlled(
     payload_to_file_with_prefetch(m, bases, file, cache, path, control, progress, |_| Ok(None))
 }
 
-pub(crate) fn payload_to_file_with_prefetch(
-    m: &Manifest,
+pub(crate) fn payload_to_file_with_prefetch<'a>(
+    m: &'a Manifest,
     bases: &[reqwest::Url],
     file: &buildpatch::File,
     cache: &mut HashMap<String, Vec<u8>>,
     path: &Path,
     control: &Control,
     progress: &mut impl FnMut(u64, u64),
-    prefetched: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+    mut prefetched: impl FnMut(&'a buildpatch::Chunk) -> Result<Option<Vec<u8>>, String>,
+) -> Result<(), String> {
+    payload_to_file_io(
+        m,
+        bases,
+        file,
+        cache,
+        path,
+        control,
+        &mut |p| progress(p.prepared, p.downloaded),
+        |chunk, _| prefetched(chunk),
+    )
+}
+
+fn payload_to_file_io<'a>(
+    m: &'a Manifest,
+    bases: &[reqwest::Url],
+    file: &buildpatch::File,
+    cache: &mut HashMap<String, Vec<u8>>,
+    path: &Path,
+    control: &Control,
+    progress: &mut impl FnMut(PayloadIo),
+    prefetched: impl FnMut(&'a buildpatch::Chunk, &mut dyn FnMut()) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<(), String> {
     control.check()?;
     installer::no_links(path)?;
@@ -955,7 +979,7 @@ pub(crate) fn payload_to_file_with_prefetch(
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Creating {}: {e}", path.display()))?;
     let result = stream_payload_io_controlled(
         m,
         bases,
@@ -963,32 +987,10 @@ pub(crate) fn payload_to_file_with_prefetch(
         cache,
         &mut output,
         control,
-        &mut |p| progress(p.prepared, p.downloaded),
+        progress,
         prefetched,
     )
     .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
-    drop(output);
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
-}
-fn payload_to_file_io(
-    m: &Manifest,
-    bases: &[reqwest::Url],
-    file: &buildpatch::File,
-    cache: &mut HashMap<String, Vec<u8>>,
-    path: &Path,
-    progress: &mut impl FnMut(PayloadIo),
-) -> Result<(), String> {
-    installer::no_links(path)?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| format!("Creating {}: {e}", path.display()))?;
-    let result = stream_payload_io(m, bases, file, cache, &mut output, progress)
-        .and_then(|_| output.sync_all().map_err(|e| e.to_string()));
     drop(output);
     if result.is_err() {
         let _ = fs::remove_file(path);
@@ -1735,6 +1737,46 @@ impl UpdateProgress {
             .then(|| (self.prepared as f32 / self.total as f32).clamp(0., 1.))
     }
 }
+
+#[derive(Clone, Default)]
+pub struct UpdateControl {
+    transfer: Control,
+    replacing: Arc<Mutex<bool>>,
+}
+
+impl UpdateControl {
+    pub fn stop(&self) -> bool {
+        let replacing = self.replacing.lock().unwrap();
+        if *replacing || self.stopping() {
+            return false;
+        }
+        self.transfer.stop();
+        true
+    }
+
+    pub fn can_stop(&self) -> bool {
+        !*self.replacing.lock().unwrap() && !self.stopping()
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.transfer.check().is_err()
+    }
+
+    fn begin_replacement(&self) -> Result<Replacement<'_>, String> {
+        let mut replacing = self.replacing.lock().unwrap();
+        self.transfer.check()?;
+        *replacing = true;
+        Ok(Replacement(self))
+    }
+}
+
+struct Replacement<'a>(&'a UpdateControl);
+impl Drop for Replacement<'_> {
+    fn drop(&mut self) {
+        *self.0.replacing.lock().unwrap() = false;
+    }
+}
+
 pub fn update_plugin(
     engine: &Installation,
     plugin: &Plugin,
@@ -1746,12 +1788,38 @@ pub fn update_plugin_with_progress(
     engine: &Installation,
     plugin: &Plugin,
     update: &Update,
+    report: impl FnMut(UpdateProgress),
+) -> Result<String, String> {
+    update_plugin_controlled(engine, plugin, update, &UpdateControl::default(), report)
+}
+
+pub fn update_plugin_controlled(
+    engine: &Installation,
+    plugin: &Plugin,
+    update: &Update,
+    control: &UpdateControl,
+    report: impl FnMut(UpdateProgress),
+) -> Result<String, String> {
+    match update_plugin_inner(engine, plugin, update, control, report) {
+        Err(_) if control.stopping() => {
+            Err("Stopped. Downloaded chunks are kept for retry.".into())
+        }
+        result => result,
+    }
+}
+
+fn update_plugin_inner(
+    engine: &Installation,
+    plugin: &Plugin,
+    update: &Update,
+    control: &UpdateControl,
     mut report: impl FnMut(UpdateProgress),
 ) -> Result<String, String> {
     report(UpdateProgress {
         phase: "Checking installed plugin",
         ..Default::default()
     });
+    control.transfer.check()?;
     crate::download_policy::check_install_allowed()?;
     let root = plugin_root(engine, plugin)?;
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
@@ -1774,6 +1842,7 @@ pub fn update_plugin_with_progress(
     let mut names = std::collections::HashSet::new();
     let mut files = vec![];
     for f in &update.manifest.files {
+        control.transfer.check()?;
         let name = installer::relative(&f.name)?;
         if let Ok(relative) = name.strip_prefix(&update.prefix) {
             if relative.as_os_str().is_empty() {
@@ -1792,15 +1861,8 @@ pub fn update_plugin_with_progress(
         return Err("Empty plugin package".into());
     }
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
-    let mut chunk_ids = HashSet::new();
-    let package_bytes = files
-        .iter()
-        .flat_map(|(f, _)| &f.parts)
-        .filter(|p| chunk_ids.insert(&p.guid))
-        .try_fold(0u64, |sum, p| {
-            let size = update.manifest.chunks.get(&p.guid)?.size;
-            (size > 0).then_some(sum + size)
-        });
+    let package_bytes =
+        package_files::compressed_size(&update.manifest, files.iter().map(|(file, _)| *file));
     if fs2::available_space(&eng).map_err(|e| e.to_string())? < bytes + 64 * 1024 * 1024 {
         return Err("Not enough space for plugin update".into());
     }
@@ -1813,77 +1875,51 @@ pub fn update_plugin_with_progress(
         package_bytes,
         ..Default::default()
     };
-    prepare_update_files(
+    let prepared = update_files::prepare(
         &update.manifest,
         &update.bases,
         &files,
-        &stage,
-        &mut HashMap::new(),
-        &mut state,
-        &mut report,
-    )?;
-    state.phase = "Recording verified package";
-    state.file.clear();
-    report(state.clone());
-    receipt::write(&stage, &update.manifest, &update.prefix)?;
-    let _change = crate::vault_health::changing(&root);
-    activate_with_progress(
-        engine,
-        plugin,
         &root,
         &stage,
-        update.number,
-        &update.version,
-        &mut |backup| {
-            state.phase = backup.phase;
-            state.file = backup.file;
-            state.prepared = backup.prepared;
-            state.total = backup.total;
-            state.files_done = backup.files_done;
-            state.files_total = backup.files_total;
-            report(state.clone());
-        },
+        &control.transfer,
+        &mut state,
+        &mut report,
     )
-}
-fn prepare_update_files(
-    manifest: &Manifest,
-    bases: &[reqwest::Url],
-    files: &[(&buildpatch::File, PathBuf)],
-    stage: &Path,
-    cache: &mut HashMap<String, Vec<u8>>,
-    state: &mut UpdateProgress,
-    report: &mut impl FnMut(UpdateProgress),
-) -> Result<(), String> {
-    let mut last = std::time::Instant::now();
-    report(state.clone());
-    for (i, (file, relative)) in files.iter().enumerate() {
-        let dest = stage.join(relative);
-        installer::no_links(&dest)?;
-        fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-        state.file = relative.to_string_lossy().into_owned();
-        let prepared = state.prepared;
-        let downloaded = state.downloaded;
-        let read = state.read;
-        let written = state.written;
-        payload_to_file_io(manifest, bases, file, cache, &dest, &mut |io| {
-            state.prepared = prepared + io.prepared;
-            state.downloaded = downloaded + io.downloaded;
-            state.read = read + io.read;
-            state.written = written + io.written;
-            if last.elapsed().as_millis() >= 150 {
+    .and_then(|()| {
+        state.phase = "Recording verified package";
+        state.file.clear();
+        report(state.clone());
+        control.transfer.check()?;
+        receipt::write(&stage, &update.manifest, &update.prefix)
+    })
+    .and_then(|()| {
+        let _change = crate::vault_health::changing(&root);
+        activate_with_progress(
+            engine,
+            plugin,
+            &root,
+            &stage,
+            update.number,
+            &update.version,
+            control,
+            &mut |backup| {
+                state.phase = backup.phase;
+                state.file = backup.file;
+                state.prepared = backup.prepared;
+                state.total = backup.total;
+                state.files_done = backup.files_done;
+                state.files_total = backup.files_total;
                 report(state.clone());
-                last = std::time::Instant::now();
-            }
-        })?;
-        state.files_done = i + 1;
-        if last.elapsed().as_millis() >= 150 || i + 1 == files.len() {
-            report(state.clone());
-            last = std::time::Instant::now();
-        }
+            },
+        )
+    });
+    if prepared.is_err() && stage.exists() {
+        let base = eng.join(".engine-workspace-plugin-backups");
+        let _ = delete_scoped_tree(&stage, &base);
+        let _ = fs::remove_dir(base);
     }
-    Ok(())
+    prepared
 }
-
 #[cfg(test)]
 fn activate(
     engine: &Installation,
@@ -1893,7 +1929,16 @@ fn activate(
     number: i64,
     version: &str,
 ) -> Result<String, String> {
-    activate_with_progress(engine, plugin, root, stage, number, version, &mut |_| {})
+    activate_with_progress(
+        engine,
+        plugin,
+        root,
+        stage,
+        number,
+        version,
+        &UpdateControl::default(),
+        &mut |_| {},
+    )
 }
 fn activate_with_progress(
     engine: &Installation,
@@ -1902,12 +1947,14 @@ fn activate_with_progress(
     stage: &Path,
     number: i64,
     version: &str,
+    control: &UpdateControl,
     report: &mut impl FnMut(UpdateProgress),
 ) -> Result<String, String> {
     report(UpdateProgress {
         phase: "Validating prepared plugin",
         ..Default::default()
     });
+    control.transfer.check()?;
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
     let desc = stage.join(plugin.descriptor.file_name().ok_or("Missing descriptor")?);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(desc).map_err(|e| e.to_string())?)
@@ -1921,8 +1968,16 @@ fn activate_with_progress(
     plugin_root(engine, plugin)?;
     crate::maintenance::ensure_closed(&eng)?;
     let days = crate::storage::load_preferences().plugin_backup_days;
-    let mut backup = backups::prepare(engine, plugin, root, days, report)?;
-    crate::maintenance::ensure_closed(&eng)?;
+    let mut backup = backups::prepare(engine, plugin, root, days, &control.transfer, report)?;
+    let replacement =
+        crate::maintenance::ensure_closed(&eng).and_then(|()| control.begin_replacement());
+    let _replacement = match replacement {
+        Ok(replacement) => replacement,
+        Err(error) => {
+            backup.discard(&eng);
+            return Err(error);
+        }
+    };
     report(UpdateProgress {
         phase: "Replacing installed plugin",
         ..Default::default()
@@ -2067,6 +2122,99 @@ mod operation_tests {
             "Previous plugin must remain backed up"
         );
     }
+    #[test]
+    fn stopped_update_preserves_plugin_and_can_retry() {
+        for phase in ["Preparing and verifying files", "Backing up current plugin"] {
+            let (_dir, engine, plugin) = fixture();
+            let cache = tempfile::tempdir().unwrap();
+            let manifest = package_files::cached_fixture(cache.path(), "5.7.0");
+            let update = Update {
+                version: "2.0".into(),
+                number: 2,
+                manifest,
+                bases: vec![],
+                prefix: PathBuf::from("Test"),
+            };
+            let bytes = fs::read(&plugin.descriptor).unwrap();
+            let control = UpdateControl::default();
+            crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+                let result = update_plugin_controlled(&engine, &plugin, &update, &control, |p| {
+                    if p.phase == phase && p.prepared > 0 && control.can_stop() {
+                        assert!(control.stop());
+                    }
+                });
+                assert!(result.unwrap_err().starts_with("Stopped."));
+                assert_eq!(fs::read(&plugin.descriptor).unwrap(), bytes);
+                assert!(backups::list(&engine).unwrap().is_empty());
+                assert!(
+                    !Path::new(&engine.path)
+                        .join(".engine-workspace-plugin-backups")
+                        .exists()
+                );
+                let retry = UpdateControl::default();
+                update_plugin_controlled(&engine, &plugin, &update, &retry, |p| {
+                    if p.phase == "Replacing installed plugin" {
+                        assert!(!retry.can_stop());
+                        assert!(!retry.stop());
+                    }
+                })
+                .unwrap();
+            });
+            assert_eq!(installed(Path::new(&engine.path))[0].number, 2);
+            assert_eq!(backups::list(&engine).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn update_reuses_verified_installed_bytes_without_cached_chunks() {
+        let (_dir, engine, plugin) = fixture();
+        let cache = tempfile::tempdir().unwrap();
+        let manifest = package_files::cached_fixture(cache.path(), "5.7.0");
+        let root = plugin.descriptor.parent().unwrap();
+        let unchanged = root.join("Binaries/Win64/Test.dll");
+        let changed = root.join("Source/Mac/Module.cpp");
+        fs::create_dir_all(unchanged.parent().unwrap()).unwrap();
+        fs::create_dir_all(changed.parent().unwrap()).unwrap();
+        fs::write(&unchanged, [1; 32]).unwrap();
+        fs::write(&changed, [9; 32]).unwrap();
+        let hash = buildpatch::hex(&buildpatch::digest(&[1; 32]));
+        fs::remove_file(cache.path().join("EngineWorkspace/Chunks").join(hash)).unwrap();
+        let update = Update {
+            version: "2.0".into(),
+            number: 2,
+            manifest,
+            bases: vec![],
+            prefix: PathBuf::from("Test"),
+        };
+        let mut state = UpdateProgress::default();
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            update_plugin_with_progress(&engine, &plugin, &update, |p| {
+                if p.phase == "Preparing and verifying files" {
+                    state = p;
+                }
+            })
+        })
+        .unwrap();
+        assert_eq!(state.prepared, state.total);
+        assert_eq!(state.downloaded, 0);
+        assert_eq!(fs::read(&unchanged).unwrap(), [1; 32]);
+        assert_eq!(fs::read(&changed).unwrap(), [4; 32]);
+        let saved = backups::list(&engine).unwrap().remove(0);
+        let backup = Path::new(&engine.path)
+            .join(".dnw-plugin-backups")
+            .join(saved.id)
+            .join("files");
+        fs::write(&unchanged, [7; 32]).unwrap();
+        assert_eq!(
+            fs::read(backup.join("Binaries/Win64/Test.dll")).unwrap(),
+            [1; 32]
+        );
+        assert_eq!(
+            fs::read(backup.join("Source/Mac/Module.cpp")).unwrap(),
+            [9; 32]
+        );
+    }
+
     #[test]
     fn reused_counter_activation_verifies_label_and_detects_changed_installs() {
         let (_d, e, p) = fixture();
@@ -2272,8 +2420,30 @@ mod streaming_tests {
             ..Default::default()
         };
         let mut m = Manifest::default();
-        m.chunks.insert(guid.clone(), buildpatch::Chunk::default());
+        m.chunks.insert(
+            guid.clone(),
+            buildpatch::Chunk {
+                guid: guid.clone(),
+                sha: buildpatch::digest(&data),
+                window: data.len() as u32,
+                ..Default::default()
+            },
+        );
         (m, file, HashMap::from([(guid, data)]))
+    }
+
+    fn disk_cache(manifest: &Manifest, chunks: &HashMap<String, Vec<u8>>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("EngineWorkspace/Chunks");
+        fs::create_dir_all(&cache).unwrap();
+        for (guid, bytes) in chunks {
+            fs::write(
+                cache.join(buildpatch::hex(&manifest.chunks[guid].sha)),
+                bytes,
+            )
+            .unwrap();
+        }
+        dir
     }
     #[test]
     fn stopping_large_file_interrupts_stream_and_removes_partial_output() {
@@ -2317,7 +2487,8 @@ mod streaming_tests {
     }
     #[test]
     fn update_progress_counts_cached_bytes_across_files_and_keeps_install_phase_separate() {
-        let (manifest, file, mut cache) = fixture(3);
+        let (manifest, file, chunks) = fixture(3);
+        let cache = disk_cache(&manifest, &chunks);
         let dir = tempfile::tempdir().unwrap();
         let files = vec![
             (&file, PathBuf::from("one.bin")),
@@ -2330,19 +2501,22 @@ mod streaming_tests {
             ..Default::default()
         };
         let mut events = vec![];
-        prepare_update_files(
-            &manifest,
-            &[],
-            &files,
-            dir.path(),
-            &mut cache,
-            &mut state,
-            &mut |p| events.push(p),
-        )
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            update_files::prepare(
+                &manifest,
+                &[],
+                &files,
+                &dir.path().join("installed"),
+                dir.path(),
+                &Control::default(),
+                &mut state,
+                &mut |p| events.push(p),
+            )
+        })
         .unwrap();
         assert_eq!(state.prepared, 6 * 1024 * 1024);
         assert_eq!(state.downloaded, 0);
-        assert_eq!(state.read, 0); // This fixture supplies chunks already in memory.
+        assert_eq!(state.read, 1024 * 1024); // One cached chunk shared by both files.
         assert_eq!(state.written, 6 * 1024 * 1024);
         assert_eq!(state.files_done, 2);
         assert_eq!(state.fraction(), Some(1.));
@@ -2358,7 +2532,8 @@ mod streaming_tests {
     }
     #[test]
     fn update_progress_does_not_count_corrupt_files_as_verified() {
-        let (manifest, mut file, mut cache) = fixture(1);
+        let (manifest, mut file, chunks) = fixture(1);
+        let cache = disk_cache(&manifest, &chunks);
         file.sha = [0; 20];
         let dir = tempfile::tempdir().unwrap();
         let files = vec![(&file, PathBuf::from("bad.bin"))];
@@ -2368,17 +2543,22 @@ mod streaming_tests {
             total: file.size(),
             ..Default::default()
         };
-        assert!(
-            prepare_update_files(
+        let result = crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            update_files::prepare(
                 &manifest,
                 &[],
                 &files,
+                &dir.path().join("installed"),
                 dir.path(),
-                &mut cache,
+                &Control::default(),
                 &mut state,
-                &mut |_| {}
+                &mut |_| {},
             )
-            .is_err()
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .contains("File failed hash verification")
         );
         assert_eq!(state.files_done, 0);
         assert!(!dir.path().join("bad.bin").exists());

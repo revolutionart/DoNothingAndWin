@@ -1,17 +1,13 @@
 use super::*;
 impl Workspace {
-    pub(super) fn engine_preview(&self) -> Option<(&Release, String)> {
+    pub(super) fn engine_preview(&self) -> Option<&Release> {
         self.snapshot
             .releases
             .iter()
-            .filter(|r| {
-                r.preview
-                    && r.platform == "Windows"
-                    && !super::transfers::release_is_installed(r, &self.engines)
-            })
+            .filter(|r| r.preview && r.platform == "Windows" && !self.release_is_installed(r))
             .filter_map(|r| EngineVersion::parse(&r.app).map(|version| (r, version)))
             .max_by(|(_, left), (_, right)| left.cmp(right))
-            .map(|(release, version)| (release, version.branch()))
+            .map(|(release, _)| release)
     }
 
     pub(super) fn has_engine_updates(&self) -> bool {
@@ -132,9 +128,15 @@ impl Workspace {
             .workspace_cache
             .engine_builds
             .get(&engine.path)
-            .is_some_and(|build| {
-                engine_preview::is_installed_preview(build, &self.snapshot.releases)
+            .and_then(|build| {
+                engine_preview::installed_preview_label(build, &self.snapshot.releases)
             });
+        let custom = EngineVersion::parse(&engine.association).is_none()
+            && self
+                .engines
+                .iter()
+                .any(|other| other.version == engine.version && other.path != engine.path);
+        let qualifier = preview.or(custom.then_some("Custom"));
         let label_width = ui
             .painter()
             .layout_no_wrap(
@@ -145,7 +147,7 @@ impl Workspace {
             .size()
             .x
             / c.scale();
-        let version_x = tx + label_width + if preview { 12. } else { 18. };
+        let version_x = tx + label_width + if qualifier.is_some() { 12. } else { 18. };
         let version_right = x + w - if selected { 100. } else { 18. };
         let version_rect = c.rect([version_x, y + 8., version_right - version_x, 44.]);
         let version_painter = ui.painter().with_clip_rect(version_rect);
@@ -156,16 +158,20 @@ impl Workspace {
             FontId::new(28. * c.scale(), FontFamily::Name("semibold".into())),
             color(t.text),
         );
-        if preview {
+        if let Some(label) = qualifier {
             version_painter.text(
                 pos2(
                     version_label.right() + 7. * c.scale(),
                     version_label.center().y,
                 ),
                 Align2::LEFT_CENTER,
-                "Preview",
+                label,
                 buttons::primary_font(c.scale()),
-                color(t.warning),
+                color(if preview.is_some() {
+                    t.warning
+                } else {
+                    t.muted
+                }),
             );
         }
         ui.interact(
@@ -173,10 +179,9 @@ impl Workspace {
             Id::new(("engine-version-tip", i)),
             Sense::hover(),
         )
-        .on_hover_text(if preview {
-            format!("{v} Preview")
-        } else {
-            engine.version.clone()
+        .on_hover_text(match qualifier {
+            Some(label) => format!("{v} {label}\n{}", engine.path),
+            None => format!("{v}\n{}", engine.path),
         });
         if selected {
             c.fill(ui, [x + w - 86., y + 15., 70., 30.], t.selection, 5.);

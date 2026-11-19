@@ -11,6 +11,17 @@ pub(super) struct WorkspaceCache {
     pending: Option<Receiver<Event>>,
 }
 
+pub(super) fn installed_engine_builds(engines: &[Installation]) -> HashMap<String, String> {
+    engines
+        .iter()
+        .filter_map(|engine| {
+            let build =
+                engine_workspace::maintenance::promoted_engine_build(Path::new(&engine.path))?;
+            Some((engine.path.clone(), build))
+        })
+        .collect()
+}
+
 enum Event {
     Engines {
         revision: u64,
@@ -169,13 +180,7 @@ fn scan_workspace(
         .iter()
         .map(|e| (e.path.clone(), platform::engine_ready(e)))
         .collect();
-    let engine_builds = engines
-        .iter()
-        .filter_map(|e| {
-            let build = engine_workspace::maintenance::promoted_engine_build(Path::new(&e.path))?;
-            Some((e.path.clone(), build))
-        })
-        .collect();
+    let engine_builds = installed_engine_builds(&engines);
     // Publish engine information before plugin receipt parsing and project history.
     emit(Event::Engines {
         revision,

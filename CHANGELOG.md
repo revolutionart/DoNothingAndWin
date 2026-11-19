@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.10 - 2026-11-19
+
+### Plugin updates
+
+- Fetch up to eight missing chunks at once and reuse installed files that match the new build. Verify files before replacing the plugin and keep the previous version available for rollback.
+- Stop a plugin update from Downloads or Engine plugins while the launcher downloads, prepares, or backs up files. Retain downloaded chunks for retry.
+
+### Engine previews
+
+- Compare exact build IDs so a new preview appears even when it shares the installed preview's version number.
+- Show **5.9.0 Preview 1** and **5.9.0 Preview 2** by name. Install different previews in separate folders and remember banner dismissal for each build.
+- Mark separate custom installations that share a version, and show the installation folder when hovering over the engine version.
+
 ## 1.3.9 - 2026-11-16
 
 - Refresh engine version labels for known projects when their `.uproject` files change, even with startup project scanning turned off.

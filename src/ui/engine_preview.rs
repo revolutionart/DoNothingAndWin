@@ -3,15 +3,34 @@ use super::*;
 pub(super) const RELEASE_NOTES_URL: &str =
     "https://forums.unrealengine.com/tags/c/general/announcements/49/unreal-engine/705";
 
-pub(super) fn is_installed_preview(build: &str, releases: &[Release]) -> bool {
-    // The 5.9 MegaJam Preview's installed metadata has no preview marker.
-    // Recognize its exact Windows build even when no release feed is cached.
-    build == "5.9.0-60351404+++UE5+Release-5.9-Windows"
-        || releases.iter().any(|release| {
-            release.preview
-                && release.platform == "Windows"
-                && release.build.as_deref() == Some(build)
-        })
+pub(super) fn installed_preview_label(build: &str, releases: &[Release]) -> Option<&'static str> {
+    engine_workspace::model::numbered_preview_label(build).or_else(|| {
+        releases
+            .iter()
+            .any(|release| {
+                release.preview
+                    && release.platform == "Windows"
+                    && release.build.as_deref() == Some(build)
+            })
+            .then_some("Preview")
+    })
+}
+
+pub(super) fn notice_key(release: &Release) -> String {
+    match &release.build {
+        Some(build) => format!("{}:{build}", release.app),
+        None => release.app.trim_start_matches("UE_").to_owned(),
+    }
+}
+
+pub(super) fn notice_dismissed(
+    release: &Release,
+    dismissed: &std::collections::BTreeSet<String>,
+) -> bool {
+    dismissed.contains(&notice_key(release))
+        // The older launcher recorded only the branch for the first 5.9 preview.
+        || (release.build.as_deref().and_then(engine_workspace::model::numbered_preview_label) == Some("Preview 1")
+            && dismissed.contains(release.app.trim_start_matches("UE_")))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,7 +48,7 @@ pub(super) fn banner_height(width: f32) -> f32 {
     if stacks_actions(width) { 134. } else { 104. }
 }
 
-pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, branch: &str) -> Option<Action> {
+pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Action> {
     let x = 271.;
     let right = c.width - 26.;
     let height = banner_height(c.width);
@@ -82,7 +101,7 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, branch: &str) -> Option<Ac
         ui,
         text_x,
         y + 49.,
-        &format!("Unreal Engine {branch} Preview is available"),
+        &format!("Unreal Engine {label} is available"),
         23.,
         true,
         c.theme.text,
@@ -179,8 +198,8 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, branch: &str) -> Option<Ac
     }
 }
 
-pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, branch: &str) -> bool {
-    let label = format!("UE {branch} Preview Available");
+pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, version: &str) -> bool {
+    let label = format!("UE {version} Available");
     ui.painter().circle_stroke(
         c.point(x + 8., 144.),
         8.,
@@ -226,8 +245,8 @@ mod tests {
     fn installed_preview_requires_an_exact_build() {
         let megajam = "5.9.0-60351404+++UE5+Release-5.9-Windows";
         let other = "5.9.0-60351405+++UE5+Release-5.9-Windows";
-        assert!(is_installed_preview(megajam, &[]));
-        assert!(!is_installed_preview(other, &[]));
+        assert_eq!(installed_preview_label(megajam, &[]), Some("Preview 1"));
+        assert_eq!(installed_preview_label(other, &[]), None);
 
         let mut release = Release {
             app: "UE_5.9".into(),
@@ -238,9 +257,31 @@ mod tests {
             version: EngineVersion::parse(other),
             preview: true,
         };
-        assert!(is_installed_preview(other, std::slice::from_ref(&release)));
+        assert_eq!(
+            installed_preview_label(other, std::slice::from_ref(&release)),
+            Some("Preview")
+        );
         release.preview = false;
-        assert!(!is_installed_preview(other, &[release]));
+        assert_eq!(installed_preview_label(other, &[release]), None);
+    }
+
+    #[test]
+    fn a_new_preview_has_its_own_banner_dismissal() {
+        let mut release = Release {
+            app: "UE_5.9".into(),
+            catalog_id: String::new(),
+            channel: "Live".into(),
+            platform: "Windows".into(),
+            build: Some("5.9.0-60351404+++UE5+Release-5.9-Windows".into()),
+            version: EngineVersion::parse("5.9.0"),
+            preview: true,
+        };
+        let mut dismissed = std::collections::BTreeSet::from(["5.9".into(), notice_key(&release)]);
+        assert!(notice_dismissed(&release, &dismissed));
+        release.build = Some("5.9.0-60738873+++UE5+Release-5.9-Windows".into());
+        assert!(!notice_dismissed(&release, &dismissed));
+        dismissed.insert(notice_key(&release));
+        assert!(notice_dismissed(&release, &dismissed));
     }
 
     #[test]
@@ -293,7 +334,7 @@ mod tests {
                         },
                         |ctx| {
                             CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
-                                result = banner(ui, &c, y, "5.9");
+                                result = banner(ui, &c, y, "5.9.0 Preview 2");
                             });
                         },
                     );

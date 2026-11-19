@@ -12,12 +12,10 @@ use std::{
     time::Duration,
 };
 
-// Keep requests and decoded data bounded, even when a template has thousands of chunks.
-const WINDOW: usize = 4;
 type Reply = mpsc::Receiver<Result<Vec<u8>, String>>;
 type Task<'a> = (&'a Chunk, mpsc::Sender<Result<Vec<u8>, String>>);
 
-pub(super) struct Prefetch<'a> {
+pub(crate) struct Prefetch<'a> {
     remaining: std::vec::IntoIter<&'a Chunk>,
     pending: HashMap<&'a str, Reply>,
     tasks: mpsc::Sender<Task<'a>>,
@@ -30,7 +28,7 @@ impl<'a> Prefetch<'a> {
         let (tx, rx) = mpsc::channel();
         self.tasks
             .send((chunk, tx))
-            .map_err(|_| "Project download worker stopped")?;
+            .map_err(|_| "Package download worker stopped")?;
         Ok(rx)
     }
 
@@ -42,7 +40,15 @@ impl<'a> Prefetch<'a> {
         Ok(())
     }
 
-    pub(super) fn take(&mut self, chunk: &'a Chunk) -> Result<Vec<u8>, String> {
+    pub(crate) fn take(&mut self, chunk: &'a Chunk) -> Result<Vec<u8>, String> {
+        self.take_with_progress(chunk, &mut || {})
+    }
+
+    pub(crate) fn take_with_progress(
+        &mut self,
+        chunk: &'a Chunk,
+        progress: &mut dyn FnMut(),
+    ) -> Result<Vec<u8>, String> {
         let (reply, planned) = match self.pending.remove(chunk.guid.as_str()) {
             Some(reply) => (reply, true),
             // A reused chunk may have been evicted from the file writer's memory cache.
@@ -52,9 +58,9 @@ impl<'a> Prefetch<'a> {
             self.control.check()?;
             match reply.recv_timeout(Duration::from_millis(100)) {
                 Ok(result) => break result?,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => progress(),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("Project download worker stopped".into());
+                    return Err("Package download worker stopped".into());
                 }
             }
         };
@@ -65,49 +71,101 @@ impl<'a> Prefetch<'a> {
     }
 }
 
-pub(super) fn with_project_chunks<'a, T>(
-    manifest: &'a Manifest,
-    bases: &[reqwest::Url],
-    chunks: Vec<&'a Chunk>,
-    control: &'a installer::Control,
-    work: impl FnOnce(&mut Prefetch<'a>, &AtomicU64) -> Result<T, String>,
-) -> Result<T, String> {
-    let client = installer::client()?;
-    let downloaded = AtomicU64::new(0);
-    let root = download_policy::active_cache_root();
-    with_prefetch(
-        chunks,
-        control,
-        |chunk| {
-            download_policy::with_cache_root(Some(root.clone()), || {
-                if let Some(bytes) = download_policy::cached_chunk(chunk) {
-                    return Ok(bytes);
-                }
-                let bytes = installer::chunk_data_progress(
-                    &client,
-                    chunk,
-                    bases,
-                    manifest.feature,
-                    control,
-                    &mut |n| {
-                        downloaded.fetch_add(n, Ordering::Relaxed);
-                    },
-                )?;
-                download_policy::cache_chunk(chunk, &bytes);
-                Ok(bytes)
-            })
-        },
-        |prefetch| work(prefetch, &downloaded),
-    )
+#[derive(Default, Clone, Copy)]
+pub(crate) struct ChunkIo {
+    pub downloaded: u64,
+    pub read: u64,
+    pub written: u64,
 }
 
-fn with_prefetch<'a, T>(
+pub(crate) struct ChunkSource<'a> {
+    manifest: &'a Manifest,
+    bases: &'a [reqwest::Url],
+    control: &'a installer::Control,
+    client: reqwest::blocking::Client,
+    cache: download_policy::ChunkCache,
+    downloaded: AtomicU64,
+    read: AtomicU64,
+    written: AtomicU64,
+}
+
+impl<'a> ChunkSource<'a> {
+    pub(crate) fn new(
+        manifest: &'a Manifest,
+        bases: &'a [reqwest::Url],
+        control: &'a installer::Control,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            manifest,
+            bases,
+            control,
+            client: installer::client()?,
+            cache: download_policy::ChunkCache::new(),
+            downloaded: AtomicU64::new(0),
+            read: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn load(&self, chunk: &Chunk) -> Result<Vec<u8>, String> {
+        if let Some(bytes) = self.cache.read(chunk, &mut |n| {
+            self.read.fetch_add(n, Ordering::Relaxed);
+        }) {
+            return Ok(bytes);
+        }
+        let bytes = installer::chunk_data_progress(
+            &self.client,
+            chunk,
+            self.bases,
+            self.manifest.feature,
+            self.control,
+            &mut |n| {
+                self.downloaded.fetch_add(n, Ordering::Relaxed);
+            },
+        )?;
+        if self.cache.store_verified(chunk, &bytes) {
+            self.written
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn io(&self) -> ChunkIo {
+        ChunkIo {
+            downloaded: self.downloaded.load(Ordering::Relaxed),
+            read: self.read.load(Ordering::Relaxed),
+            written: self.written.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub(crate) fn ordered_chunks<'a>(
+    manifest: &'a Manifest,
+    files: impl IntoIterator<Item = &'a crate::buildpatch::File>,
+) -> Result<Vec<&'a Chunk>, String> {
+    let mut seen = std::collections::HashSet::new();
+    files
+        .into_iter()
+        .flat_map(|file| &file.parts)
+        .filter(|part| seen.insert(part.guid.as_str()))
+        .map(|part| {
+            manifest
+                .chunks
+                .get(&part.guid)
+                .ok_or_else(|| "Missing package chunk".to_owned())
+        })
+        .collect()
+}
+
+pub(crate) fn with_prefetch<'a, T>(
     chunks: Vec<&'a Chunk>,
+    window: usize,
     control: &'a installer::Control,
     load: impl Fn(&Chunk) -> Result<Vec<u8>, String> + Sync,
     work: impl FnOnce(&mut Prefetch<'a>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let workers = WINDOW.min(chunks.len());
+    // Keep requests and decoded data bounded regardless of the total package size.
+    let workers = window.min(chunks.len());
     let (tx, rx) = mpsc::channel::<Task<'a>>();
     let tasks = Mutex::new(rx);
     std::thread::scope(|scope| {
@@ -141,39 +199,42 @@ fn with_prefetch<'a, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Condvar;
 
     #[test]
-    fn project_prefetch_starts_multiple_requests_without_waiting_for_the_first() {
-        let chunks: Vec<_> = (0..6)
+    fn prefetch_fills_its_window_before_waiting_for_the_first_chunk() {
+        let chunks: Vec<_> = (0..10)
             .map(|n| Chunk {
                 guid: n.to_string(),
                 ..Default::default()
             })
             .collect();
         let (started, requests) = mpsc::channel();
-        let (release, gate) = mpsc::channel();
-        let gate = Mutex::new(gate);
+        let gate = (Mutex::new(false), Condvar::new());
+        let window = 8;
         with_prefetch(
             chunks.iter().collect(),
+            window,
             &installer::Control::default(),
             |chunk| {
                 started.send(chunk.guid.clone()).unwrap();
-                if chunk.guid == "0" {
-                    gate.lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(2))
-                        .unwrap();
-                }
+                let (open, _) = gate
+                    .1
+                    .wait_timeout_while(gate.0.lock().unwrap(), Duration::from_secs(5), |open| {
+                        !*open
+                    })
+                    .unwrap();
+                assert!(*open);
                 Ok(chunk.guid.as_bytes().to_vec())
             },
             |prefetch| {
-                let first = requests.recv_timeout(Duration::from_secs(1)).unwrap();
-                let second = requests.recv_timeout(Duration::from_millis(350));
-                release.send(()).unwrap();
-                assert_ne!(
-                    first,
-                    second.expect("second request should start before the first completes")
-                );
+                let started: std::collections::HashSet<_> = (0..window)
+                    .filter_map(|_| requests.recv_timeout(Duration::from_millis(500)).ok())
+                    .collect();
+                assert_eq!(started.len(), window);
+                assert!(requests.try_recv().is_err());
+                *gate.0.lock().unwrap() = true;
+                gate.1.notify_all();
                 for chunk in &chunks {
                     assert_eq!(prefetch.take(chunk)?, chunk.guid.as_bytes());
                 }
@@ -185,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_project_prefetch_releases_the_waiting_writer() {
+    fn stopping_prefetch_releases_the_waiting_writer() {
         let chunk = Chunk {
             guid: "waiting".into(),
             ..Default::default()
@@ -194,6 +255,7 @@ mod tests {
         let (started, ready) = mpsc::channel();
         let result = with_prefetch(
             vec![&chunk],
+            4,
             &control,
             |_| {
                 started.send(()).unwrap();

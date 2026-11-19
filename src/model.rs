@@ -62,10 +62,42 @@ impl Release {
             .map(ToString::to_string)
             .unwrap_or_else(|| self.app.trim_start_matches("UE_").to_owned());
         if self.preview {
-            format!("{version} Preview")
+            format!(
+                "{version} {}",
+                self.build
+                    .as_deref()
+                    .and_then(numbered_preview_label)
+                    .unwrap_or("Preview")
+            )
         } else {
             version
         }
+    }
+
+    pub fn install_directory_name(&self) -> String {
+        if !self.preview {
+            return self.app.clone();
+        }
+        let suffix = self.build.as_deref().map(|build| {
+            numbered_preview_label(build).map_or_else(
+                || {
+                    let digest =
+                        crate::buildpatch::hex(&crate::buildpatch::digest(build.as_bytes()));
+                    format!("Preview-{}", &digest[..12])
+                },
+                |label| label.replace(' ', "-"),
+            )
+        });
+        format!("{}-{}", self.app, suffix.as_deref().unwrap_or("Preview"))
+    }
+}
+
+/// Epic's 5.9 preview builds use the same version and branch as the final release.
+pub fn numbered_preview_label(build: &str) -> Option<&'static str> {
+    match build {
+        "5.9.0-60351404+++UE5+Release-5.9-Windows" => Some("Preview 1"),
+        "5.9.0-60738873+++UE5+Release-5.9-Windows" => Some("Preview 2"),
+        _ => None,
     }
 }
 

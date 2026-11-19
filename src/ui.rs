@@ -1392,7 +1392,7 @@ impl Workspace {
             ) {
                 self.page = Page::Engines;
             }
-            let preview = self.engine_preview().map(|(_, branch)| branch);
+            let preview = self.engine_preview().map(Release::version_label);
             if preview.is_some() || self.has_engine_updates() {
                 let x = c.width - 224.;
                 let y = header.actions_y + 15.5;
@@ -1418,7 +1418,7 @@ impl Workspace {
                 )
                 .on_hover_text(preview.map_or_else(
                     || "Engine updates available for your installed engines".to_owned(),
-                    |branch| format!("UE {branch} Preview Available"),
+                    |label| format!("UE {label} Available"),
                 ));
             }
         }
@@ -1732,12 +1732,10 @@ impl Workspace {
     fn workspace_body(&mut self, ui: &mut Ui, c: &Canvas, ctx: &Context) {
         let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
         let top = PageHeaderLayout::new().divider_y + 1.;
-        let preview = self
-            .engine_preview()
-            .map(|(release, branch)| (release.app.clone(), branch));
-        let dismissed = preview
-            .as_ref()
-            .is_some_and(|(_, branch)| self.prefs.dismissed_engine_previews.contains(branch));
+        let preview = self.engine_preview().cloned();
+        let dismissed = preview.as_ref().is_some_and(|release| {
+            engine_preview::notice_dismissed(release, &self.prefs.dismissed_engine_previews)
+        });
         let banner_space = if preview.is_some() && !dismissed {
             engine_preview::banner_height(c.width) + 28.
         } else {
@@ -1759,16 +1757,23 @@ impl Workspace {
                         theme: c.theme.clone(),
                     };
                     let mut selected_draft = None;
-                    if let Some((app, branch)) = &preview {
+                    if let Some(release) = &preview {
                         if !dismissed {
-                            match engine_preview::banner(ui, &local, top + 14., branch) {
+                            match engine_preview::banner(
+                                ui,
+                                &local,
+                                top + 14.,
+                                &release.version_label(),
+                            ) {
                                 Some(engine_preview::Action::Dismiss) => {
-                                    self.prefs.dismissed_engine_previews.insert(branch.clone());
+                                    self.prefs
+                                        .dismissed_engine_previews
+                                        .insert(engine_preview::notice_key(release));
                                     self.persist();
                                     ctx.request_repaint();
                                 }
                                 Some(engine_preview::Action::Install) => {
-                                    selected_draft = Some(self.add_preview_card(app));
+                                    selected_draft = Some(self.add_preview_card(&release.app));
                                 }
                                 Some(engine_preview::Action::ReleaseNotes) => {
                                     if let Err(error) =
@@ -1840,7 +1845,7 @@ impl Workspace {
         ui: &mut Ui,
         c: &Canvas,
         short: bool,
-        compact_preview: Option<&(String, String)>,
+        compact_preview: Option<&Release>,
         mut selected_draft: Option<usize>,
     ) -> f32 {
         let offset = PageHeaderLayout::new().divider_y
@@ -1868,10 +1873,10 @@ impl Workspace {
             self.theme.text,
             Align2::LEFT_CENTER,
         );
-        if let Some((app, branch)) = compact_preview
-            && engine_preview::compact_notice(ui, c, storage_right + 18., branch)
+        if let Some(release) = compact_preview
+            && engine_preview::compact_notice(ui, c, storage_right + 18., &release.version_label())
         {
-            selected_draft = Some(self.add_preview_card(app));
+            selected_draft = Some(self.add_preview_card(&release.app));
         }
         if c.button(
             ui,
@@ -2570,7 +2575,7 @@ impl Workspace {
                 let mut build_ui = ui.new_child(UiBuilder::new().max_rect(build_rect).layout(Layout::left_to_right(Align::Center)));
                 build_ui.add(Label::new(RichText::new(build).font(font.clone()).color(color(self.theme.muted))).truncate()).on_hover_text(build);
                 let installed=self.engines.iter().find(|e|EngineVersion::parse(&e.version).zip(EngineVersion::parse(&r.app)).is_some_and(|(a,b)|a.major==b.major&&a.minor==b.minor));
-                let already_installed = transfers::release_is_installed(&r, &self.engines);
+                let already_installed = self.release_is_installed(&r);
                 let (label, tint) = match installed {
                     _ if r.preview && !already_installed => ("Preview available", self.theme.warning),
                     Some(e) if r.version.as_ref() > EngineVersion::parse(&e.version).as_ref() => {

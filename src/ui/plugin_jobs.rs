@@ -1,5 +1,5 @@
 use super::*;
-use engine_workspace::plugins::{self, Checked, Plugin, Update};
+use engine_workspace::plugins::{self, Checked, Plugin, Update, UpdateControl};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 mod backups_ui;
@@ -17,6 +17,7 @@ pub(super) struct PluginWork {
     check_done: usize,
     check_total: usize,
     pub progress: Option<Arc<Mutex<PluginProgress>>>,
+    update_control: Option<UpdateControl>,
     operation: String,
     updating: std::collections::HashSet<(String, PathBuf)>,
     activity: super::plugin_activity::Activity,
@@ -69,6 +70,7 @@ impl PluginWork {
         state.files_done = 3179;
         self.status = state.phase.into();
         self.mutating = true;
+        self.update_control = Some(UpdateControl::default());
         self.progress = Some(Arc::new(Mutex::new(PluginProgress {
             title: title.into(),
             icon_key: String::new(),
@@ -90,6 +92,20 @@ impl PluginWork {
     ) {
         if let Some(p) = self.snapshot() {
             self.activity.show(ui, theme, &p, textures, bordered);
+            if let Some(control) = &self.update_control {
+                let label = if control.stopping() {
+                    "Stopping…"
+                } else {
+                    "Stop transfer"
+                };
+                if ui
+                    .add_enabled(control.can_stop(), buttons::secondary_button(label))
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    control.stop();
+                }
+            }
         } else {
             indeterminate_progress(ui, ui.available_width(), 8., theme.accent, theme.border);
         }
@@ -157,6 +173,7 @@ impl Workspace {
                 self.plugin_work.rx = None;
                 self.plugin_work.mutating = false;
                 self.plugin_work.progress = None;
+                self.plugin_work.update_control = None;
                 self.plugin_work.updating.clear();
             }
             match event {
@@ -217,8 +234,13 @@ impl Workspace {
                     self.record_activity(self.plugin_work.operation.clone(), version, &result);
                     self.plugin_counts.remove(&path);
                     self.workspace_cache.invalidate();
-                    let message =
-                        result.unwrap_or_else(|e| format!("Plugin operation failed: {e}"));
+                    let message = result.unwrap_or_else(|e| {
+                        if e.starts_with("Stopped.") {
+                            e
+                        } else {
+                            format!("Plugin operation failed: {e}")
+                        }
+                    });
                     self.notify(message.clone());
                     self.plugin_work.status = message;
                     if let Some(i) = self.plugin_engine {
@@ -277,6 +299,8 @@ impl Workspace {
         }));
         self.plugin_work.activity = Default::default();
         self.plugin_work.progress = Some(progress.clone());
+        let control = UpdateControl::default();
+        self.plugin_work.update_control = Some(control.clone());
         std::thread::spawn(move || {
             let result = (|| {
                 let mut messages = vec![];
@@ -290,7 +314,7 @@ impl Workspace {
                         index + 1,
                         count
                     );
-                    match plugins::update_plugin_with_progress(&engine, &p, &u, |state| {
+                    match plugins::update_plugin_controlled(&engine, &p, &u, &control, |state| {
                         *progress.lock().unwrap() = PluginProgress {
                             title: title.clone(),
                             icon_key: p.descriptor.to_string_lossy().into_owned(),
@@ -311,6 +335,13 @@ impl Workspace {
                             messages.push(m);
                         }
                         Err(e) => {
+                            if e.starts_with("Stopped.") {
+                                return Err(if messages.is_empty() {
+                                    e
+                                } else {
+                                    format!("{e} Completed {} plugin updates.", messages.len())
+                                });
+                            }
                             return Err(format!(
                                 "{}; completed {} updates before stopping",
                                 e,

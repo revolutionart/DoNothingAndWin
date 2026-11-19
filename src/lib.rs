@@ -28,6 +28,7 @@ pub mod project_clone;
 pub mod project_history;
 
 pub mod download_policy;
+mod package_chunks;
 
 pub mod instance;
 

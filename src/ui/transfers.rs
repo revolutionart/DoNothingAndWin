@@ -54,12 +54,30 @@ pub(super) enum ScanEvent {
     Finished(discovery::Report),
 }
 
-pub(super) fn release_is_installed(release: &Release, engines: &[Installation]) -> bool {
+fn release_is_installed(
+    release: &Release,
+    engines: &[Installation],
+    builds: &HashMap<String, String>,
+) -> bool {
+    if release.preview
+        && let Some(build) = &release.build
+    {
+        return engines
+            .iter()
+            .any(|engine| builds.get(&engine.path) == Some(build));
+    }
     let version = release
         .version
         .clone()
         .or_else(|| release.build.as_deref().and_then(EngineVersion::parse));
     engines.iter().any(|engine| {
+        if !release.preview
+            && builds.get(&engine.path).is_some_and(|build| {
+                engine_workspace::model::numbered_preview_label(build).is_some()
+            })
+        {
+            return false;
+        }
         let Some(installed) = EngineVersion::parse(&engine.version) else {
             return false;
         };
@@ -78,6 +96,46 @@ mod resume_tests {
     use super::*;
 
     #[test]
+    fn newer_preview_with_same_version_is_available() {
+        let folder = tempfile::tempdir().unwrap();
+        let build_dir = folder.path().join("Engine/Build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(
+            build_dir.join("Build.version"),
+            r#"{
+            "MajorVersion":5,"MinorVersion":9,"PatchVersion":0,"Changelist":60351404,
+            "IsLicenseeVersion":0,"IsPromotedBuild":1,"BranchName":"++UE5+Release-5.9"
+        }"#,
+        )
+        .unwrap();
+        let engines = [Installation {
+            version: "5.9.0".into(),
+            path: folder.path().to_string_lossy().into_owned(),
+            association: "5.9".into(),
+        }];
+        let mut release = Release {
+            app: "UE_5.9".into(),
+            catalog_id: String::new(),
+            channel: "Live".into(),
+            platform: "Windows".into(),
+            preview: true,
+            build: Some("5.9.0-60738873+++UE5+Release-5.9-Windows".into()),
+            version: EngineVersion::parse("5.9.0"),
+        };
+        let builds = workspace_cache::installed_engine_builds(&engines);
+        assert!(
+            !release_is_installed(&release, &engines, &builds),
+            "Preview 1 cannot satisfy Preview 2"
+        );
+        assert_eq!(release.version_label(), "5.9.0 Preview 2");
+        assert_eq!(release.install_directory_name(), "UE_5.9-Preview-2");
+        release.build = builds.get(&engines[0].path).cloned();
+        assert!(release_is_installed(&release, &engines, &builds));
+        release.preview = false;
+        assert!(!release_is_installed(&release, &engines, &builds));
+    }
+
+    #[test]
     fn installed_versions_are_excluded_but_new_hotfixes_remain_available() {
         let engines = vec![Installation {
             version: "5.8.3".into(),
@@ -93,19 +151,20 @@ mod resume_tests {
             build: None,
             version: EngineVersion::parse("5.8.3"),
         };
-        assert!(release_is_installed(&release, &engines));
-        assert!(!release_is_installed(&release, &[]));
+        let builds = HashMap::new();
+        assert!(release_is_installed(&release, &engines, &builds));
+        assert!(!release_is_installed(&release, &[], &builds));
         release.version = EngineVersion::parse("5.8.4");
-        assert!(!release_is_installed(&release, &engines));
+        assert!(!release_is_installed(&release, &engines, &builds));
         release.version = EngineVersion::parse("5.7.4");
-        assert!(!release_is_installed(&release, &engines));
+        assert!(!release_is_installed(&release, &engines, &builds));
         release.version = None;
         release.build = Some("5.8.3-58210709+++UE5+Release-5.8-Windows".into());
-        assert!(release_is_installed(&release, &engines));
+        assert!(release_is_installed(&release, &engines, &builds));
         release.build = None;
-        assert!(release_is_installed(&release, &engines));
+        assert!(release_is_installed(&release, &engines, &builds));
         release.app = "UE_5.7".into();
-        assert!(!release_is_installed(&release, &engines));
+        assert!(!release_is_installed(&release, &engines, &builds));
     }
 }
 #[derive(Default)]
@@ -117,6 +176,15 @@ pub(super) struct Scan {
     pub skipped_folders: Vec<discovery::SkippedFolder>,
 }
 impl Workspace {
+    pub(super) fn release_is_installed(&self, release: &Release) -> bool {
+        release_is_installed(release, &self.engines, &self.workspace_cache.engine_builds)
+    }
+
+    fn release_exists_on_disk(&self, release: &Release) -> bool {
+        let builds = workspace_cache::installed_engine_builds(&self.engines);
+        release_is_installed(release, &self.engines, &builds)
+    }
+
     pub(super) fn start_engine_update(
         &mut self,
         engine: Installation,
@@ -255,7 +323,7 @@ impl Workspace {
         });
     }
     pub(super) fn choose_install(&mut self, r: Release, ctx: Context) {
-        if release_is_installed(&r, &self.engines) {
+        if self.release_exists_on_disk(&r) {
             self.transfer.modal = false;
             self.notify("This engine version is already installed.");
             return;
@@ -284,13 +352,13 @@ impl Workspace {
         let Some(r) = self.transfer.release.clone() else {
             return;
         };
-        if release_is_installed(&r, &self.engines) {
+        if self.release_exists_on_disk(&r) {
             self.transfer.modal = false;
             self.notify("This engine version is already installed.");
             return;
         }
         let parent = PathBuf::from(&self.transfer.parent);
-        let Some(worker) = self.transfer.operation.prepare(parent.clone()) else {
+        let Some(worker) = self.transfer.operation.prepare() else {
             return;
         };
         let tx = worker.events;
@@ -316,7 +384,7 @@ impl Workspace {
             .transfer
             .release
             .as_ref()
-            .is_some_and(|r| release_is_installed(r, &self.engines))
+            .is_some_and(|r| self.release_exists_on_disk(r))
         {
             self.transfer.modal = false;
             self.notify("This engine version is already installed.");
@@ -539,9 +607,7 @@ impl Workspace {
             .releases
             .iter()
             .filter(|r| {
-                r.platform == "Windows"
-                    && r.version.is_some()
-                    && !release_is_installed(r, &self.engines)
+                r.platform == "Windows" && r.version.is_some() && !self.release_is_installed(r)
             })
             .cloned()
             .collect();
@@ -675,15 +741,15 @@ impl Workspace {
             "Choose a folder and installation options for Unreal Engine.",
             &mut open,
             |ui| {
-                let app = self
+                let folder_name = self
                     .transfer
                     .release
                     .as_ref()
-                    .map(|r| r.app.clone())
+                    .map(Release::install_directory_name)
                     .unwrap_or_default();
                 ui.label("Folder");
                 dialog::folder(ui, &mut self.transfer.parent);
-                let target = PathBuf::from(&self.transfer.parent).join(&app);
+                let target = PathBuf::from(&self.transfer.parent).join(&folder_name);
                 let occupied = target.exists()
                     && (!target.is_dir()
                         || std::fs::read_dir(&target)
@@ -741,7 +807,7 @@ impl Workspace {
                         && !self.transfer.busy()
                         && !occupied
                         && Path::new(&self.transfer.parent).is_absolute()
-                        && !app.is_empty(),
+                        && !folder_name.is_empty(),
                     false,
                 );
             },
