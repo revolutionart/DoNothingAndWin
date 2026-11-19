@@ -1003,6 +1003,7 @@ fn load_package(
     asset: &serde_json::Value,
 ) -> Result<(Manifest, Vec<reqwest::Url>), String> {
     let release = Release {
+        preview_label: None,
         app: asset["appName"].as_str().ok_or("No app identity")?.into(),
         catalog_id: asset["catalogItemId"]
             .as_str()

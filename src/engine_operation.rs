@@ -12,7 +12,10 @@ use std::{
 };
 
 pub enum Event {
+    /// Sent by the preparing worker. `Operation::poll` keeps the plan and reports `Ready`.
     Prepared(Result<Plan, String>),
+    /// The prepared plan is available from `Operation::plan`.
+    Ready,
     Maintained(Installation, bool, Result<String, String>),
     Finished(Result<PathBuf, String>),
 }
@@ -45,7 +48,9 @@ pub struct Operation {
     phase: Phase,
     kind: Kind,
     receiver: Option<Receiver<Event>>,
-    plan: Option<Plan>,
+    // A plan lists every file of an engine. It is shared with the installing
+    // worker, not copied, so the interface never stalls on a copy.
+    plan: Option<Arc<Plan>>,
     installed: Option<PathBuf>,
     engine: Option<Installation>,
     control: Control,
@@ -65,13 +70,18 @@ impl Operation {
         self.kind
     }
     pub fn plan(&self) -> Option<&Plan> {
-        self.plan.as_ref()
+        self.plan.as_deref()
+    }
+    /// The plan for a worker to install from.
+    pub fn shared_plan(&self) -> Option<Arc<Plan>> {
+        self.plan.clone()
     }
     pub fn plan_mut(&mut self) -> Option<&mut Plan> {
         if self.busy() {
             None
         } else {
-            self.plan.as_mut()
+            // No worker holds the plan while the operation is idle.
+            self.plan.as_mut().map(Arc::make_mut)
         }
     }
     pub fn installed(&self) -> Option<&PathBuf> {
@@ -81,7 +91,11 @@ impl Operation {
         self.progress.lock().unwrap().clone()
     }
     pub fn can_stop(&self) -> bool {
-        self.transferring() && self.kind != Kind::Remove
+        self.transferring() && self.kind != Kind::Remove && !self.committed()
+    }
+    /// The operation is applying a verified change and can no longer be stopped.
+    pub fn committed(&self) -> bool {
+        self.transferring() && self.progress.lock().unwrap().committed
     }
     pub fn stop(&self) {
         if self.can_stop() {
@@ -157,11 +171,15 @@ impl Operation {
             }
         };
         self.receiver = None;
-        match &event {
+        let event = match event {
             Event::Prepared(Ok(plan)) => {
-                self.plan = Some(plan.clone());
-                self.phase = Phase::Ready;
+                self.plan = Some(Arc::new(plan));
+                Event::Ready
             }
+            event => event,
+        };
+        match &event {
+            Event::Ready => self.phase = Phase::Ready,
             Event::Finished(Ok(path)) => {
                 self.installed = Some(path.clone());
                 self.phase = Phase::Completed;
@@ -269,6 +287,17 @@ mod tests {
                 .unwrap();
             assert_eq!(op.can_stop(), kind != Kind::Remove);
             assert!(!op.dismiss());
+            // Past the folder swap, Stop must not be offered.
+            worker.progress.lock().unwrap().committed = true;
+            assert!(!op.can_stop());
+            assert!(op.committed());
+            op.stop();
+            assert!(
+                !worker
+                    .control
+                    .cancel
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
             drop(worker);
             assert!(matches!(op.poll(), Some(Event::Maintained(_, _, Err(_)))));
             assert!(!op.busy());

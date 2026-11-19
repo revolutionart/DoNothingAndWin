@@ -49,6 +49,9 @@ pub struct Release {
     pub version: Option<EngineVersion>,
     #[serde(default)]
     pub preview: bool,
+    /// The preview name Epic's catalog supplies for this release, such as "Preview 3".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_label: Option<String>,
 }
 impl Release {
     pub fn key(&self) -> String {
@@ -64,42 +67,47 @@ impl Release {
         if self.preview {
             format!(
                 "{version} {}",
-                self.build
+                self.preview_label
                     .as_deref()
-                    .and_then(numbered_preview_label)
+                    .or_else(|| self.build.as_deref().and_then(numbered_preview_label))
                     .unwrap_or("Preview")
             )
         } else {
             version
         }
     }
-
-    pub fn install_directory_name(&self) -> String {
-        if !self.preview {
-            return self.app.clone();
-        }
-        let suffix = self.build.as_deref().map(|build| {
-            numbered_preview_label(build).map_or_else(
-                || {
-                    let digest =
-                        crate::buildpatch::hex(&crate::buildpatch::digest(build.as_bytes()));
-                    format!("Preview-{}", &digest[..12])
-                },
-                |label| label.replace(' ', "-"),
-            )
-        });
-        format!("{}-{}", self.app, suffix.as_deref().unwrap_or("Preview"))
-    }
 }
 
+/// Read the preview name from an Epic catalog description such as "Preview 3".
+/// Anything else is ignored, so unrelated catalog text never reaches a label.
+pub fn catalog_preview_label(description: &str) -> Option<String> {
+    let mut words = description.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("preview") {
+        return None;
+    }
+    let label = match words.next() {
+        None => "Preview".to_owned(),
+        Some(number) if number.len() <= 2 && number.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("Preview {}", number.parse::<u8>().ok()?)
+        }
+        Some(_) => return None,
+    };
+    words.next().is_none().then_some(label)
+}
+
+/// Labels for previews released before the launcher read Epic's preview names.
 /// Epic's 5.9 preview builds use the same version and branch as the final release.
 pub fn numbered_preview_label(build: &str) -> Option<&'static str> {
-    match build {
-        "5.9.0-60351404+++UE5+Release-5.9-Windows" => Some("Preview 1"),
-        "5.9.0-60738873+++UE5+Release-5.9-Windows" => Some("Preview 2"),
-        _ => None,
-    }
+    NUMBERED_PREVIEWS
+        .iter()
+        .find(|(known, _)| *known == build)
+        .map(|(_, label)| *label)
 }
+
+pub const NUMBERED_PREVIEWS: [(&str, &str); 2] = [
+    ("5.9.0-60351404+++UE5+Release-5.9-Windows", "Preview 1"),
+    ("5.9.0-60738873+++UE5+Release-5.9-Windows", "Preview 2"),
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChangeKind {
@@ -250,6 +258,7 @@ mod tests {
     use super::*;
     fn rel(app: &str, build: &str) -> Release {
         Release {
+            preview_label: None,
             app: app.into(),
             catalog_id: "id".into(),
             channel: "Live".into(),
@@ -267,6 +276,34 @@ mod tests {
         );
         assert_eq!(EngineVersion::parse("UE_5.7").unwrap().patch, 0);
         assert!(EngineVersion::parse("garbage").is_none());
+    }
+    #[test]
+    fn preview_names_come_from_the_catalog_for_any_preview_number() {
+        assert_eq!(
+            catalog_preview_label("Preview 3").as_deref(),
+            Some("Preview 3")
+        );
+        assert_eq!(
+            catalog_preview_label(" preview  12 ").as_deref(),
+            Some("Preview 12")
+        );
+        assert_eq!(catalog_preview_label("Preview").as_deref(), Some("Preview"));
+        for other in [
+            "Unreal Engine",
+            "",
+            "Preview build of 5.9",
+            "Preview 123",
+            "Preview x",
+        ] {
+            assert_eq!(catalog_preview_label(other), None, "{other}");
+        }
+        let mut release = rel("UE_5.9", "5.9.0-61234567+++UE5+Release-5.9-Windows");
+        release.preview = true;
+        assert_eq!(release.version_label(), "5.9.0 Preview");
+        release.preview_label = Some("Preview 4".into());
+        assert_eq!(release.version_label(), "5.9.0 Preview 4");
+        release.preview = false;
+        assert_eq!(release.version_label(), "5.9.0");
     }
     #[test]
     fn hotfix_same_app_is_detected() {

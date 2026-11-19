@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.12 - 2026-11-20
+
+- Update Unreal Engine previews in their existing folder. The launcher compares exact builds, so **5.9.0 Preview 1** can update to **Preview 2** even though both report the same version.
+- Offer **Update** on the installed engine card and in Engine versions, with **Update preview** in the Workspace banner. The update preserves selected engine components and installed Marketplace plugins.
+- Check local engine files in parallel during updates. Reuse each matching file after one staging hash and verify the complete staged engine before replacement.
+- Name every preview as Epic names it, so **Preview 3** and later previews show correctly without a launcher update. An installed preview keeps its name after Epic publishes the next one, and **Update** takes it to the next preview or to the final release in the same folder.
+- Show each engine update step in Downloads and in the status bar, such as **Step 4 of 8 · Final verification of updated engine files**. Each bar measures its own step in bytes or files. The last file checks run faster.
+- Stop an update when the Epic Games Launcher is installing or updating the same engine, and say so. An update that Epic's launcher overtakes no longer reports a custom-file conflict.
+- Recover an engine that the Epic Games Launcher updated: **Verify** and later updates read the build now in the folder.
+- Hide **Stop transfer** once a verified update is being applied, and remove unused files left by an earlier update of the same engine.
+- Fix stretched text in the Downloads activity details.
+- Keep loaders and progress moving smoothly during engine transfers. The Downloads page no longer waits on the busy install drive, and the window no longer pauses between frames while a transfer runs.
+- Open the engine install dialog and start an install without freezing the window.
+- Retry a failed Epic Games Launcher registration when you **Verify** the engine, so Unreal tools can find it.
+
 ## 1.3.10 - 2026-11-19
 
 ### Plugin updates

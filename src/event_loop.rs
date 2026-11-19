@@ -14,6 +14,7 @@ pub fn run(
     let mut app = BackgroundAwareApp {
         inner: eframe::create_native(name, options, creator, &events),
         window: None,
+        waiting_since: None,
     };
     events.run_app(&mut app)?;
     Ok(())
@@ -166,6 +167,7 @@ mod tests {
             app: BackgroundAwareApp {
                 inner,
                 window: None,
+                waiting_since: None,
             },
             cycles: 0,
             hidden_cycles: 0,
@@ -208,6 +210,19 @@ mod tests {
 struct BackgroundAwareApp<'a> {
     inner: eframe::EframeWinitApplication<'a>,
     window: Option<WindowId>,
+    /// When the loop last handed control back to the system. Used by `--frame-log`.
+    waiting_since: Option<std::time::Instant>,
+}
+
+/// Time a handler for `--frame-log`. Costs one flag check when the log is off.
+fn timed(name: &'static str, work: impl FnOnce()) {
+    if crate::ui::frame_log::enabled() {
+        let started = std::time::Instant::now();
+        work();
+        crate::ui::frame_log::handled(name, started.elapsed());
+    } else {
+        work();
+    }
 }
 
 impl ApplicationHandler<eframe::UserEvent> for BackgroundAwareApp<'_> {
@@ -217,23 +232,39 @@ impl ApplicationHandler<eframe::UserEvent> for BackgroundAwareApp<'_> {
 
     fn window_event(&mut self, events: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         self.window.get_or_insert(id);
-        self.inner.window_event(events, id, event);
+        if matches!(event, WindowEvent::RedrawRequested) {
+            let started = std::time::Instant::now();
+            self.inner.window_event(events, id, event);
+            crate::ui::frame_log::redraw_took(started.elapsed());
+        } else {
+            timed("window event", || {
+                self.inner.window_event(events, id, event)
+            });
+        }
     }
 
     fn new_events(&mut self, events: &ActiveEventLoop, cause: StartCause) {
-        self.inner.new_events(events, cause);
+        if let Some(since) = self.waiting_since.take()
+            && crate::ui::frame_log::enabled()
+        {
+            crate::ui::frame_log::loop_turn(since.elapsed());
+        }
+        timed("new events", || self.inner.new_events(events, cause));
     }
 
     fn user_event(&mut self, events: &ActiveEventLoop, event: eframe::UserEvent) {
-        self.inner.user_event(events, event);
+        timed("user event", || self.inner.user_event(events, event));
     }
 
     fn device_event(&mut self, events: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
-        self.inner.device_event(events, id, event);
+        timed("device event", || {
+            self.inner.device_event(events, id, event)
+        });
     }
 
     fn about_to_wait(&mut self, events: &ActiveEventLoop) {
-        self.inner.about_to_wait(events);
+        timed("about to wait", || self.inner.about_to_wait(events));
+        self.waiting_since = Some(std::time::Instant::now());
         if crate::window_frame::take_exit_request() && !events.exiting() {
             if let Some(id) = self.window {
                 // Do not wait for Windows to paint a hidden/minimized window.

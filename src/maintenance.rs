@@ -262,6 +262,28 @@ fn inferred_tags(manifest: &Manifest, root: &Path) -> Vec<String> {
     }
     tags.into_iter().collect()
 }
+/// How a saved manifest relates to the engine now in the folder.
+#[derive(Debug, PartialEq, Eq)]
+enum SavedRecord {
+    Current,
+    /// Another program replaced the engine. The folder and Epic's registration
+    /// agree on a build that the saved manifest does not describe.
+    Replaced,
+    Mismatched,
+}
+
+fn saved_record(record: &str, installed: Option<&str>, registered: Option<&str>) -> SavedRecord {
+    if installed.is_some_and(|build| build != record && registered == Some(build)) {
+        SavedRecord::Replaced
+    } else if registered.is_none_or(|build| build == record) || installed == Some(record) {
+        // The folder is the authority when Epic's registration is the stale side,
+        // as after an update whose registration step could not complete.
+        SavedRecord::Current
+    } else {
+        SavedRecord::Mismatched
+    }
+}
+
 /// Locate the exact installed build. Never substitute the newest build during repair.
 pub fn prepare(
     engine: &Installation,
@@ -271,17 +293,28 @@ pub fn prepare(
     let path = root(Path::new(&engine.path))?;
     let record_path = path.join(RECORD);
     installer::no_links(&record_path)?;
+    let receipt_path = path.join(".engine-workspace-install.json");
+    let mut saved = None;
     if record_path.exists() {
         let decoder =
             flate2::read::GzDecoder::new(File::open(record_path).map_err(|e| e.to_string())?);
         let r: Record = serde_json::from_reader(decoder.take(512 * 1024 * 1024))
             .map_err(|e| format!("Saved repair manifest is invalid: {e}"))?;
-        let receipt: Option<serde_json::Value> =
-            storage::read_json(&path.join(".engine-workspace-install.json"));
-        let registered = epic_build(&path);
-        if registered.as_ref().is_some_and(|b| b != &r.manifest.build) {
-            return Err("The saved manifest no longer matches the registered Epic build.".into());
-        }
+        saved = Some(r);
+    }
+    let state = saved.as_ref().map(|r| {
+        saved_record(
+            &r.manifest.build,
+            promoted_engine_build(&path).as_deref(),
+            epic_build(&path).as_deref(),
+        )
+    });
+    if state == Some(SavedRecord::Mismatched) {
+        return Err("The saved manifest no longer matches the registered Epic build.".into());
+    }
+    let replaced = state == Some(SavedRecord::Replaced);
+    if let Some(r) = saved.filter(|_| !replaced) {
+        let receipt: Option<serde_json::Value> = storage::read_json(&receipt_path);
         if receipt
             .as_ref()
             .and_then(|v| v["build"].as_str())
@@ -319,8 +352,10 @@ pub fn prepare(
         }
         return Ok(plan);
     }
-    let receipt: Option<serde_json::Value> =
-        storage::read_json(&path.join(".engine-workspace-install.json"));
+    // After another program replaced the engine, the old receipt describes a build
+    // and a component selection that are no longer in the folder.
+    let old_receipt: Option<serde_json::Value> = storage::read_json(&receipt_path);
+    let receipt = old_receipt.clone().filter(|_| !replaced);
     let build: Option<serde_json::Value> =
         storage::read_json(&path.join("Engine/Build/Build.version"));
     if build.as_ref().and_then(|v| v["IsLicenseeVersion"].as_u64()) == Some(1) {
@@ -395,6 +430,15 @@ pub fn prepare(
         .unwrap_or_else(|| inferred_tags(&plan.manifest, &plan.target));
     validate(&plan)?;
     save_plan(&plan.target, &plan)?;
+    if replaced && let Some(mut receipt) = old_receipt {
+        receipt["app"] = plan.manifest.app.clone().into();
+        receipt["build"] = plan.manifest.build.clone().into();
+        receipt["files"] = plan.files().len().into();
+        receipt["selected_tags"] = serde_json::json!(plan.selected);
+        receipt["replaced_outside_launcher"] = true.into();
+        installer::no_links(&receipt_path)?;
+        storage::write_json(&receipt_path, &receipt)?;
+    }
     Ok(plan)
 }
 
@@ -406,7 +450,33 @@ pub fn repair(
     validate(plan)?;
     let path = root(&plan.target)?;
     let _lock = lock(&path)?;
-    repair_locked(plan, control, progress)
+    let message = repair_locked(plan, control, progress)?;
+    Ok(match retry_registration(plan, &path) {
+        Some(Ok(())) => format!("{message} Registered the engine with Epic Games Launcher."),
+        Some(Err(error)) => format!("{message} Epic registration still needs attention: {error}"),
+        None => message,
+    })
+}
+
+/// An install or update whose Epic registration failed records that in the engine
+/// folder. Unreal's own tools find engines through that registration, so a verified
+/// engine gets another attempt here instead of staying unregistered.
+fn retry_registration(plan: &Plan, path: &Path) -> Option<Result<(), String>> {
+    let record = path.join(".alpine-epic-registration.json");
+    let pending = storage::read_json::<serde_json::Value>(&record)
+        .is_some_and(|receipt| receipt["registered"] == false);
+    // Tests must never write to the machine's real Epic records.
+    if !pending || cfg!(test) {
+        return None;
+    }
+    let mut registered = plan.clone();
+    registered.target = path.to_path_buf();
+    let result = crate::epic_registration::register(&registered);
+    let _ = storage::write_json(
+        &record,
+        &serde_json::json!({"registered": result.is_ok(), "warning": result.as_ref().err()}),
+    );
+    Some(result)
 }
 
 fn repair_locked(
@@ -950,6 +1020,38 @@ mod tests {
 #[cfg(test)]
 mod identity_recovery_tests {
     use super::*;
+    #[test]
+    fn a_saved_manifest_follows_the_engine_another_program_installed() {
+        let (first, second) = (
+            "5.9.0-60351404+++UE5+Release-5.9-Windows",
+            "5.9.0-60738873+++UE5+Release-5.9-Windows",
+        );
+        assert_eq!(
+            saved_record(first, Some(first), Some(first)),
+            SavedRecord::Current
+        );
+        assert_eq!(saved_record(first, Some(first), None), SavedRecord::Current);
+        assert_eq!(saved_record(first, None, None), SavedRecord::Current);
+        // The Epic Games Launcher updated the folder and its own registration.
+        assert_eq!(
+            saved_record(first, Some(second), Some(second)),
+            SavedRecord::Replaced
+        );
+        // This launcher updated the folder, but Epic's registration was not rewritten.
+        assert_eq!(
+            saved_record(second, Some(second), Some(first)),
+            SavedRecord::Current
+        );
+        // Nothing confirms which build is in the folder.
+        assert_eq!(
+            saved_record(first, None, Some(second)),
+            SavedRecord::Mismatched
+        );
+        assert_eq!(
+            saved_record(first, Some(second), None),
+            SavedRecord::Current
+        );
+    }
     #[test]
     fn promoted_build_recovery_requires_exact_identity() {
         let mut v = serde_json::json!({"MajorVersion":5,"MinorVersion":7,"PatchVersion":4,"Changelist":51494982,"IsLicenseeVersion":0,"IsPromotedBuild":1,"BranchName":"++UE5+Release-5.7"});

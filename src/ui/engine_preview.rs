@@ -3,17 +3,43 @@ use super::*;
 pub(super) const RELEASE_NOTES_URL: &str =
     "https://forums.unrealengine.com/tags/c/general/announcements/49/unreal-engine/705";
 
-pub(super) fn installed_preview_label(build: &str, releases: &[Release]) -> Option<&'static str> {
-    engine_workspace::model::numbered_preview_label(build).or_else(|| {
-        releases
-            .iter()
-            .any(|release| {
-                release.preview
-                    && release.platform == "Windows"
-                    && release.build.as_deref() == Some(build)
-            })
-            .then_some("Preview")
-    })
+/// The preview name of an installed build. Epic's current release names its own
+/// build; earlier previews keep the name recorded when Epic published them.
+pub(super) fn installed_preview_label(build: &str, releases: &[Release]) -> Option<String> {
+    let recorded = || engine_workspace::preview_builds::label(build);
+    releases
+        .iter()
+        .find(|release| {
+            release.preview
+                && release.platform == "Windows"
+                && release.build.as_deref() == Some(build)
+        })
+        .map(|release| {
+            release
+                .preview_label
+                .clone()
+                .or_else(recorded)
+                .unwrap_or_else(|| "Preview".into())
+        })
+        .or_else(recorded)
+}
+
+/// The installed engine's version as shown beside an update, such as "5.9.0 Preview 1".
+pub(super) fn installed_version_label(
+    engine: &Installation,
+    build: Option<&engine_workspace::engine_update::InstalledBuild>,
+    releases: &[Release],
+) -> String {
+    let version = EngineVersion::parse(&engine.version)
+        .map(|version| version.to_string())
+        .unwrap_or_else(|| engine.version.clone());
+    match build.filter(|build| build.preview) {
+        Some(build) => format!(
+            "{version} {}",
+            installed_preview_label(&build.id, releases).unwrap_or_else(|| "Preview".into())
+        ),
+        None => version,
+    }
 }
 
 pub(super) fn notice_key(release: &Release) -> String {
@@ -36,7 +62,7 @@ pub(super) fn notice_dismissed(
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Action {
     Dismiss,
-    Install,
+    Apply,
     ReleaseNotes,
 }
 
@@ -48,7 +74,7 @@ pub(super) fn banner_height(width: f32) -> f32 {
     if stacks_actions(width) { 134. } else { 104. }
 }
 
-pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Action> {
+pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str, update: bool) -> Option<Action> {
     let x = 271.;
     let right = c.width - 26.;
     let height = banner_height(c.width);
@@ -91,7 +117,11 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Act
         ui,
         text_x,
         y + 24.,
-        "NEW PREVIEW",
+        if update {
+            "PREVIEW UPDATE"
+        } else {
+            "NEW PREVIEW"
+        },
         14.,
         true,
         warning,
@@ -111,7 +141,11 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Act
         ui,
         text_x,
         y + 76.,
-        "Try the preview in a separate installation.",
+        if update {
+            "Update the installed preview in its current folder."
+        } else {
+            "Install this Unreal Engine preview."
+        },
         16.,
         false,
         c.theme.muted,
@@ -161,7 +195,11 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Act
         ui,
         "install-engine-preview",
         button_slot([right - 294., action_y - 16., 150., 32.]),
-        "Install preview",
+        if update {
+            "Update preview"
+        } else {
+            "Install preview"
+        },
         None,
         true,
     );
@@ -190,7 +228,7 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Act
     if dismiss.clicked() {
         Some(Action::Dismiss)
     } else if install {
-        Some(Action::Install)
+        Some(Action::Apply)
     } else if notes.clicked() {
         Some(Action::ReleaseNotes)
     } else {
@@ -198,7 +236,7 @@ pub(super) fn banner(ui: &mut Ui, c: &Canvas, y: f32, label: &str) -> Option<Act
     }
 }
 
-pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, version: &str) -> bool {
+pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, version: &str, update: bool) -> bool {
     let label = format!("UE {version} Available");
     ui.painter().circle_stroke(
         c.point(x + 8., 144.),
@@ -233,7 +271,11 @@ pub(super) fn compact_notice(ui: &mut Ui, c: &Canvas, x: f32, version: &str) -> 
     notice.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
     notice
         .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text("Show the preview install card")
+        .on_hover_text(if update {
+            "Update the installed preview"
+        } else {
+            "Show the preview install card"
+        })
         .clicked()
 }
 
@@ -245,10 +287,14 @@ mod tests {
     fn installed_preview_requires_an_exact_build() {
         let megajam = "5.9.0-60351404+++UE5+Release-5.9-Windows";
         let other = "5.9.0-60351405+++UE5+Release-5.9-Windows";
-        assert_eq!(installed_preview_label(megajam, &[]), Some("Preview 1"));
+        assert_eq!(
+            installed_preview_label(megajam, &[]).as_deref(),
+            Some("Preview 1")
+        );
         assert_eq!(installed_preview_label(other, &[]), None);
 
         let mut release = Release {
+            preview_label: None,
             app: "UE_5.9".into(),
             catalog_id: String::new(),
             channel: "Live".into(),
@@ -258,9 +304,28 @@ mod tests {
             preview: true,
         };
         assert_eq!(
-            installed_preview_label(other, std::slice::from_ref(&release)),
+            installed_preview_label(other, std::slice::from_ref(&release)).as_deref(),
             Some("Preview")
         );
+        release.preview_label = Some("Preview 3".into());
+        assert_eq!(
+            installed_preview_label(other, std::slice::from_ref(&release)).as_deref(),
+            Some("Preview 3")
+        );
+        let engine = Installation {
+            version: "5.9.0".into(),
+            path: "engine".into(),
+            association: "5.9".into(),
+        };
+        let installed = engine_workspace::engine_update::InstalledBuild {
+            id: other.into(),
+            preview: true,
+        };
+        assert_eq!(
+            installed_version_label(&engine, Some(&installed), std::slice::from_ref(&release)),
+            "5.9.0 Preview 3"
+        );
+        assert_eq!(installed_version_label(&engine, None, &[]), "5.9.0");
         release.preview = false;
         assert_eq!(installed_preview_label(other, &[release]), None);
     }
@@ -268,6 +333,7 @@ mod tests {
     #[test]
     fn a_new_preview_has_its_own_banner_dismissal() {
         let mut release = Release {
+            preview_label: None,
             app: "UE_5.9".into(),
             catalog_id: String::new(),
             channel: "Live".into(),
@@ -292,7 +358,7 @@ mod tests {
             let action_y = y + if width < 1170. { 111. } else { 52. };
             for (point, expected) in [
                 (pos2(right - 20., y + 19.), Action::Dismiss),
-                (pos2(right - 219., action_y), Action::Install),
+                (pos2(right - 219., action_y), Action::Apply),
                 (pos2(right - 82., action_y), Action::ReleaseNotes),
             ] {
                 let ctx = Context::default();
@@ -334,7 +400,7 @@ mod tests {
                         },
                         |ctx| {
                             CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
-                                result = banner(ui, &c, y, "5.9.0 Preview 2");
+                                result = banner(ui, &c, y, "5.9.0 Preview 2", true);
                             });
                         },
                     );

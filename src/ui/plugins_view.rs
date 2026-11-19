@@ -1,23 +1,65 @@
 use super::*;
+use engine_workspace::engine_update::{self, InstalledBuild};
+
 impl Workspace {
     pub(super) fn engine_preview(&self) -> Option<&Release> {
         self.snapshot
             .releases
             .iter()
-            .filter(|r| r.preview && r.platform == "Windows" && !self.release_is_installed(r))
+            .filter(|r| {
+                r.preview
+                    && r.platform == "Windows"
+                    && !self.release_is_installed(r)
+                    && (!super::transfers::preview_branch_installed(r, &self.engines)
+                        || self.preview_update_target(r).is_some())
+            })
             .filter_map(|r| EngineVersion::parse(&r.app).map(|version| (r, version)))
             .max_by(|(_, left), (_, right)| left.cmp(right))
             .map(|(release, _)| release)
     }
 
-    pub(super) fn has_engine_updates(&self) -> bool {
-        engine_updates_available(&self.engines, &self.snapshot.releases, |engine| {
-            if self.demo {
-                Some(true)
-            } else {
-                self.workspace_cache.engines.get(&engine.path).copied()
-            }
+    pub(super) fn preview_update_target(&self, release: &Release) -> Option<Installation> {
+        self.engines
+            .iter()
+            .filter(|engine| {
+                self.workspace_cache.engines.get(&engine.path) == Some(&true)
+                    && engine_update::validate_release(
+                        engine,
+                        self.workspace_cache.engine_builds.get(&engine.path),
+                        release,
+                    )
+                    .is_ok()
+            })
+            .min_by_key(|engine| engine.path != self.prefs.default_engine)
+            .cloned()
+    }
+
+    /// A release that replaces an installed preview in its own folder: a newer
+    /// preview, or the final release of the same version.
+    pub(super) fn updates_installed_preview(&self, release: &Release) -> bool {
+        self.preview_update_target(release).is_some_and(|engine| {
+            release.preview
+                || self
+                    .workspace_cache
+                    .engine_builds
+                    .get(&engine.path)
+                    .is_some_and(|build| build.preview)
         })
+    }
+
+    pub(super) fn has_engine_updates(&self) -> bool {
+        engine_updates_available(
+            &self.engines,
+            &self.snapshot.releases,
+            &self.workspace_cache.engine_builds,
+            |engine| {
+                if self.demo {
+                    Some(true)
+                } else {
+                    self.workspace_cache.engines.get(&engine.path).copied()
+                }
+            },
+        )
     }
 
     pub(super) fn show_plugins(&mut self, i: usize) {
@@ -54,15 +96,20 @@ impl Workspace {
         let (status, update) = engine_card_status(
             if self.demo { Some(true) } else { installed },
             &engine,
+            self.workspace_cache.engine_builds.get(&engine.path),
             &self.snapshot.releases,
         );
-        let update_version = update
-            .and_then(|r| r.version.as_ref())
-            .map(ToString::to_string);
+        let update_version = update.map(Release::version_label);
         let update_release = update.cloned();
         let status = update_version
             .as_ref()
-            .map(|version| format!("Update available - UE{version}"))
+            .map(|version| {
+                if update.is_some_and(|release| release.preview) {
+                    format!("{version} available")
+                } else {
+                    format!("Update available - UE{version}")
+                }
+            })
             .unwrap_or_else(|| status.to_owned());
         let [x, y, w, h] = r;
         let status_y = y + 69.;
@@ -129,14 +176,17 @@ impl Workspace {
             .engine_builds
             .get(&engine.path)
             .and_then(|build| {
-                engine_preview::installed_preview_label(build, &self.snapshot.releases)
+                engine_preview::installed_preview_label(&build.id, &self.snapshot.releases)
+                    .or_else(|| build.preview.then(|| "Preview".to_owned()))
             });
         let custom = EngineVersion::parse(&engine.association).is_none()
             && self
                 .engines
                 .iter()
                 .any(|other| other.version == engine.version && other.path != engine.path);
-        let qualifier = preview.or(custom.then_some("Custom"));
+        let qualifier = preview
+            .clone()
+            .or_else(|| custom.then(|| "Custom".to_owned()));
         let label_width = ui
             .painter()
             .layout_no_wrap(
@@ -158,7 +208,7 @@ impl Workspace {
             FontId::new(28. * c.scale(), FontFamily::Name("semibold".into())),
             color(t.text),
         );
-        if let Some(label) = qualifier {
+        if let Some(label) = &qualifier {
             version_painter.text(
                 pos2(
                     version_label.right() + 7. * c.scale(),
@@ -672,17 +722,26 @@ impl Workspace {
 fn engine_updates_available(
     engines: &[Installation],
     releases: &[Release],
+    builds: &HashMap<String, InstalledBuild>,
     ready: impl Fn(&Installation) -> Option<bool>,
 ) -> bool {
     engines.iter().any(|engine| {
-        engine_card_status(ready(engine), engine, releases)
+        engine_card_status(ready(engine), engine, builds.get(&engine.path), releases)
             .1
             .is_some_and(|release| {
                 // The sidebar describes available releases, like the Engines table.
                 // A retained older copy can still offer its own Update action without
                 // announcing a release that is already installed in this branch.
                 !engines.iter().any(|other| {
-                    ready(other) == Some(true)
+                    if ready(other) != Some(true) {
+                        return false;
+                    }
+                    let build = builds.get(&other.path);
+                    if release.preview {
+                        return build
+                            .is_some_and(|build| Some(&build.id) == release.build.as_ref());
+                    }
+                    !build.is_some_and(|build| build.preview)
                         && EngineVersion::parse(&other.version)
                             .zip(release.version.as_ref())
                             .is_some_and(|(installed, available)| {
@@ -699,6 +758,7 @@ fn engine_updates_available(
 fn engine_card_status<'a>(
     installed: Option<bool>,
     engine: &Installation,
+    build: Option<&InstalledBuild>,
     releases: &'a [Release],
 ) -> (&'static str, Option<&'a Release>) {
     match installed {
@@ -706,28 +766,10 @@ fn engine_card_status<'a>(
         Some(false) => return ("Needs repair", None),
         Some(true) => {}
     }
-    let update = EngineVersion::parse(&engine.version).and_then(|installed| {
-        releases
-            .iter()
-            .filter(|release| {
-                release.platform == "Windows"
-                    && !release.preview
-                    && release.channel == "Live"
-                    && release
-                        .build
-                        .as_ref()
-                        .is_some_and(|build| !build.is_empty())
-                    && EngineVersion::parse(&release.app).is_some_and(|branch| {
-                        branch.major == installed.major && branch.minor == installed.minor
-                    })
-                    && release.version.as_ref().is_some_and(|version| {
-                        version.major == installed.major
-                            && version.minor == installed.minor
-                            && version > &installed
-                    })
-            })
-            .max_by(|a, b| a.version.cmp(&b.version))
-    });
+    let update = releases
+        .iter()
+        .filter(|release| engine_update::validate_release(engine, build, release).is_ok())
+        .max_by_key(|release| (&release.version, !release.preview));
     if update.is_some() {
         ("Update available", update)
     } else {
@@ -740,6 +782,56 @@ mod engine_card_tests {
     use super::*;
 
     #[test]
+    fn installed_preview_card_offers_update_until_exact_build_is_installed() {
+        let engine = Installation {
+            version: "5.9.0".into(),
+            path: "UE_5.9".into(),
+            association: "5.9".into(),
+        };
+        let release = Release {
+            preview_label: None,
+            app: "UE_5.9".into(),
+            platform: "Windows".into(),
+            channel: "Live".into(),
+            preview: true,
+            build: Some("5.9.0-60738873+++UE5+Release-5.9-Windows".into()),
+            version: EngineVersion::parse("5.9.0"),
+            catalog_id: String::new(),
+        };
+        let mut builds = HashMap::from([(
+            engine.path.clone(),
+            InstalledBuild {
+                id: "5.9.0-60351404+++UE5+Release-5.9-Windows".into(),
+                preview: true,
+            },
+        )]);
+        let releases = [release.clone()];
+        let engines = [engine.clone()];
+        assert_eq!(
+            engine_card_status(Some(true), &engine, builds.get(&engine.path), &releases).1,
+            Some(&release)
+        );
+        assert!(engine_updates_available(
+            &engines,
+            &releases,
+            &builds,
+            |_| Some(true)
+        ));
+        builds.get_mut(&engine.path).unwrap().id = release.build.unwrap();
+        assert!(
+            engine_card_status(Some(true), &engine, builds.get(&engine.path), &releases)
+                .1
+                .is_none()
+        );
+        assert!(!engine_updates_available(
+            &engines,
+            &releases,
+            &builds,
+            |_| Some(true)
+        ));
+    }
+
+    #[test]
     fn engine_badge_clears_after_update_with_an_older_copy_retained() {
         let mut engines = vec![Installation {
             version: "5.8.3".into(),
@@ -747,6 +839,7 @@ mod engine_card_tests {
             association: "5.8".into(),
         }];
         let releases = vec![Release {
+            preview_label: None,
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
@@ -755,9 +848,12 @@ mod engine_card_tests {
             build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),
         }];
-        assert!(engine_updates_available(&engines, &releases, |_| Some(
-            true
-        )));
+        assert!(engine_updates_available(
+            &engines,
+            &releases,
+            &HashMap::new(),
+            |_| Some(true)
+        ));
         engines.push(Installation {
             path: "F:/Engines/UE_5.8-5.8.3-Workspace".into(),
             association: "{CUSTOM-GUID}".into(),
@@ -765,22 +861,28 @@ mod engine_card_tests {
         });
         engines[0].version = "5.8.4".into();
         assert!(
-            !engine_updates_available(&engines, &releases, |_| Some(true)),
+            !engine_updates_available(&engines, &releases, &HashMap::new(), |_| Some(true)),
             "The engine release is installed; retaining an older copy must not keep its sidebar alert lit"
         );
         assert!(
-            engine_card_status(Some(true), &engines[1], &releases)
+            engine_card_status(Some(true), &engines[1], None, &releases)
                 .1
                 .is_some()
         );
         // A broken newer installation must not suppress an actionable update.
-        assert!(engine_updates_available(&engines, &releases, |engine| {
-            Some(engine.path != engines[0].path)
-        }));
+        assert!(engine_updates_available(
+            &engines,
+            &releases,
+            &HashMap::new(),
+            |engine| { Some(engine.path != engines[0].path) }
+        ));
         engines[0].version = "5.8.5".into();
-        assert!(!engine_updates_available(&engines, &releases, |_| Some(
-            true
-        )));
+        assert!(!engine_updates_available(
+            &engines,
+            &releases,
+            &HashMap::new(),
+            |_| Some(true)
+        ));
         // Updating one branch must not clear the alert for another branch.
         engines.push(Installation {
             version: "5.7.3".into(),
@@ -794,13 +896,19 @@ mod engine_card_tests {
             build: Some("5.7.4-build".into()),
             ..releases[0].clone()
         });
-        assert!(engine_updates_available(&engines, &releases, |_| Some(
-            true
-        )));
+        assert!(engine_updates_available(
+            &engines,
+            &releases,
+            &HashMap::new(),
+            |_| Some(true)
+        ));
         engines[2].version = "5.7.4".into();
-        assert!(!engine_updates_available(&engines, &releases, |_| Some(
-            true
-        )));
+        assert!(!engine_updates_available(
+            &engines,
+            &releases,
+            &HashMap::new(),
+            |_| Some(true)
+        ));
     }
 
     #[test]
@@ -811,6 +919,7 @@ mod engine_card_tests {
             association: "5.8".into(),
         };
         let release = Release {
+            preview_label: None,
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
@@ -820,11 +929,11 @@ mod engine_card_tests {
             version: EngineVersion::parse("5.8.4"),
         };
         assert_eq!(
-            engine_card_status(None, &engine, &[release.clone()]).0,
+            engine_card_status(None, &engine, None, &[release.clone()]).0,
             "Checking…"
         );
         assert_eq!(
-            engine_card_status(Some(false), &engine, &[release.clone()]).0,
+            engine_card_status(Some(false), &engine, None, &[release.clone()]).0,
             "Needs repair"
         );
         let updated = Installation {
@@ -832,7 +941,7 @@ mod engine_card_tests {
             ..engine.clone()
         };
         assert_eq!(
-            engine_card_status(Some(true), &updated, &[release.clone()]).0,
+            engine_card_status(Some(true), &updated, None, &[release.clone()]).0,
             "Installed"
         );
         for invalid in [
@@ -859,11 +968,14 @@ mod engine_card_tests {
             },
         ] {
             assert_eq!(
-                engine_card_status(Some(true), &engine, &[invalid]).0,
+                engine_card_status(Some(true), &engine, None, &[invalid]).0,
                 "Installed"
             );
         }
-        assert_eq!(engine_card_status(Some(true), &engine, &[]).0, "Installed");
+        assert_eq!(
+            engine_card_status(Some(true), &engine, None, &[]).0,
+            "Installed"
+        );
     }
 
     #[test]
@@ -874,6 +986,7 @@ mod engine_card_tests {
             association: "5.8".into(),
         };
         let releases = vec![Release {
+            preview_label: None,
             app: "UE_5.8".into(),
             catalog_id: "engine-58".into(),
             platform: "Windows".into(),
@@ -882,7 +995,7 @@ mod engine_card_tests {
             build: Some("5.8.4-58902052+++UE5+Release-5.8-Windows".into()),
             version: EngineVersion::parse("5.8.4"),
         }];
-        let (label, update) = engine_card_status(Some(true), &engine, &releases);
+        let (label, update) = engine_card_status(Some(true), &engine, None, &releases);
         assert_eq!(label, "Update available");
         assert_eq!(
             update.unwrap().version.as_ref().unwrap().to_string(),

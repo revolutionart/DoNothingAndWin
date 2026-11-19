@@ -3,6 +3,7 @@ pub(super) use engine_workspace::engine_operation::Event;
 use engine_workspace::{
     discovery,
     engine_operation::{Kind, Operation},
+    engine_update::InstalledBuild,
     installer,
 };
 use std::{
@@ -22,6 +23,9 @@ pub(super) struct Transfers {
     pub component_options: Option<super::engine_options::Options>,
     pub state: String,
     pub activity: super::plugin_activity::Activity,
+    /// Download and disk size of the plan for one component selection. Summing an
+    /// engine's files takes tens of milliseconds, too long to repeat every frame.
+    pub sizes: Option<(String, Vec<String>, (u64, u64))>,
 }
 impl Transfers {
     pub fn busy(&self) -> bool {
@@ -57,25 +61,23 @@ pub(super) enum ScanEvent {
 fn release_is_installed(
     release: &Release,
     engines: &[Installation],
-    builds: &HashMap<String, String>,
+    builds: &HashMap<String, InstalledBuild>,
 ) -> bool {
     if release.preview
         && let Some(build) = &release.build
     {
-        return engines
-            .iter()
-            .any(|engine| builds.get(&engine.path) == Some(build));
+        return engines.iter().any(|engine| {
+            builds
+                .get(&engine.path)
+                .is_some_and(|installed| &installed.id == build)
+        });
     }
     let version = release
         .version
         .clone()
         .or_else(|| release.build.as_deref().and_then(EngineVersion::parse));
     engines.iter().any(|engine| {
-        if !release.preview
-            && builds.get(&engine.path).is_some_and(|build| {
-                engine_workspace::model::numbered_preview_label(build).is_some()
-            })
-        {
+        if !release.preview && builds.get(&engine.path).is_some_and(|build| build.preview) {
             return false;
         }
         let Some(installed) = EngineVersion::parse(&engine.version) else {
@@ -89,6 +91,17 @@ fn release_is_installed(
             })
         }
     })
+}
+
+pub(super) fn preview_branch_installed(release: &Release, engines: &[Installation]) -> bool {
+    release.preview
+        && EngineVersion::parse(&release.app).is_some_and(|branch| {
+            engines.iter().any(|engine| {
+                EngineVersion::parse(&engine.version).is_some_and(|version| {
+                    version.major == branch.major && version.minor == branch.minor
+                })
+            })
+        })
 }
 
 #[cfg(test)]
@@ -114,6 +127,7 @@ mod resume_tests {
             association: "5.9".into(),
         }];
         let mut release = Release {
+            preview_label: None,
             app: "UE_5.9".into(),
             catalog_id: String::new(),
             channel: "Live".into(),
@@ -128,8 +142,9 @@ mod resume_tests {
             "Preview 1 cannot satisfy Preview 2"
         );
         assert_eq!(release.version_label(), "5.9.0 Preview 2");
-        assert_eq!(release.install_directory_name(), "UE_5.9-Preview-2");
-        release.build = builds.get(&engines[0].path).cloned();
+        assert!(preview_branch_installed(&release, &engines));
+        assert!(!preview_branch_installed(&release, &[]));
+        release.build = builds.get(&engines[0].path).map(|build| build.id.clone());
         assert!(release_is_installed(&release, &engines, &builds));
         release.preview = false;
         assert!(!release_is_installed(&release, &engines, &builds));
@@ -143,6 +158,7 @@ mod resume_tests {
             association: "5.8".into(),
         }];
         let mut release = Release {
+            preview_label: None,
             app: "UE_5.8".into(),
             catalog_id: String::new(),
             channel: "Live".into(),
@@ -185,6 +201,22 @@ impl Workspace {
         release_is_installed(release, &self.engines, &builds)
     }
 
+    fn route_preview_update(&mut self, release: &Release, ctx: &Context) -> bool {
+        if self.updates_installed_preview(release)
+            && let Some(target) = self.preview_update_target(release)
+        {
+            self.transfer.modal = false;
+            self.start_engine_update(target, release.clone(), ctx.clone());
+            return true;
+        }
+        if !preview_branch_installed(release, &self.engines) {
+            return false;
+        }
+        self.transfer.modal = false;
+        self.notify("A copy of this Unreal Engine branch is already installed. Refresh releases and check the installed engine card for an update.");
+        true
+    }
+
     pub(super) fn start_engine_update(
         &mut self,
         engine: Installation,
@@ -208,12 +240,12 @@ impl Workspace {
         self.transfer = Transfers {
             state: format!(
                 "Updating Unreal Engine {} to {}",
-                engine.version,
-                release
-                    .version
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
+                engine_preview::installed_version_label(
+                    &engine,
+                    self.workspace_cache.engine_builds.get(&engine.path),
+                    &self.snapshot.releases,
+                ),
+                release.version_label()
             ),
             release: Some(release.clone()),
             ..Default::default()
@@ -328,6 +360,9 @@ impl Workspace {
             self.notify("This engine version is already installed.");
             return;
         }
+        if self.route_preview_update(&r, &ctx) {
+            return;
+        }
         if self.transfer.busy() || self.plugin_work.mutating {
             self.page = Page::Downloads;
             return;
@@ -357,6 +392,9 @@ impl Workspace {
             self.notify("This engine version is already installed.");
             return;
         }
+        if self.route_preview_update(&r, &ctx) {
+            return;
+        }
         let parent = PathBuf::from(&self.transfer.parent);
         let Some(worker) = self.transfer.operation.prepare() else {
             return;
@@ -373,22 +411,22 @@ impl Workspace {
         if self.transfer.busy() || self.plugin_work.mutating {
             return;
         }
-        let Some(plan) = self.transfer.operation.plan().cloned() else {
+        let Some(plan) = self.transfer.operation.shared_plan() else {
             return;
         };
         // Recheck local installations before starting a previously prepared plan.
         if !self.demo {
             self.engines = platform::display_engines();
         }
-        if self
-            .transfer
-            .release
-            .as_ref()
-            .is_some_and(|r| self.release_exists_on_disk(r))
-        {
-            self.transfer.modal = false;
-            self.notify("This engine version is already installed.");
-            return;
+        if let Some(release) = self.transfer.release.clone() {
+            if self.release_exists_on_disk(&release) {
+                self.transfer.modal = false;
+                self.notify("This engine version is already installed.");
+                return;
+            }
+            if self.route_preview_update(&release, &ctx) {
+                return;
+            }
         }
         let Some(worker) = self.transfer.operation.install() else {
             return;
@@ -527,7 +565,7 @@ impl Workspace {
                         self.notify(message);
                     }
                 },
-                Event::Prepared(Ok(_)) => {
+                Event::Ready | Event::Prepared(Ok(_)) => {
                     self.transfer.state =
                         "Manifest verified. Choose components and installation destination.".into();
                 }
@@ -607,7 +645,10 @@ impl Workspace {
             .releases
             .iter()
             .filter(|r| {
-                r.platform == "Windows" && r.version.is_some() && !self.release_is_installed(r)
+                r.platform == "Windows"
+                    && r.version.is_some()
+                    && !self.release_is_installed(r)
+                    && !preview_branch_installed(r, &self.engines)
             })
             .cloned()
             .collect();
@@ -745,7 +786,7 @@ impl Workspace {
                     .transfer
                     .release
                     .as_ref()
-                    .map(Release::install_directory_name)
+                    .map(|release| release.app.clone())
                     .unwrap_or_default();
                 ui.label("Folder");
                 dialog::folder(ui, &mut self.transfer.parent);
@@ -769,7 +810,22 @@ impl Workspace {
                         .clone()
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked();
-                    let (disk, download, _) = plan.sizes();
+                    let (disk, download) = match &self.transfer.sizes {
+                        Some((build, selected, sizes))
+                            if *build == plan.manifest.build && *selected == plan.selected =>
+                        {
+                            *sizes
+                        }
+                        _ => {
+                            let (disk, download, _) = plan.sizes();
+                            self.transfer.sizes = Some((
+                                plan.manifest.build.clone(),
+                                plan.selected.clone(),
+                                (disk, download),
+                            ));
+                            (disk, download)
+                        }
+                    };
                     ui.label(format!(
                         "Download size: {:.2} GB    Required storage: {:.2} GB",
                         download as f64 / 1e9,

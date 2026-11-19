@@ -132,6 +132,7 @@ impl Workspace {
                 self.snapshot.releases.insert(
                     0,
                     Release {
+                        preview_label: None,
                         app: "UE_5.9".into(),
                         catalog_id: String::new(),
                         channel: "Live".into(),
@@ -275,13 +276,26 @@ impl Workspace {
             }
             if probe.engine_update {
                 self.page = Page::Downloads;
-                self.transfer.state = "Updating Unreal Engine 5.8.3 to 5.8.4".into();
+                self.transfer.state =
+                    "Updating Unreal Engine 5.9.0 Preview 2 to 5.9.0 Preview 3".into();
                 let mut p = engine_workspace::installer::Progress {
                     network: 5_540_000_000,
+                    steps: engine_workspace::engine_update::STEPS,
                     ..Default::default()
                 };
                 match probe.step {
-                    0 | 1 => {
+                    0 => {
+                        p.step = 2;
+                        p.phase = "Downloading and verifying chunks".into();
+                        p.downloading = true;
+                        p.completed = 2_880_000_000;
+                        p.total = 7_620_000_000;
+                        p.network = 2_880_000_000;
+                        p.files = 257_545;
+                        p.files_total = 281_267;
+                    }
+                    1 => {
+                        p.step = 4;
                         p.phase = "Final verification of updated engine files".into();
                         p.completed = 18_000_000_000;
                         p.total = 30_020_000_000;
@@ -290,11 +304,27 @@ impl Workspace {
                         p.detail = "Engine/Binaries/Win64/UnrealEditor-Renderer.dll".into();
                     }
                     2 => {
-                        p.phase = "Preserving installed plugins and custom files".into();
-                        p.detail = "210030 entries checked • Engine/Plugins/Marketplace/PCGEx/Binaries/Win64/UnrealEditor-PCGExtendedToolkit.dll".into();
+                        p.step = 5;
+                        p.phase = "Checking prepared update files".into();
+                        p.files = 98_210;
+                        p.files_total = 281_267;
+                        p.detail = "Engine/Source/Runtime/Core/Private/Misc/App.cpp".into();
                     }
-                    3 => p.phase = "Registering updated engine with Epic Games Launcher".into(),
-                    _ => p.phase = "Removing previous engine backup".into(),
+                    3 => {
+                        p.step = 6;
+                        p.phase = "Preserving installed plugins and custom files".into();
+                        p.detail = "210030 files checked • Engine/Plugins/Marketplace/PCGEx/Binaries/Win64/UnrealEditor-PCGExtendedToolkit.dll".into();
+                    }
+                    4 => {
+                        p.step = 7;
+                        p.committed = true;
+                        p.phase = "Registering updated engine with Epic Games Launcher".into();
+                    }
+                    _ => {
+                        p.step = 8;
+                        p.committed = true;
+                        p.phase = "Removing previous engine backup".into();
+                    }
                 }
                 self.transfer
                     .operation

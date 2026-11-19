@@ -513,6 +513,10 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
                 .iter()
                 .any(|category| category["path"] == "engines/preview")
         });
+        let preview_label = preview
+            .then(|| item["description"].as_str())
+            .flatten()
+            .and_then(crate::model::catalog_preview_label);
         for r in info {
             if !r["platform"]
                 .as_array()
@@ -536,6 +540,7 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
                     version: None,
                     build: None,
                     preview,
+                    preview_label: preview_label.clone(),
                 },
             );
         }
@@ -561,7 +566,10 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
             let id = a["catalogItemId"]
                 .as_str()
                 .ok_or("Engine build has no catalog identity")?;
-            let preview = releases.get(app).is_some_and(|release| release.preview);
+            let (preview, preview_label) = releases
+                .get(app)
+                .map(|release| (release.preview, release.preview_label.clone()))
+                .unwrap_or_default();
             releases.insert(
                 app.into(),
                 Release {
@@ -572,6 +580,7 @@ pub fn combine(catalog: &[Value], assets: Option<&Value>) -> Result<Snapshot, St
                     version: EngineVersion::parse(build),
                     build: Some(build.into()),
                     preview,
+                    preview_label,
                 },
             );
             engine_count += 1;
@@ -696,7 +705,17 @@ mod tests {
         let snapshot = combine(&[item.clone()], Some(&feed)).unwrap();
         assert!(snapshot.verified());
         assert_eq!(snapshot.releases[0].version_label(), "5.9.0 Preview 1");
+        // Epic names each preview in the catalog; later previews need no launcher update.
+        let mut named = item.clone();
+        named["description"] = "Preview 4".into();
+        let later = serde_json::json!([{
+            "namespace":"ue","appName":"UE_5.9","catalogItemId":"catalog-id",
+            "buildVersion":"5.9.0-61999999+++UE5+Release-5.9-Windows"
+        }]);
+        let snapshot = combine(&[named], Some(&later)).unwrap();
+        assert_eq!(snapshot.releases[0].version_label(), "5.9.0 Preview 4");
         let mut stable = item;
+        stable["description"] = "Preview 4".into();
         stable["categories"] = serde_json::json!([{"path":"engines"}]);
         let snapshot = combine(&[stable], Some(&feed)).unwrap();
         assert_eq!(snapshot.releases[0].version_label(), "5.9.0");

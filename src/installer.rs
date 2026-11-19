@@ -59,6 +59,45 @@ pub struct Progress {
     pub package_bytes: u64,
     pub files_total: usize,
     pub files: usize,
+    /// Position in an operation with a fixed sequence of steps. Zero when unknown.
+    pub step: u8,
+    pub steps: u8,
+    /// The measured bytes of this phase are a network download.
+    pub downloading: bool,
+    /// The operation has passed the point where it can be stopped.
+    pub committed: bool,
+}
+impl Progress {
+    /// Progress through the current phase only. Each phase measures its own work,
+    /// in bytes where it reads or writes data and in files where it only checks them.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.total > 0 {
+            Some((self.completed as f32 / self.total as f32).clamp(0., 1.))
+        } else if self.files_total > 0 {
+            Some((self.files as f32 / self.files_total as f32).clamp(0., 1.))
+        } else {
+            None
+        }
+    }
+    /// The phase with its position in the sequence, such as "Step 4 of 8 · Final verification".
+    pub fn heading(&self) -> String {
+        if self.step > 0 && self.steps > 0 {
+            format!("Step {} of {} · {}", self.step, self.steps, self.phase)
+        } else {
+            self.phase.clone()
+        }
+    }
+    /// Start a phase. Counts belong to one phase and never carry into the next.
+    pub(crate) fn begin(&mut self, step: u8, phase: &str) {
+        self.step = step;
+        self.phase = phase.into();
+        self.detail.clear();
+        self.completed = 0;
+        self.total = 0;
+        self.files = 0;
+        self.files_total = 0;
+        self.downloading = false;
+    }
 }
 #[derive(Clone, Default)]
 pub struct Control {
@@ -201,8 +240,8 @@ pub fn prepare(session: &Session, release: &Release, parent: &Path) -> Result<Pl
     let mut tags: Vec<_> = manifest.files.iter().flat_map(|f| f.tags.clone()).collect();
     tags.sort();
     tags.dedup();
-    let default = parent.join(release.install_directory_name());
-    let target = if !release.preview && default.exists() {
+    let default = parent.join(&manifest.app);
+    let target = if default.exists() {
         parent.join(format!(
             "{}-{}-Workspace",
             manifest.app,
@@ -267,23 +306,55 @@ pub(crate) fn validate_manifest(m: &Manifest) -> Result<(), String> {
     Ok(())
 }
 pub(crate) fn no_links(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for c in path.components() {
-        current.push(c);
-        if let Ok(m) = fs::symlink_metadata(&current) {
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                if m.file_attributes() & 0x400 != 0 {
-                    return Err("Installation paths cannot pass through links or junctions".into());
-                }
-            }
-            if m.file_type().is_symlink() {
-                return Err("Installation paths cannot pass through symbolic links".into());
-            }
+    checked_path_metadata(path).map(|_| ())
+}
+
+fn refuse_link(m: &fs::Metadata) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if m.file_attributes() & 0x400 != 0 {
+            return Err("Installation paths cannot pass through links or junctions".into());
         }
     }
+    if m.file_type().is_symlink() {
+        return Err("Installation paths cannot pass through symbolic links".into());
+    }
     Ok(())
+}
+
+pub(crate) fn checked_path_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    let mut current = PathBuf::new();
+    let mut metadata = None;
+    for c in path.components() {
+        current.push(c);
+        metadata = fs::symlink_metadata(&current).ok();
+        if let Some(m) = &metadata {
+            refuse_link(m)?;
+        }
+    }
+    Ok(metadata)
+}
+
+/// Whether an entry of an already checked folder is a folder itself. Links and
+/// junctions are refused. Windows returns this metadata with the folder listing,
+/// so walking a large engine does not look up every parent again for each file.
+pub(crate) fn entry_is_dir(entry: &fs::DirEntry) -> Result<bool, String> {
+    let metadata = entry.metadata().map_err(|e| e.to_string())?;
+    refuse_link(&metadata)?;
+    Ok(metadata.is_dir())
+}
+
+/// Metadata of the last path component only, for a path inside an already checked folder.
+pub(crate) fn leaf_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            refuse_link(&metadata)?;
+            Ok(Some(metadata))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 fn hash_file(path: &Path) -> Result<[u8; 20], String> {
     hash_file_progress(path, &mut |_| Ok(()))
@@ -404,6 +475,119 @@ pub(crate) fn stage_update(
     install_from(plan, control, progress, Some(source))
 }
 
+// Keep file I/O and hashing bounded while allowing independent paths to overlap.
+pub(crate) fn for_engine_files<'a>(
+    files: &[&'a buildpatch::File],
+    control: &Control,
+    visit: impl Fn(usize, &'a buildpatch::File) -> Result<(), String> + Sync,
+) -> Result<(), String> {
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(files.len());
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let failure = Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let visit = &visit;
+            let next = &next;
+            let failed = &failed;
+            let failure = &failure;
+            scope.spawn(move || {
+                while !failed.load(Ordering::Relaxed) && control.check().is_ok() {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&file) = files.get(index) else {
+                        break;
+                    };
+                    if let Err(error) = visit(index, file) {
+                        failed.store(true, Ordering::Relaxed);
+                        failure.lock().unwrap().get_or_insert(error);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    control.check()?;
+    match failure.into_inner().unwrap() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[derive(Default)]
+struct StagedScan<'a> {
+    verified: u64,
+    reused_files: usize,
+    pending: Vec<(usize, &'a buildpatch::File)>,
+}
+
+fn scan_staged_files<'a>(
+    files: &[&'a buildpatch::File],
+    stage: &Path,
+    source: Option<&Path>,
+    control: &Control,
+    progress: &Mutex<Progress>,
+) -> Result<StagedScan<'a>, String> {
+    {
+        let mut p = progress.lock().unwrap();
+        p.begin(1, "Checking local engine files");
+        p.files_total = files.len();
+    }
+    let scan = Mutex::new(StagedScan::default());
+    for_engine_files(files, control, |index, file| {
+        let relative = relative(&file.name)?;
+        let dest = stage.join(&relative);
+        let mut read = 0;
+        let mut matches = |path: &Path, metadata: &fs::Metadata| {
+            metadata.is_file()
+                && metadata.len() == file.size()
+                && hash_file_progress(path, &mut |bytes| {
+                    control.check()?;
+                    read += bytes;
+                    Ok(())
+                })
+                .is_ok_and(|hash| hash == file.sha)
+        };
+        let reused = if let Some(metadata) = checked_path_metadata(&dest)? {
+            matches(&dest, &metadata)
+        } else if let Some(source) = source {
+            let original = source.join(&relative);
+            let reusable = checked_path_metadata(&original)?
+                .is_some_and(|metadata| matches(&original, &metadata));
+            if reusable {
+                control.check()?;
+                fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                // The updater will verify the linked file in the final staging pass.
+                fs::hard_link(&original, &dest).map_err(|e| {
+                    format!("Cannot reuse installed engine file {}: {e}", file.name)
+                })?;
+            }
+            reusable
+        } else {
+            false
+        };
+        let mut scan = scan.lock().unwrap();
+        if reused {
+            scan.verified += file.size();
+            scan.reused_files += 1;
+        } else {
+            scan.pending.push((index, file));
+        }
+        drop(scan);
+        let mut p = progress.lock().unwrap();
+        p.read += read;
+        p.files += 1;
+        Ok(())
+    })?;
+    let mut scan = scan.into_inner().unwrap();
+    // Keep the manifest's assembly order for locality in the chunk cache.
+    scan.pending.sort_unstable_by_key(|(index, _)| *index);
+    Ok(scan)
+}
+
 fn install_from(
     plan: &Plan,
     control: &Control,
@@ -463,7 +647,13 @@ fn install_from(
     *progress.lock().unwrap() = Progress {
         phase: "Checking staging and available disk space".into(),
         package_bytes,
-        files_total: files.len(),
+        step: 1,
+        // An update continues with the steps in `engine_update`.
+        steps: if source.is_some() {
+            crate::engine_update::STEPS
+        } else {
+            3
+        },
         ..Default::default()
     };
     let free = fs2::available_space(parent).map_err(|e| e.to_string())?;
@@ -471,45 +661,16 @@ fn install_from(
         &work.join("plan.json"),
         &serde_json::json!({"app":plan.manifest.app,"build":plan.manifest.build,"destination":plan.target,"selected_tags":plan.selected}),
     )?;
-    let mut needed = HashSet::new();
-    let mut pending = Vec::new();
-    let mut verified = 0u64;
-    for (index, f) in files.iter().enumerate() {
-        if index % 128 == 0 {
-            progress.lock().unwrap().phase =
-                format!("Checking staged files: {} / {}", index, files.len());
-        }
-        control.check()?;
-        let dest = stage.join(relative(&f.name)?);
-        no_links(&dest)?;
-        if !dest.exists() {
-            if let Some(source) = source {
-                let original = source.join(relative(&f.name)?);
-                no_links(&original)?;
-                if valid_file(&original, &f.sha, f.size()) {
-                    fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-                    // Same-volume hard links avoid copying unchanged engine data.
-                    // The installer replaces invalid staging files instead of writing through links.
-                    fs::hard_link(&original, &dest).map_err(|e| {
-                        format!("Cannot reuse installed engine file {}: {e}", f.name)
-                    })?;
-                }
-            }
-        }
-        if fs::metadata(&dest).is_ok_and(|m| m.len() == f.size())
-            && hash_file_progress(&dest, &mut |n| {
-                progress.lock().unwrap().read += n;
-                Ok(())
-            })
-            .is_ok_and(|hash| hash == f.sha)
-        {
-            verified += f.size();
-            progress.lock().unwrap().files += 1;
-        } else {
-            pending.push(*f);
-            needed.extend(f.parts.iter().map(|p| p.guid.clone()));
-        }
-    }
+    let StagedScan {
+        verified,
+        reused_files,
+        pending,
+    } = scan_staged_files(&files, &stage, source, control, &progress)?;
+    let needed: HashSet<_> = pending
+        .iter()
+        .flat_map(|(_, file)| file.parts.iter())
+        .map(|part| part.guid.clone())
+        .collect();
     let chunks: Vec<_> = needed
         .iter()
         .map(|id| plan.manifest.chunks[id].clone())
@@ -541,8 +702,11 @@ fn install_from(
     let total = chunks.iter().map(|c| c.size).sum();
     {
         let mut p = progress.lock().unwrap();
-        p.phase = "Downloading and verifying chunks".into();
+        p.begin(2, "Downloading and verifying chunks");
+        p.downloading = true;
         p.total = total;
+        p.files = reused_files;
+        p.files_total = files.len();
     }
     let next = AtomicUsize::new(0);
     let failure = Mutex::new(None::<String>);
@@ -606,13 +770,15 @@ fn install_from(
     }
     {
         let mut p = progress.lock().unwrap();
-        p.phase = "Reconstructing and verifying engine files".into();
+        p.begin(3, "Reconstructing and verifying engine files");
         p.completed = verified;
         p.total = install_size;
+        p.files = reused_files;
+        p.files_total = files.len();
     }
     let mut chunk_memory: HashMap<String, Arc<Vec<u8>>> = HashMap::new();
     let mut chunk_order: VecDeque<String> = VecDeque::new();
-    for f in pending {
+    for (_, f) in pending {
         control.check()?;
         let dest = stage.join(relative(&f.name)?);
         no_links(&dest)?;
@@ -714,6 +880,7 @@ fn install_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn resumes_verified_chunks_then_commits_complete_engine() {
         use crate::buildpatch::{File as ManifestFile, Part};

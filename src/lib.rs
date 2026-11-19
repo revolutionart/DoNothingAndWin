@@ -35,3 +35,4 @@ pub mod instance;
 pub mod engine_operation;
 pub mod engine_update;
 pub mod epic_registration;
+pub mod preview_builds;

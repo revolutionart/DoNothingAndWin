@@ -189,8 +189,7 @@ fn consolidate_engines(mut engines: Vec<Installation>, preferred: &str) -> Vec<I
         if EngineVersion::parse(&e.association).is_some() || managed_binary {
             if let Some(build) = crate::maintenance::promoted_engine_build(root)
                 .or_else(|| managed_build.map(str::to_owned))
-                && (crate::model::numbered_preview_label(&build).is_some()
-                    || crate::epic_registration::is_cached_preview(&build))
+                && crate::preview_builds::is_preview(&build)
             {
                 // Side-by-side preview revisions are distinct builds, even at the same version.
                 return previews.insert(build);

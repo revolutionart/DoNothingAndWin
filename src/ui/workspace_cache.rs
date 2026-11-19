@@ -1,9 +1,10 @@
 use super::*;
+use engine_workspace::engine_update::{self, InstalledBuild};
 
 #[derive(Default)]
 pub(super) struct WorkspaceCache {
     pub engines: HashMap<String, bool>,
-    pub engine_builds: HashMap<String, String>,
+    pub engine_builds: HashMap<String, InstalledBuild>,
     pub projects: HashMap<String, bool>,
     revision: u64,
     applied: Option<(u64, Paths)>,
@@ -11,12 +12,11 @@ pub(super) struct WorkspaceCache {
     pending: Option<Receiver<Event>>,
 }
 
-pub(super) fn installed_engine_builds(engines: &[Installation]) -> HashMap<String, String> {
+pub(super) fn installed_engine_builds(engines: &[Installation]) -> HashMap<String, InstalledBuild> {
     engines
         .iter()
         .filter_map(|engine| {
-            let build =
-                engine_workspace::maintenance::promoted_engine_build(Path::new(&engine.path))?;
+            let build = engine_update::installed_build(Path::new(&engine.path))?;
             Some((engine.path.clone(), build))
         })
         .collect()
@@ -27,7 +27,7 @@ enum Event {
         revision: u64,
         paths: Paths,
         ready: HashMap<String, bool>,
-        builds: HashMap<String, String>,
+        builds: HashMap<String, InstalledBuild>,
     },
     Projects {
         revision: u64,

@@ -88,6 +88,48 @@ fn backup(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+/// Refuse to change an engine while the Epic Games Launcher is installing or
+/// updating it. Both launchers can update a registered engine, and two writers in
+/// one folder leave neither with the build it expects.
+pub fn ensure_idle(target: &Path) -> Result<(), String> {
+    ensure_idle_at(target, &program_data())
+}
+fn ensure_idle_at(target: &Path, data: &Path) -> Result<(), String> {
+    let here = path_key(&target.to_string_lossy());
+    let at_target = |value: &Value| value.as_str().is_some_and(|path| path_key(path) == here);
+    let records = |directory: PathBuf, extension: &'static str| {
+        fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(move |path| path.extension().is_some_and(|e| e == extension))
+            .filter_map(|path| storage::read_json::<Value>(&path))
+    };
+    let eosh = data.join("Epic/EpicOnlineServicesShared/InstallHelper/InstalledItems");
+    let manifests = data.join("Epic/EpicGamesLauncher/Data/Manifests");
+    let busy = records(eosh, "egi").any(|record| {
+        let v = &record["v4"];
+        at_target(&v["dir"])
+            && (v["state"]
+                .as_str()
+                .is_some_and(|state| state != "Installed")
+                || v["stagedVersion"].as_str().is_some_and(|s| !s.is_empty()))
+    }) || records(manifests.join("Pending"), "item")
+        .any(|item| at_target(&item["InstallLocation"]))
+        || records(manifests, "item").any(|item| {
+            at_target(&item["InstallLocation"]) && item["bIsIncompleteInstall"] == true
+        })
+        || fs::read_dir(target.join(".egstore/Pending"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().extension().is_some_and(|e| e == "manifest"));
+    if busy {
+        return Err("The Epic Games Launcher is installing or updating this engine. Let it finish or cancel it there, then refresh engines and retry. This update has not changed the installed engine.".into());
+    }
+    Ok(())
+}
 pub fn register(plan: &Plan) -> Result<(), String> {
     let (release, bytes) = material(plan)?;
     register_at(plan, &release, &bytes, &program_data())
@@ -357,6 +399,7 @@ mod tests {
             selected: vec!["templates".into()],
         };
         let release = Release {
+            preview_label: None,
             app: "UE_5.7".into(),
             catalog_id: "fixture-id".into(),
             channel: "Live".into(),
@@ -366,6 +409,63 @@ mod tests {
             version: None,
         };
         (plan, release, bytes)
+    }
+    #[test]
+    fn an_engine_epic_is_changing_is_not_idle() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, r, b) = fixture(d.path());
+        let data = d.path().join("ProgramData");
+        let eosh = data.join("Epic/EpicOnlineServicesShared/InstallHelper/InstalledItems");
+        storage::write_json(
+            &eosh.join("Revision.json"),
+            &json!({"timestamp":1,"number":1}),
+        )
+        .unwrap();
+        ensure_idle_at(&p.target, &data).unwrap();
+        register_at(&p, &r, &b, &data).unwrap();
+        ensure_idle_at(&p.target, &data).unwrap();
+
+        // Another engine's operation does not block this one.
+        let other = eosh.join("other.egi");
+        storage::write_json(
+            &other,
+            &json!({"v4":{"artifactId":"UE_5.6","dir":"C:/other","state":"Updating"}}),
+        )
+        .unwrap();
+        ensure_idle_at(&p.target, &data).unwrap();
+
+        let record = fs::read_dir(&eosh)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|path| path != &other && path.extension().is_some_and(|e| e == "egi"))
+            .unwrap();
+        let installed: Value = storage::read_json(&record).unwrap();
+        let mut updating = installed.clone();
+        updating["v4"]["state"] = "Updating".into();
+        storage::write_json(&record, &updating).unwrap();
+        assert!(ensure_idle_at(&p.target, &data).is_err());
+        let mut staged = installed.clone();
+        staged["v4"]["stagedVersion"] = "5.7.5".into();
+        storage::write_json(&record, &staged).unwrap();
+        assert!(ensure_idle_at(&p.target, &data).is_err());
+        storage::write_json(&record, &installed).unwrap();
+        ensure_idle_at(&p.target, &data).unwrap();
+
+        let pending = p.target.join(".egstore/Pending/update.manifest");
+        fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        fs::write(&pending, b"pending").unwrap();
+        assert!(ensure_idle_at(&p.target, &data).is_err());
+        fs::remove_file(pending).unwrap();
+        ensure_idle_at(&p.target, &data).unwrap();
+
+        let queued = data.join("Epic/EpicGamesLauncher/Data/Manifests/Pending/queued.item");
+        storage::write_json(
+            &queued,
+            &json!({"AppName":"UE_5.7","InstallLocation":p.target}),
+        )
+        .unwrap();
+        assert!(ensure_idle_at(&p.target, &data).is_err());
     }
     #[test]
     fn removal_is_scoped_requires_missing_folder_and_is_idempotent() {

@@ -3,6 +3,13 @@ use engine_workspace::{
     download_policy,
     storage::{Activity, DownloadSettings},
 };
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 #[derive(Default)]
 pub(super) struct Downloads {
     pub settings: bool,
@@ -11,6 +18,65 @@ pub(super) struct Downloads {
     history: Vec<Activity>,
     save_error: Option<String>,
     saved_at: Option<Instant>,
+    space: StorageSpace,
+}
+
+/// Free and total space of the install drive, read away from the UI thread.
+/// A transfer keeps that drive busy, and asking it for its size on every frame
+/// makes the page wait on the disk and the loaders stutter.
+#[derive(Default)]
+struct StorageSpace {
+    root: String,
+    requested: Option<Instant>,
+    reading: Arc<AtomicBool>,
+    value: Arc<Mutex<Option<(u64, u64)>>>,
+}
+impl StorageSpace {
+    const REFRESH: Duration = Duration::from_secs(2);
+
+    /// The last known (free, total) bytes for `root`. Starts a new read when the
+    /// value is older than the refresh interval and no read is still running.
+    fn get(&mut self, root: &str, ctx: &Context) -> Option<(u64, u64)> {
+        if self.root != root {
+            *self = Self {
+                root: root.to_owned(),
+                ..Default::default()
+            };
+        }
+        if self
+            .requested
+            .is_none_or(|at| at.elapsed() >= Self::REFRESH)
+            && !self.reading.swap(true, Ordering::Relaxed)
+        {
+            self.requested = Some(Instant::now());
+            let (root, reading, value, ctx) = (
+                PathBuf::from(root),
+                self.reading.clone(),
+                self.value.clone(),
+                ctx.clone(),
+            );
+            std::thread::spawn(move || {
+                let existing = root.ancestors().find(|p| p.exists());
+                let space = existing.and_then(|path| {
+                    Some((
+                        fs2::available_space(path).ok()?,
+                        fs2::total_space(path).ok()?,
+                    ))
+                });
+                let changed = {
+                    let mut value = value.lock().unwrap();
+                    let changed = *value != space;
+                    *value = space;
+                    changed
+                };
+                reading.store(false, Ordering::Relaxed);
+                if changed {
+                    crate::window_frame::progress_repaint(&ctx);
+                }
+            });
+        }
+        *self.value.lock().unwrap()
+    }
 }
 impl Downloads {
     pub(super) fn show_overview(&mut self) {
@@ -443,33 +509,48 @@ impl Workspace {
                     if self.transfer.busy() {
                         ui.label(&self.transfer.state);
                         let p = self.transfer.operation.progress();
-                        if p.total == 0 {
-                            ui.label(&p.phase);
-                            indeterminate_progress(
+                        ui.label(p.heading());
+                        // Every bar measures the current step only; the heading
+                        // carries the position in the whole operation.
+                        match p.fraction() {
+                            Some(fraction) => {
+                                ui.add(
+                                    ProgressBar::new(fraction)
+                                        .show_percentage()
+                                        .desired_width(ui.available_width()),
+                                );
+                            }
+                            None => indeterminate_progress(
                                 ui,
                                 ui.available_width(),
                                 8.,
                                 t.accent,
                                 t.border,
-                            );
-                        } else {
-                            ui.label(&p.phase);
-                            ui.add(
-                                ProgressBar::new(
-                                    (p.completed as f32 / p.total as f32).clamp(0., 1.),
-                                )
-                                .show_percentage()
-                                .desired_width(ui.available_width()),
-                            );
-                            ui.label(format!(
-                                "{:.2} / {:.2} GB • {:.2} GB downloaded",
+                            ),
+                        }
+                        if p.total > 0 {
+                            let bytes = format!(
+                                "{:.2} / {:.2} GB",
                                 p.completed as f64 / 1e9,
-                                p.total as f64 / 1e9,
-                                p.network as f64 / 1e9
-                            ));
+                                p.total as f64 / 1e9
+                            );
+                            ui.label(if p.downloading {
+                                format!("{bytes} • {:.2} GB downloaded", p.network as f64 / 1e9)
+                            } else {
+                                bytes
+                            });
                         }
                         if p.files_total > 0 {
-                            ui.label(format!("{} / {} files processed", p.files, p.files_total));
+                            ui.label(format!(
+                                "{} / {} files {}",
+                                p.files,
+                                p.files_total,
+                                if p.downloading {
+                                    "already in place"
+                                } else {
+                                    "processed"
+                                }
+                            ));
                         }
                         if !p.detail.is_empty() {
                             ui.add(
@@ -486,6 +567,14 @@ impl Workspace {
                                 .clicked()
                         {
                             self.transfer.operation.stop();
+                        }
+                        if self.transfer.operation.committed() {
+                            ui.label(
+                                RichText::new(
+                                    "The verified update is being applied. This step cannot be stopped.",
+                                )
+                                .color(color(t.muted)),
+                            );
                         }
                     }
                     if let Some(s) = self.library_transfer_status() {
@@ -763,7 +852,12 @@ impl Workspace {
                     ui.painter()
                         .circle_filled(center + vec2(0., 5.), 1., color(fg));
                     Popup::menu(&response).frame(menu_frame(t)).show(|ui| {
-                        ui.label(&a.message);
+                        // A menu justifies its rows, which stretches the letters of
+                        // a wrapped message across the full width.
+                        ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                            ui.set_max_width(520.);
+                            ui.add(Label::new(&a.message).wrap());
+                        });
                     });
                 });
                 ui.separator();
@@ -852,13 +946,10 @@ impl Workspace {
     }
     fn download_storage(&mut self, ui: &mut Ui, t: &Theme) {
         panel(ui, t, "Storage", None, |ui| {
-            let root = Path::new(&self.prefs.install_root);
-            let existing = root.ancestors().find(|p| p.exists()).unwrap_or(root);
-            if let (Ok(free), Ok(total)) =
-                (fs2::available_space(existing), fs2::total_space(existing))
-            {
+            let space = self.downloads.space.get(&self.prefs.install_root, ui.ctx());
+            if let Some((free, total)) = space {
                 ui.label(
-                    RichText::new(format!("{} GB available", free / 1_000_000_000))
+                    RichText::new(format!("{} GB available", free / 1_073_741_824))
                         .strong()
                         .color(ui.visuals().text_color())
                         .size(23.),
@@ -876,6 +967,8 @@ impl Workspace {
                         .size(13.)
                         .color(color(t.muted)),
                 );
+            } else if self.downloads.space.reading.load(Ordering::Relaxed) {
+                ui.label("Checking storage…");
             } else {
                 ui.label("Storage information unavailable");
             }

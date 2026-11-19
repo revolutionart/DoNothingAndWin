@@ -8,6 +8,8 @@ mod downloads;
 mod engine_options;
 mod engine_order;
 mod engine_preview;
+pub(crate) mod frame_log;
+mod frame_pacing;
 mod free_offers;
 mod launcher_updates;
 mod layout_probe;
@@ -840,7 +842,9 @@ impl Workspace {
                         .as_ref()
                         .map(|s| s.account_id.as_str())
                         .unwrap_or("public");
-                    if let Err(e) = storage::save_snapshot(account, &self.snapshot) {
+                    if let Err(e) = storage::save_snapshot(account, &self.snapshot).and_then(|_| {
+                        engine_workspace::preview_builds::record(&self.snapshot.releases)
+                    }) {
                         self.error = Some(e)
                     }
                     self.next_check = Instant::now()
@@ -1498,15 +1502,7 @@ impl Workspace {
             ))
         } else if self.transfer.busy() {
             let p = self.transfer.operation.progress();
-            Some((
-                self.transfer.state.clone(),
-                p.phase,
-                if p.total > 0 {
-                    Some((p.completed as f32 / p.total as f32).clamp(0., 1.))
-                } else {
-                    None
-                },
-            ))
+            Some((self.transfer.state.clone(), p.heading(), p.fraction()))
         } else if let Some(status) = self.library_transfer_status() {
             Some(("Library transfer".into(), status.into(), None))
         } else if self.plugin_work.mutating {
@@ -1733,6 +1729,9 @@ impl Workspace {
         let columns = card_columns(c.width - 297., ENGINE_CARD_WIDTH, ENGINE_CARD_GAP);
         let top = PageHeaderLayout::new().divider_y + 1.;
         let preview = self.engine_preview().cloned();
+        let preview_is_update = preview
+            .as_ref()
+            .is_some_and(|release| self.preview_update_target(release).is_some());
         let dismissed = preview.as_ref().is_some_and(|release| {
             engine_preview::notice_dismissed(release, &self.prefs.dismissed_engine_previews)
         });
@@ -1764,6 +1763,7 @@ impl Workspace {
                                 &local,
                                 top + 14.,
                                 &release.version_label(),
+                                preview_is_update,
                             ) {
                                 Some(engine_preview::Action::Dismiss) => {
                                     self.prefs
@@ -1772,8 +1772,12 @@ impl Workspace {
                                     self.persist();
                                     ctx.request_repaint();
                                 }
-                                Some(engine_preview::Action::Install) => {
-                                    selected_draft = Some(self.add_preview_card(&release.app));
+                                Some(engine_preview::Action::Apply) => {
+                                    if preview_is_update {
+                                        self.choose_install(release.clone(), ctx.clone());
+                                    } else {
+                                        selected_draft = Some(self.add_preview_card(&release.app));
+                                    }
                                 }
                                 Some(engine_preview::Action::ReleaseNotes) => {
                                     if let Err(error) =
@@ -1873,10 +1877,21 @@ impl Workspace {
             self.theme.text,
             Align2::LEFT_CENTER,
         );
-        if let Some(release) = compact_preview
-            && engine_preview::compact_notice(ui, c, storage_right + 18., &release.version_label())
-        {
-            selected_draft = Some(self.add_preview_card(&release.app));
+        if let Some(release) = compact_preview {
+            let update = self.preview_update_target(release).is_some();
+            if engine_preview::compact_notice(
+                ui,
+                c,
+                storage_right + 18.,
+                &release.version_label(),
+                update,
+            ) {
+                if update {
+                    self.choose_install(release.clone(), ui.ctx().clone());
+                } else {
+                    selected_draft = Some(self.add_preview_card(&release.app));
+                }
+            }
         }
         if c.button(
             ui,
@@ -2576,7 +2591,11 @@ impl Workspace {
                 build_ui.add(Label::new(RichText::new(build).font(font.clone()).color(color(self.theme.muted))).truncate()).on_hover_text(build);
                 let installed=self.engines.iter().find(|e|EngineVersion::parse(&e.version).zip(EngineVersion::parse(&r.app)).is_some_and(|(a,b)|a.major==b.major&&a.minor==b.minor));
                 let already_installed = self.release_is_installed(&r);
+                let preview_branch_installed = transfers::preview_branch_installed(&r, &self.engines);
+                let preview_update = !already_installed && self.updates_installed_preview(&r);
                 let (label, tint) = match installed {
+                    _ if preview_update => ("Update available", self.theme.warning),
+                    _ if preview_branch_installed && !already_installed => ("Installed branch", self.theme.muted),
                     _ if r.preview && !already_installed => ("Preview available", self.theme.warning),
                     Some(e) if r.version.as_ref() > EngineVersion::parse(&e.version).as_ref() => {
                         ("Update available", self.theme.warning)
@@ -2588,7 +2607,14 @@ impl Workspace {
                 p.text(pos2(c.point(c.width - 340., 0.).x, rect.center().y), Align2::LEFT_CENTER, label, font, color(tint));
                 let b=Rect::from_min_size(pos2(rect.right()-142.*c.sx, rect.center().y-COMPACT_BUTTON_HEIGHT*c.sy/2.),vec2(130.*c.sx,COMPACT_BUTTON_HEIGHT*c.sy));
                 let response = ui.scope_builder(UiBuilder::new().max_rect(b), |ui| {
-                    ui.add_enabled(!already_installed, buttons::secondary_button(if already_installed { "Installed" } else { "Install engine" }).min_size(b.size()))
+                    let (enabled, action) = if already_installed || (preview_branch_installed && !preview_update) {
+                        (false, "Installed")
+                    } else if preview_update {
+                        (true, "Update")
+                    } else {
+                        (true, "Install engine")
+                    };
+                    ui.add_enabled(enabled, buttons::secondary_button(action).min_size(b.size()))
                 }).inner;
                 if response.on_hover_cursor(CursorIcon::PointingHand).clicked() { self.choose_install(r, ctx.clone()); }
                 ui.add_space(5.*c.sy);
@@ -2740,6 +2766,7 @@ impl eframe::App for Workspace {
         self.persist();
     }
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let mut timing = frame_log::begin();
         let backgrounded = crate::window_frame::is_backgrounded()
             || ctx.input(|i| i.viewport().minimized == Some(true));
         if self.layout_probe.is_none() {
@@ -2773,9 +2800,13 @@ impl eframe::App for Workspace {
                 return;
             }
         }
+        frame_log::mark(&mut timing, "setup");
         self.poll(ctx);
+        frame_log::mark(&mut timing, "poll-releases");
         self.poll_cache_health(ctx);
+        frame_log::mark(&mut timing, "poll-cache-health");
         self.poll_transfers(ctx);
+        frame_log::mark(&mut timing, "poll-transfers");
         self.poll_plugins(ctx);
         self.poll_library(ctx);
         self.poll_clone(ctx);
@@ -2788,16 +2819,19 @@ impl eframe::App for Workspace {
             self.show_update_preparation(ctx, backgrounded);
             return;
         }
+        frame_log::mark(&mut timing, "poll-other");
         // Continue consuming worker results and running scheduled release checks,
         // but do not build invisible widgets, animate spinners or start UI-only scans.
         if !backgrounded {
             self.poll_workspace_cache(ctx);
             self.poll_project_thumbnails(ctx);
+            frame_log::mark(&mut timing, "poll-workspace");
             egui::CentralPanel::default()
                 .frame(Frame::NONE)
                 .show(ctx, |ui| {
                     self.layout(ui, ctx);
                 });
+            frame_log::mark(&mut timing, "page");
             self.plugin_dialog(ctx);
             self.category_dialog(ctx);
             self.dialogs(ctx);
@@ -2817,7 +2851,9 @@ impl eframe::App for Workspace {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+        frame_log::mark(&mut timing, "dialogs");
         self.remember_view();
+        frame_log::mark(&mut timing, "remember-view");
         let busy = self.launcher_updates.active()
             || self.backup.busy()
             || self.cloning.busy()
@@ -2828,6 +2864,10 @@ impl eframe::App for Workspace {
             || self.library_work_pending()
             || self.plugin_work.mutating;
         ctx.request_repaint_after(idle_frame_interval(backgrounded, busy));
+        // A visible loader asks for continuous frames while work is running.
+        let animating = busy && !backgrounded;
+        frame_pacing::set(animating);
+        frame_log::end(timing, busy, animating);
     }
 }
 
