@@ -17,11 +17,33 @@ pub(super) fn descriptor_file(manifest: &Manifest) -> Result<&crate::buildpatch:
         .iter()
         .filter(|f| f.name.ends_with(".uplugin"))
         .collect();
-    if descriptors.len() != 1 || descriptors[0].size() > 2 * 1024 * 1024 {
-        return Err("Package must contain one bounded plugin descriptor".into());
+    // Name the package in the message: a report must show which artifact failed.
+    let package = format!("artifact {}, build {}", manifest.app, manifest.build);
+    match descriptors.as_slice() {
+        [] => Err(format!(
+            "Package contains no plugin descriptor (.uplugin file); {package}"
+        )),
+        [file] if file.size() > 2 * 1024 * 1024 => Err(format!(
+            "Plugin descriptor {} is too large to be valid ({} bytes); {package}",
+            file.name,
+            file.size()
+        )),
+        [file] => {
+            installer::relative(&file.name)?;
+            Ok(file)
+        }
+        several => {
+            let mut names: Vec<_> = several.iter().take(5).map(|f| f.name.as_str()).collect();
+            if several.len() > names.len() {
+                names.push("…");
+            }
+            Err(format!(
+                "Package contains {} plugin descriptors ({}); only packages with one plugin can be installed; {package}",
+                several.len(),
+                names.join(", ")
+            ))
+        }
     }
-    installer::relative(&descriptors[0].name)?;
-    Ok(descriptors[0])
 }
 
 fn same_branch(a: &str, b: &str) -> bool {
@@ -50,31 +72,52 @@ pub(super) fn resolve_with(
             continue;
         }
         // An unreadable candidate could be newer. Never silently fall back to an older one.
-        let (manifest, bases, descriptor) = fetch(version)?;
-        descriptor_file(&manifest)?;
-        if manifest.app != version.artifact_id || !same_branch(&manifest.build, engine) {
-            return Err(
-                "Downloaded manifest does not match the selected artifact and engine".into(),
-            );
-        }
-        if !same_branch(descriptor["EngineVersion"].as_str().unwrap_or(""), engine) {
-            return Err("Plugin descriptor does not confirm compatibility with this engine".into());
-        }
-        if wait_for_library {
-            version.require_listed_windows_build(&manifest.build)?;
-        }
-        candidates.push(Candidate {
-            version: version.clone(),
-            manifest,
-            bases,
-            name: descriptor["VersionName"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .into(),
-            number: descriptor["Version"]
-                .as_i64()
-                .ok_or("Missing plugin version number")?,
-        });
+        // The failure names the candidate; the reason stays first, where status labels read it.
+        let candidate = (|| {
+            let (manifest, bases, descriptor) = fetch(version)?;
+            let file = descriptor_file(&manifest)?.name.clone();
+            if manifest.app != version.artifact_id {
+                return Err(format!(
+                    "Downloaded manifest is for another artifact ({})",
+                    manifest.app
+                ));
+            }
+            if !same_branch(&manifest.build, engine) {
+                return Err(format!(
+                    "Downloaded package is built for another engine version (build {})",
+                    manifest.build
+                ));
+            }
+            let declared = descriptor["EngineVersion"].as_str().unwrap_or("");
+            if !same_branch(declared, engine) {
+                return Err(format!(
+                    "Plugin descriptor {file} does not confirm compatibility with this engine (EngineVersion {})",
+                    if declared.is_empty() { "missing" } else { declared }
+                ));
+            }
+            if wait_for_library {
+                version.require_listed_windows_build(&manifest.build)?;
+            }
+            Ok(Candidate {
+                version: version.clone(),
+                manifest,
+                bases,
+                name: descriptor["VersionName"]
+                    .as_str()
+                    .unwrap_or("Unknown")
+                    .into(),
+                number: descriptor["Version"]
+                    .as_i64()
+                    .ok_or_else(|| format!("Plugin descriptor {file} has no version number"))?,
+            })
+        })()
+        .map_err(|error: String| {
+            format!(
+                "{error} (artifact {}, requested UE {engine})",
+                version.artifact_id
+            )
+        })?;
+        candidates.push(candidate);
     }
     if candidates.is_empty() {
         return Err("No compatible Windows build for this engine".into());
@@ -332,6 +375,57 @@ mod tests {
             vec![],
             json!({"EngineVersion":branch,"Version":1,"VersionName":name}),
         )
+    }
+    #[test]
+    fn resolution_failures_name_the_artifact_engine_and_descriptors() {
+        let failure = |change: fn(&mut Manifest, &mut serde_json::Value)| {
+            resolve_with(&item(), "5.8.3", false, |v| {
+                let (mut m, b, mut d) = package(v);
+                change(&mut m, &mut d);
+                Ok((m, b, d))
+            })
+            .err()
+            .unwrap()
+        };
+        let none = failure(|m, _| m.files.clear());
+        assert!(none.starts_with("Package contains no plugin descriptor"));
+        let several = failure(|m, _| {
+            m.files.push(crate::buildpatch::File {
+                name: "PCGEx/Extras/Helper.uplugin".into(),
+                ..Default::default()
+            })
+        });
+        assert!(several.starts_with("Package contains 2 plugin descriptors"));
+        assert!(
+            several.contains("PCGEx/PCGEx.uplugin") && several.contains("Extras/Helper.uplugin")
+        );
+        let old_build = failure(|m, _| m.build = "5.2.0-123-Windows".into());
+        assert!(old_build.contains("build 5.2.0-123-Windows"));
+        let old_descriptor = failure(|_, d| d["EngineVersion"] = json!("5.1.0"));
+        assert!(
+            old_descriptor.contains("PCGEx/PCGEx.uplugin")
+                && old_descriptor.contains("EngineVersion 5.1.0")
+        );
+        for message in [none, several, old_build, old_descriptor] {
+            assert!(
+                message.ends_with("(artifact pcg58, requested UE 5.8.3)"),
+                "{message}"
+            );
+        }
+        // An older-branch package is refused for the engine, never installed.
+        let unavailable = resolve_with(&item(), "5.6.1", false, |v| {
+            if v.artifact_id == "pcg56new" {
+                Err("Unavailable".into())
+            } else {
+                Ok(package(v))
+            }
+        })
+        .err()
+        .unwrap();
+        assert_eq!(
+            unavailable,
+            "Unavailable (artifact pcg56new, requested UE 5.6.1)"
+        );
     }
     #[test]
     fn each_engine_gets_its_latest_compatible_version_independent_of_api_order() {

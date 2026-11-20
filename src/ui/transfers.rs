@@ -26,6 +26,9 @@ pub(super) struct Transfers {
     /// Download and disk size of the plan for one component selection. Summing an
     /// engine's files takes tens of milliseconds, too long to repeat every frame.
     pub sizes: Option<(String, Vec<String>, (u64, u64))>,
+    /// How to run the current engine operation again, kept with its history row
+    /// if it does not succeed.
+    pub retry: Option<engine_workspace::storage::Retry>,
 }
 impl Transfers {
     pub fn busy(&self) -> bool {
@@ -283,6 +286,9 @@ impl Workspace {
                 if remove { "Removing" } else { "Verifying" },
                 engine.version
             ),
+            retry: (!remove).then(|| engine_workspace::storage::Retry::Verify {
+                path: engine.path.clone(),
+            }),
             ..Default::default()
         };
         let worker = self
@@ -501,21 +507,25 @@ impl Workspace {
         if let Some(event) = self.transfer.operation.poll() {
             self.session = storage::load_session();
             match &event {
-                Event::Maintained(engine, removed, result) => self.record_activity(
-                    if *removed {
-                        "Engine removal".into()
-                    } else {
-                        if self.transfer.operation.kind() == Kind::Update {
-                            "Engine update".into()
-                        } else if self.transfer.operation.kind() == Kind::Verify {
-                            "Engine verification".into()
+                Event::Maintained(engine, removed, result) => {
+                    let retry = self.transfer.retry.take();
+                    self.record_activity_with_retry(
+                        if *removed {
+                            "Engine removal".into()
                         } else {
-                            "Engine component changes".into()
-                        }
-                    },
-                    engine.version.clone(),
-                    result,
-                ),
+                            if self.transfer.operation.kind() == Kind::Update {
+                                "Engine update".into()
+                            } else if self.transfer.operation.kind() == Kind::Verify {
+                                "Engine verification".into()
+                            } else {
+                                "Engine component changes".into()
+                            }
+                        },
+                        engine.version.clone(),
+                        result,
+                        retry,
+                    )
+                }
                 Event::Finished(result) => {
                     let version = self
                         .transfer

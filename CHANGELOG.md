@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.13 - 2026-11-20
+
+- Add engine components faster. Adding a content pack or platform from **Engine options** now checks and downloads only the files that component adds, instead of first hashing the whole installed engine. A full check of every engine file remains under **Verify**.
+- Show what a component change is doing: **Checking added engine components**, then **Downloading N component files**. It no longer reports new component files as missing or corrupted.
+- Add **Retry** to failed and stopped engine component changes and engine verifications in **Downloads**. It runs the same operation again, with the same component selection, without reopening the engine.
+- Explain why a Fab plugin package was refused. The message now says whether the package has no plugin descriptor or several, lists their paths, and names the artifact, its build and the requested engine version.
+
 ## 1.3.12 - 2026-11-20
 
 - Update Unreal Engine previews in their existing folder. The launcher compares exact builds, so **5.9.0 Preview 1** can update to **Preview 2** even though both report the same version.

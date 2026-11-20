@@ -1,5 +1,5 @@
 use super::*;
-use engine_workspace::{installer::Plan, maintenance};
+use engine_workspace::{installer::Plan, maintenance, storage::Retry};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
@@ -503,27 +503,58 @@ impl Workspace {
             let mut original = self.options.plan.take().unwrap();
             let selected = original.selected.clone();
             original.selected = self.options.original.clone();
-            self.transfer = transfers::Transfers {
-                state: "Applying engine component changes".into(),
-                ..Default::default()
-            };
-            let Some(worker) = self.transfer.operation.maintain(
-                engine_workspace::engine_operation::Kind::Components,
-                engine.clone(),
-            ) else {
-                return;
-            };
-            let (tx, control, progress) = (worker.events, worker.control, worker.progress);
-            self.engine_options = None;
-            self.options = Options::default();
-            self.page = Page::Downloads;
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let result =
-                    maintenance::change_components(&original, selected, &control, progress);
-                let _ = tx.send(transfers::Event::Maintained(engine, false, result));
-                ctx.request_repaint();
-            });
+            if self.start_component_change(engine, Some(original), selected, ctx) {
+                self.engine_options = None;
+                self.options = Options::default();
+            }
         }
+    }
+
+    /// Apply `selected` to `engine`. Without `original`, the installed plan is read
+    /// first, as when a failed change is retried from the download history.
+    pub(super) fn start_component_change(
+        &mut self,
+        engine: Installation,
+        original: Option<Plan>,
+        selected: Vec<String>,
+        ctx: &Context,
+    ) -> bool {
+        if self.transfer.busy() || self.plugin_work.mutating {
+            self.notify("Another engine operation is running.");
+            return false;
+        }
+        self.transfer = transfers::Transfers {
+            state: "Applying engine component changes".into(),
+            retry: Some(Retry::Components {
+                path: engine.path.clone(),
+                selected: selected.clone(),
+            }),
+            ..Default::default()
+        };
+        let Some(worker) = self.transfer.operation.maintain(
+            engine_workspace::engine_operation::Kind::Components,
+            engine.clone(),
+        ) else {
+            return false;
+        };
+        let (tx, control, progress) = (worker.events, worker.control, worker.progress);
+        if original.is_none() {
+            progress.lock().unwrap().phase = "Loading the installed build manifest".into();
+        }
+        self.page = Page::Downloads;
+        let session = storage::load_session();
+        let snapshot = self.snapshot.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = original
+                .map(Ok)
+                .unwrap_or_else(|| maintenance::prepare(&engine, session.as_ref(), &snapshot))
+                .and_then(|original| {
+                    maintenance::change_components(&original, selected, &control, progress)
+                });
+            let _ = tx.send(transfers::Event::Maintained(engine, false, result));
+            ctx.request_repaint();
+        });
+        true
     }
 }

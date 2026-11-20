@@ -41,9 +41,25 @@ pub struct Activity {
     pub success: bool,
     pub message: String,
     pub seen: bool,
+    /// How to run an unsuccessful engine operation again from the history row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Retry>,
+}
+
+/// Enough of an engine operation to start it again without reopening the engine.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Retry {
+    /// Apply this component selection to the engine at `path`.
+    Components { path: String, selected: Vec<String> },
+    /// Verify and repair the engine at `path`.
+    Verify { path: String },
 }
 
 impl Activity {
+    /// The retry for this row, shown only while the operation did not succeed.
+    pub fn retryable(&self) -> Option<&Retry> {
+        self.retry.as_ref().filter(|_| !self.success)
+    }
     pub fn item_label(&self) -> String {
         if self.item == "Unreal Engine" {
             return "Engine installation".into();
@@ -109,6 +125,7 @@ mod activity_tests {
             success: true,
             message: "Verified 123 files. No repair needed.".into(),
             seen: false,
+            retry: None,
         };
         assert_eq!(a.status_label(), "Verify successful");
         a.success = false;
@@ -144,6 +161,25 @@ mod activity_tests {
         a.success = false;
         a.message = "Access denied".into();
         assert_eq!(a.status_label(), "Failed");
+    }
+
+    #[test]
+    fn retry_survives_saving_and_shows_only_for_unsuccessful_rows() {
+        // History saved before retries existed still loads.
+        let old: Activity = serde_json::from_str(
+            r#"{"item":"Engine component changes","engine":"5.9.0","completed":1,"success":false,"message":"Close Unreal Editor","seen":false}"#,
+        )
+        .unwrap();
+        assert!(old.retryable().is_none());
+        let mut a = old.clone();
+        a.retry = Some(super::Retry::Components {
+            path: "E:/UE_5.9".into(),
+            selected: vec!["templates".into()],
+        });
+        let saved: Activity = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(saved.retryable(), a.retry.as_ref());
+        a.success = true;
+        assert!(a.retryable().is_none());
     }
 }
 

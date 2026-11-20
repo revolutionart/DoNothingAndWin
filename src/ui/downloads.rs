@@ -1,7 +1,7 @@
 use super::*;
 use engine_workspace::{
     download_policy,
-    storage::{Activity, DownloadSettings},
+    storage::{Activity, DownloadSettings, Retry},
 };
 use std::{
     path::PathBuf,
@@ -323,6 +323,15 @@ impl Workspace {
         engine: String,
         result: &Result<String, String>,
     ) {
+        self.record_activity_with_retry(item, engine, result, None);
+    }
+    pub(super) fn record_activity_with_retry(
+        &mut self,
+        item: String,
+        engine: String,
+        result: &Result<String, String>,
+        retry: Option<Retry>,
+    ) {
         if self.demo {
             return;
         }
@@ -339,6 +348,7 @@ impl Workspace {
                 success,
                 message: message.clone(),
                 seen: false,
+                retry: retry.filter(|_| !success),
             },
         );
         self.downloads.history.truncate(500);
@@ -768,6 +778,9 @@ impl Workspace {
             });
             let query = self.downloads.search.to_lowercase();
             let mut count = 0;
+            let busy = self.transfer.busy() || self.plugin_work.mutating;
+            let retry_width = 76.;
+            let mut retry_clicked = None;
             for a in &self.downloads.history {
                 if !format!("{} {} {}", a.item_label(), a.engine, a.message)
                     .to_lowercase()
@@ -813,9 +826,17 @@ impl Workspace {
                         format!("{} days ago", elapsed / 86400)
                     };
                     activity_cell(ui, [width * 0.23, 38.], Label::new(age).halign(Align::LEFT));
+                    let retry = a.retryable();
+                    // The Retry button takes its room from the status column, so
+                    // the details button stays in the same place on every row.
+                    let status_width = if retry.is_some() {
+                        (width * 0.27 - retry_width - ui.spacing().item_spacing.x).max(40.)
+                    } else {
+                        width * 0.27
+                    };
                     activity_cell(
                         ui,
-                        [width * 0.27, 38.],
+                        [status_width, 38.],
                         Label::new(RichText::new(a.status_label()).color(color(if a.success {
                             t.success
                         } else if a.stopped() {
@@ -826,6 +847,22 @@ impl Workspace {
                         .truncate()
                         .halign(Align::LEFT),
                     );
+                    if let Some(retry) = retry
+                        && ui
+                            .add_enabled(
+                                !busy,
+                                buttons::secondary_button("Retry")
+                                    .min_size(vec2(retry_width, COMPACT_BUTTON_HEIGHT)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text("Run this operation again")
+                            .on_disabled_hover_text(
+                                "Wait for the current operation to finish, then retry.",
+                            )
+                            .clicked()
+                    {
+                        retry_clicked = Some(retry.clone());
+                    }
                     let (rect, response) = ui.allocate_exact_size(
                         vec2(action_width, COMPACT_BUTTON_HEIGHT),
                         Sense::click(),
@@ -861,6 +898,19 @@ impl Workspace {
                     });
                 });
                 ui.separator();
+            }
+            if let Some(retry) = retry_clicked {
+                let ctx = ui.ctx().clone();
+                let (Retry::Components { path, .. } | Retry::Verify { path }) = &retry;
+                match self.engines.iter().find(|e| &e.path == path).cloned() {
+                    None => self.notify("This engine is no longer installed."),
+                    Some(engine) => match retry {
+                        Retry::Components { selected, .. } => {
+                            self.start_component_change(engine, None, selected, &ctx);
+                        }
+                        Retry::Verify { .. } => self.start_maintenance(engine, false, ctx),
+                    },
+                }
             }
             if count == 0 {
                 ui.label(if !query.is_empty() {

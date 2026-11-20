@@ -484,17 +484,45 @@ fn repair_locked(
     control: &Control,
     progress: Arc<Mutex<Progress>>,
 ) -> Result<String, String> {
+    let files = plan.files();
+    let repaired = repair_files(
+        plan,
+        &files,
+        "Verifying installed engine files",
+        |count| format!("Repairing {count} missing or corrupted files"),
+        control,
+        progress,
+    )?;
+    Ok(if repaired == 0 {
+        format!("Verified {} files. No repair needed.", files.len())
+    } else {
+        format!(
+            "Verified {} files; repaired {repaired} missing or corrupted files.",
+            files.len()
+        )
+    })
+}
+
+/// Hash-check `files` and download every one that is missing or damaged.
+/// Returns how many files were replaced.
+fn repair_files(
+    plan: &Plan,
+    files: &[&buildpatch::File],
+    phase: &str,
+    fetching: impl Fn(usize) -> String,
+    control: &Control,
+    progress: Arc<Mutex<Progress>>,
+) -> Result<usize, String> {
     let path = root(&plan.target)?;
     ensure_closed(&path)?;
-    let files = plan.files();
     let total = files.iter().map(|f| f.size()).sum();
     *progress.lock().unwrap() = Progress {
-        phase: "Verifying installed engine files".into(),
+        phase: phase.into(),
         total,
         ..Default::default()
     };
     let mut damaged = vec![];
-    for f in &files {
+    for f in files {
         control.check()?;
         let dest = path.join(installer::relative(&f.name)?);
         installer::no_links(&dest)?;
@@ -506,7 +534,7 @@ fn repair_locked(
         p.files += 1;
     }
     if damaged.is_empty() {
-        return Ok(format!("Verified {} files. No repair needed.", files.len()));
+        return Ok(0);
     }
     let cache = path.join(".engine-workspace-repair");
     installer::no_links(&cache)?;
@@ -519,7 +547,7 @@ fn repair_locked(
     let client = installer::client()?;
     let count = damaged.len();
     *progress.lock().unwrap() = Progress {
-        phase: format!("Repairing {count} missing or corrupted files"),
+        phase: fetching(count),
         total: damaged.iter().map(|f| f.size()).sum(),
         ..Default::default()
     };
@@ -580,10 +608,7 @@ fn repair_locked(
         let _ = fs::remove_file(cache.join(id));
     }
     let _ = fs::remove_dir(cache);
-    Ok(format!(
-        "Verified {} files; repaired {count} missing or corrupted files.",
-        files.len()
-    ))
+    Ok(count)
 }
 
 /// Apply a component selection against the exact same installed manifest.
@@ -635,7 +660,35 @@ pub fn change_components(
             ));
         }
     }
-    repair_locked(&plan, control, progress.clone())?;
+    // Only the files the new selection adds are hash-checked and downloaded.
+    // Files that stay installed get a size check; a full hash of every engine
+    // file belongs to Verify, not to adding a component.
+    let kept: std::collections::HashSet<_> = original
+        .files()
+        .into_iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut needed = vec![];
+    for f in plan.files() {
+        control.check()?;
+        let present = || {
+            installer::relative(&f.name).is_ok_and(|rel| {
+                fs::symlink_metadata(path.join(rel))
+                    .is_ok_and(|m| m.is_file() && m.len() == f.size())
+            })
+        };
+        if !kept.contains(f.name.as_str()) || !present() {
+            needed.push(f);
+        }
+    }
+    repair_files(
+        &plan,
+        &needed,
+        "Checking added engine components",
+        |count| format!("Downloading {count} component files"),
+        control,
+        progress.clone(),
+    )?;
     control.check()?;
     ensure_closed(&path)?;
     let stage = path.join(format!(
@@ -886,6 +939,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn adding_a_component_checks_only_the_added_files() {
+        let (_temp, mut plan, data) = fixture();
+        plan.manifest.files[2].tags = vec!["templates".into()];
+        let cache = plan.target.join(".engine-workspace-repair");
+        fs::create_dir(&cache).unwrap();
+        fs::write(cache.join("00000001000000020000000300000004"), &data).unwrap();
+        // Same size, wrong content: only a full hash would notice. Adding a
+        // component must leave that to Verify instead of hashing the whole engine.
+        let editor = plan.target.join("Engine/Binaries/Win64/UnrealEditor.exe");
+        fs::write(&editor, b"broken editor!").unwrap();
+        let progress = Arc::<Mutex<Progress>>::default();
+        change_components(
+            &plan,
+            vec!["templates".into()],
+            &Control::default(),
+            progress.clone(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&editor).unwrap(), b"broken editor!");
+        assert_eq!(
+            fs::read(plan.target.join("Engine/Content/missing.dat")).unwrap(),
+            b"missing data"
+        );
+        assert_eq!(progress.lock().unwrap().total, 12);
+        // A kept file that is missing outright is still restored.
+        fs::remove_file(&editor).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("00000001000000020000000300000004"), &data).unwrap();
+        plan.selected = vec!["templates".into()];
+        change_components(&plan, vec![], &Control::default(), Arc::default()).unwrap();
+        assert_eq!(fs::read(&editor).unwrap(), b"correct editor");
     }
 
     #[test]

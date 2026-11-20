@@ -522,15 +522,8 @@ fn install_package(
         return Err("This download contains a complete Unreal project. Use Create project instead of Add to project; no files were copied.".into());
     }
     let prefix = if item.plugin() {
-        let descriptors: Vec<_> = manifest
-            .files
-            .iter()
-            .filter(|f| f.name.ends_with(".uplugin"))
-            .collect();
-        if descriptors.len() != 1 {
-            return Err("Package must contain exactly one plugin".into());
-        }
-        let raw = crate::plugins::payload(&manifest, &bases, descriptors[0], &mut HashMap::new())?;
+        let file = plugin_install::descriptor_file(&manifest)?;
+        let raw = crate::plugins::payload(&manifest, &bases, file, &mut HashMap::new())?;
         let descriptor: Value =
             serde_json::from_slice(&raw).map_err(|_| "Invalid plugin descriptor")?;
         if let Some(required) = descriptor["EngineVersion"].as_str() {
@@ -538,10 +531,13 @@ fn install_package(
                 .zip(EngineVersion::parse(engine_version))
                 .is_some_and(|(a, b)| a.branch() == b.branch())
             {
-                return Err("Plugin descriptor does not match the selected engine".into());
+                return Err(format!(
+                    "Plugin descriptor {} is for another engine version (EngineVersion {required}, selected UE {engine_version}); artifact {}",
+                    file.name, manifest.app
+                ));
             }
         }
-        installer::relative(&descriptors[0].name)?
+        installer::relative(&file.name)?
             .parent()
             .ok_or("Invalid plugin root")?
             .to_owned()
