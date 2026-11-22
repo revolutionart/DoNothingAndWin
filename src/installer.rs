@@ -434,6 +434,19 @@ pub(crate) fn chunk_data_progress(
     control: &Control,
     received: &mut impl FnMut(u64),
 ) -> Result<Vec<u8>, String> {
+    chunk_data_observed(client, chunk, bases, feature, control, received, &mut || {})
+}
+/// Like [`chunk_data_progress`], and calls `failed` after each failed attempt
+/// so callers can tell an unhealthy CDN from a slow one.
+pub(crate) fn chunk_data_observed(
+    client: &Client,
+    chunk: &Chunk,
+    bases: &[Url],
+    feature: u32,
+    control: &Control,
+    received: &mut impl FnMut(u64),
+    failed: &mut impl FnMut(),
+) -> Result<Vec<u8>, String> {
     let mut error = "No working CDN".to_string();
     for attempt in 0..3 {
         for base in bases {
@@ -446,7 +459,11 @@ pub(crate) fn chunk_data_progress(
                 .and_then(|b| buildpatch::decode_chunk(&b, chunk))
             {
                 Ok(b) => return Ok(b),
-                Err(e) => error = e,
+                Err(e) => {
+                    control.check()?;
+                    failed();
+                    error = e;
+                }
             }
         }
         if attempt < 2 {

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.14 - 2026-11-22
+
+### Faster Fab downloads
+
+- Download Fab content many chunks at a time. **Add to project** for asset packs and plugin **Download only** used to fetch one chunk at a time.
+- Scale simultaneous downloads to the connection, as Epic's own downloader does: start at 16 and go up to 100 while speed keeps up. Back off when speed drops or the CDN starts failing requests. This applies to asset packs, plugins, project templates and plugin updates.
+- Write and verify several files at once, so packs with many small files no longer wait on one file at a time.
+- Keep the **Network received** counter moving while files wait on the network.
+- **Stop transfer** and failed files now cancel downloads still in progress straight away, and show the failed file's own error.
+
+### Storage
+
+- Rename **Vault Cache** to **Storage**, with **Vault Cache** and **Backups** tabs. **Backups** shows the plugin backups and space used for each engine, with **Manage backups** to keep, restore or delete them.
+- Remove the working files of a plugin update that was cut off, at startup and before the next update. Saved plugin backups are never touched.
+
 ## 1.3.13 - 2026-11-20
 
 - Add engine components faster. Adding a content pack or platform from **Engine options** now checks and downloads only the files that component adds, instead of first hashing the whole installed engine. A full check of every engine file remains under **Verify**.

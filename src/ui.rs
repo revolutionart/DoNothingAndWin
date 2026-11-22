@@ -642,6 +642,14 @@ impl Workspace {
         app.load_assets(&cc.egui_ctx);
         if !demo && app.layout_probe.is_none() {
             app.check(cc.egui_ctx.clone());
+            // A plugin update that was cut off leaves its working copy in the engine.
+            // These are the launcher's own files, so they go without a notice.
+            let engines = app.engines.clone();
+            std::thread::spawn(move || {
+                for engine in &engines {
+                    let _ = engine_workspace::plugins::clean_interrupted(engine);
+                }
+            });
         } else if demo {
             app.status = "Design preview • sample engines and projects".into();
         } else {
@@ -1034,7 +1042,7 @@ impl Workspace {
             ),
             (
                 Page::VaultCache,
-                "Vault Cache",
+                "Storage",
                 Icon::Database,
                 111. + 4. * nav_step,
             ),
@@ -1320,8 +1328,8 @@ impl Workspace {
             Page::Library => ("Library", "Your assets, projects and plugins from Fab."),
             Page::FreeOffers => ("Limited-Time Free", "What Fab is giving away right now."),
             Page::VaultCache => (
-                "Vault Cache",
-                "Your cached downloads and the space they use.",
+                "Storage",
+                "Cached downloads and plugin backups, and the space they use.",
             ),
             Page::Engines => (
                 "Engine versions",

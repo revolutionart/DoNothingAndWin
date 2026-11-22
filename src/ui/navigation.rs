@@ -5,7 +5,7 @@ pub(super) const START_PAGES: &[(Page, &str, &str)] = &[
     (Page::Projects, "projects", "Projects"),
     (Page::Library, "library", "Library"),
     (Page::Downloads, "downloads", "Downloads"),
-    (Page::VaultCache, "vault-cache", "Vault Cache"),
+    (Page::VaultCache, "vault-cache", "Storage"),
     (Page::FreeOffers, "free-offers", "Limited-Time Free"),
     (Page::Settings, "settings", "Settings"),
     (Page::Engines, "engines", "Engine versions"),

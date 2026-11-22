@@ -35,6 +35,10 @@ impl PluginWork {
     pub(super) fn busy(&self) -> bool {
         self.rx.is_some() || self.mutating
     }
+    /// The Plugin backups dialog of an engine is open.
+    pub(super) fn managing_backups(&self) -> bool {
+        self.backups.is_some()
+    }
     // Render-only pending check; no network request or installation is started.
     pub(super) fn preview_check(&mut self, count: usize) {
         let (_, rx) = mpsc::channel();

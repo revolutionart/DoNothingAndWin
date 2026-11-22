@@ -929,6 +929,7 @@ pub(crate) fn payload_to_file_progress(
 ) -> Result<(), String> {
     payload_to_file_controlled(m, bases, file, cache, path, &Control::default(), progress)
 }
+#[cfg(test)]
 pub(crate) fn payload_to_file_controlled(
     m: &Manifest,
     bases: &[reqwest::Url],
@@ -938,7 +939,9 @@ pub(crate) fn payload_to_file_controlled(
     control: &Control,
     progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
-    payload_to_file_with_prefetch(m, bases, file, cache, path, control, progress, |_| Ok(None))
+    payload_to_file_with_prefetch(m, bases, file, cache, path, control, progress, |_, _| {
+        Ok(None)
+    })
 }
 
 pub(crate) fn payload_to_file_with_prefetch<'a>(
@@ -949,7 +952,7 @@ pub(crate) fn payload_to_file_with_prefetch<'a>(
     path: &Path,
     control: &Control,
     progress: &mut impl FnMut(u64, u64),
-    mut prefetched: impl FnMut(&'a buildpatch::Chunk) -> Result<Option<Vec<u8>>, String>,
+    prefetched: impl FnMut(&'a buildpatch::Chunk, &mut dyn FnMut()) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<(), String> {
     payload_to_file_io(
         m,
@@ -959,7 +962,7 @@ pub(crate) fn payload_to_file_with_prefetch<'a>(
         path,
         control,
         &mut |p| progress(p.prepared, p.downloaded),
-        |chunk, _| prefetched(chunk),
+        prefetched,
     )
 }
 
@@ -1686,6 +1689,52 @@ fn backup_path(engine: &Installation, root: &Path) -> Result<PathBuf, String> {
         root.file_name().unwrap().to_string_lossy()
     )))
 }
+/// Delete update and restore staging folders that an interrupted operation left in
+/// the engine, and return the bytes freed. A staging folder is a private working copy
+/// used by one run, so none is in use once the engine's maintenance lock is free.
+/// Saved plugin backups live in another folder and are never touched.
+pub fn clean_interrupted(engine: &Installation) -> Result<u64, String> {
+    installer::no_links(Path::new(&engine.path))?;
+    let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
+    let _lock = crate::maintenance::lock(&eng)?;
+    clean_interrupted_locked(&eng)
+}
+/// Runs under the caller's engine maintenance lock.
+pub(crate) fn clean_interrupted_locked(eng: &Path) -> Result<u64, String> {
+    fn size(path: &Path) -> u64 {
+        fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => size(&entry.path()),
+                Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |m| m.len()),
+                _ => 0,
+            })
+            .sum()
+    }
+    let base = eng.join(".engine-workspace-plugin-backups");
+    installer::no_links(&base)?;
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Ok(0);
+    };
+    let mut freed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let leftover = path
+            .extension()
+            .is_some_and(|e| e == "staging" || e == "restore")
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if leftover {
+            let bytes = size(&path);
+            delete_scoped_tree(&path, &base)?;
+            freed += bytes;
+        }
+    }
+    // Remove the container only when empty.
+    let _ = fs::remove_dir(&base);
+    Ok(freed)
+}
 // Every deletion is bounded by a canonical engine-owned directory, and rejects links.
 fn delete_scoped_tree(path: &Path, base: &Path) -> Result<(), String> {
     installer::no_links(path)?;
@@ -1826,6 +1875,9 @@ fn update_plugin_inner(
     let eng = fs::canonicalize(&engine.path).map_err(|e| e.to_string())?;
     let _lock = crate::maintenance::lock(&eng)?;
     crate::maintenance::ensure_closed(&eng)?;
+    // Working files of an earlier update that was cut off would otherwise stay,
+    // and count against the space this update needs.
+    let _ = clean_interrupted_locked(&eng);
     let version_order = compare_versions(
         update.number,
         &update.version,
@@ -2032,6 +2084,32 @@ mod operation_tests {
                 .join(".engine-workspace-plugin-backups")
                 .exists()
         );
+    }
+    #[test]
+    fn interrupted_update_leftovers_are_removed_and_backups_are_kept() {
+        let (_d, e, _p) = fixture();
+        let eng = Path::new(&e.path);
+        let work = eng.join(".engine-workspace-plugin-backups");
+        for name in ["Test-1.staging", "Test-2.restore", "Test-3"] {
+            fs::create_dir_all(work.join(name).join("Content")).unwrap();
+            fs::write(work.join(name).join("Content/a.uasset"), b"12345").unwrap();
+        }
+        let backup = eng.join(".dnw-plugin-backups/id/files");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("keep.dll"), b"backup").unwrap();
+        assert_eq!(clean_interrupted(&e).unwrap(), 10);
+        assert!(!work.join("Test-1.staging").exists() && !work.join("Test-2.restore").exists());
+        // Anything not recognised as a staging folder stays, and so does every backup.
+        assert!(work.join("Test-3/Content/a.uasset").exists());
+        assert_eq!(fs::read(backup.join("keep.dll")).unwrap(), b"backup");
+        assert_eq!(clean_interrupted(&e).unwrap(), 0);
+        // An engine with an operation running is left alone.
+        fs::create_dir_all(work.join("Test-4.staging")).unwrap();
+        let canonical = fs::canonicalize(eng).unwrap();
+        let lock = crate::maintenance::lock(&canonical).unwrap();
+        assert!(clean_interrupted(&e).is_err());
+        assert!(work.join("Test-4.staging").exists());
+        drop(lock);
     }
     #[test]
     fn update_activation_retains_previous_plugin_and_rejects_other_engine() {

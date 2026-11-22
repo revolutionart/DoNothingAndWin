@@ -182,7 +182,7 @@ impl Workspace {
                 });
                 settings_section(ui,&theme,|ui|{
                 ui.heading("Appearance");
-                if downloads::toggle(ui, &theme, &mut self.prefs.show_vault_cache_button, "Show Vault Cache in sidebar", "View the cache folder configured in Download settings, including sizes and cached-file removal.") { self.persist(); }
+                if downloads::toggle(ui, &theme, &mut self.prefs.show_vault_cache_button, "Show Storage in sidebar", "View the Vault Cache folders and plugin backups, including sizes and removal.") { self.persist(); }
                 if downloads::toggle(ui, &theme, &mut self.prefs.show_free_offers_button, "Show Limited-Time Free in sidebar", "Show the Fab limited-time free offers button in the sidebar.") { self.persist(); }
                 ui.horizontal_wrapped(|ui|{
                     if ui.add(buttons::secondary_button("Midnight")).clone().on_hover_cursor(CursorIcon::PointingHand).clicked(){self.theme=Theme::dark();self.prefs.theme="dark".into();self.theme.apply(ctx);self.persist();}

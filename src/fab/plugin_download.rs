@@ -223,38 +223,19 @@ fn extract(
     let result = (|| {
         let staged_plugin = stage.join(name);
         fs::create_dir(&staged_plugin).map_err(|e| e.to_string())?;
-        for (file, relative) in &files {
-            control.check()?;
-            state.file = relative.to_string_lossy().into_owned();
-            let path = staged_plugin.join(relative);
-            installer::no_links(&path)?;
-            fs::create_dir_all(path.parent().ok_or("Invalid plugin path")?)
-                .map_err(|e| e.to_string())?;
-            let mut received = 0;
-            let mut last = std::time::Instant::now();
-            crate::plugins::payload_to_file_controlled(
-                manifest,
-                bases,
-                file,
-                cache,
-                &path,
-                control,
-                &mut |written, network| {
-                    received = network;
-                    if last.elapsed().as_millis() >= 100 || written == file.size() {
-                        let mut p = state.clone();
-                        p.prepared += written;
-                        p.downloaded += network;
-                        progress(p);
-                        last = std::time::Instant::now();
-                    }
-                },
-            )?;
-            state.prepared += file.size();
-            state.downloaded += received;
-            state.files += 1;
+        let targets: Vec<_> = files
+            .iter()
+            .map(|(file, relative)| (*file, staged_plugin.join(relative)))
+            .collect();
+        crate::package_chunks::write_files(manifest, bases, &targets, cache, control, |p| {
+            state.file = files[p.file].1.to_string_lossy().into_owned();
+            state.files = p.files_done;
+            state.prepared = p.prepared;
+            state.downloaded = p.io.downloaded;
             progress(state.clone());
-        }
+        })?;
+        state.files = files.len();
+        progress(state.clone());
         state.phase = "Saving verified plugin…".into();
         progress(state.clone());
         control.check()?;

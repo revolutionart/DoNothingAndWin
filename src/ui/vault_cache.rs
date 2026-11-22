@@ -20,6 +20,18 @@ pub(super) struct Vault {
     remove_rx: Option<Receiver<Result<(), String>>>,
     visible: bool,
     chunk_info: bool,
+    backups: BackupOverview,
+}
+/// Plugin backup totals per engine for the Backups tab. Each engine's own
+/// Plugin backups dialog does the keeping, restoring and deleting.
+#[derive(Default)]
+struct BackupOverview {
+    shown: bool,
+    rows: Vec<(Installation, usize, u64)>,
+    rx: Option<Receiver<Vec<(Installation, usize, u64)>>>,
+    /// A dialog was open last frame; its changes need a fresh count when it closes.
+    managing: bool,
+    loaded: bool,
 }
 fn size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
@@ -209,6 +221,127 @@ impl Workspace {
             self.scan_vault_cache(ctx);
         }
     }
+    fn load_backup_overview(&mut self, ctx: &Context) {
+        let overview = &mut self.vault.backups;
+        if overview.rx.is_some() || self.demo {
+            overview.loaded = true;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        overview.rx = Some(rx);
+        let (engines, ctx) = (self.engines.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let rows = engines
+                .into_iter()
+                .map(|engine| {
+                    let saved =
+                        engine_workspace::plugins::backups::list(&engine).unwrap_or_default();
+                    let bytes = saved.iter().map(|backup| backup.bytes).sum();
+                    (engine, saved.len(), bytes)
+                })
+                .collect();
+            let _ = tx.send(rows);
+            ctx.request_repaint();
+        });
+    }
+    fn backup_overview(&mut self, ui: &mut Ui, theme: &Theme) {
+        let managing = self.plugin_work.managing_backups();
+        let closed = self.vault.backups.managing && !managing;
+        self.vault.backups.managing = managing;
+        if !self.vault.backups.loaded || closed {
+            self.load_backup_overview(ui.ctx());
+        }
+        if let Some(rows) = self
+            .vault
+            .backups
+            .rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.vault.backups.rows = rows;
+            self.vault.backups.rx = None;
+            self.vault.backups.loaded = true;
+        }
+        let reading = self.vault.backups.rx.is_some() && self.vault.backups.rows.is_empty();
+        let total: u64 = self.vault.backups.rows.iter().map(|row| row.2).sum();
+        let count: usize = self.vault.backups.rows.iter().map(|row| row.1).sum();
+        ui.label(
+            RichText::new(if reading {
+                "Reading plugin backups…".to_owned()
+            } else {
+                format!(
+                    "{} in {count} plugin backup{}",
+                    size(total),
+                    if count == 1 { "" } else { "s" }
+                )
+            })
+            .size(20.)
+            .color(color(theme.text)),
+        );
+        ui.label(
+            RichText::new("Before a plugin update, the launcher saves the installed version inside the engine folder so you can restore it. Backups are deleted after the retention period unless you keep them.")
+                .color(color(theme.muted)),
+        );
+        let busy = self.vault_busy();
+        let mut open = None;
+        AppScrollArea::vertical(theme)
+            .id_salt("storage-backups")
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if !reading && self.vault.backups.rows.is_empty() {
+                    ui.label("No installed engines found.");
+                }
+                for (engine, count, bytes) in &self.vault.backups.rows {
+                    Frame::new()
+                        .fill(color(theme.card))
+                        .stroke(Stroke::new(1., color(theme.border)))
+                        .corner_radius(6.)
+                        .inner_margin(14.)
+                        .show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 2.).max(200.));
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("Unreal Engine {}", engine.version))
+                                            .strong()
+                                            .color(color(theme.text)),
+                                    );
+                                    ui.label(
+                                        RichText::new(if *count == 0 {
+                                            "No plugin backups".to_owned()
+                                        } else {
+                                            format!(
+                                                "{count} plugin backup{} • {}",
+                                                if *count == 1 { "" } else { "s" },
+                                                size(*bytes)
+                                            )
+                                        })
+                                        .color(color(theme.muted)),
+                                    );
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .add_enabled(
+                                            !busy && *count > 0,
+                                            buttons::secondary_button("Manage backups"),
+                                        )
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(
+                                            "Keep, restore or delete the plugin backups of this engine",
+                                        )
+                                        .clicked()
+                                    {
+                                        open = Some(engine.clone());
+                                    }
+                                });
+                            });
+                        });
+                }
+            });
+        if let Some(engine) = open {
+            self.open_plugin_backups(engine, ui.ctx().clone());
+        }
+    }
     fn vault_busy(&self) -> bool {
         self.transfer.busy()
             || self.plugin_work.busy()
@@ -223,13 +356,35 @@ impl Workspace {
         }
         let scanning = self.vault.rx.is_some()
             || (self.layout_probe.is_some() && std::env::args().any(|a| a == "--loading-preview"));
-        let top = PageHeaderLayout::new().divider_y + 18.;
-        let rect = c.rect([271., top, c.width - 297., (c.height - top - 55.).max(160.)]);
+        // Same origin, spacing and tab row as Downloads, so the tabs of both
+        // pages sit on the same pixels.
+        let top = PageHeaderLayout::new().divider_y + downloads::PAGE_CONTENT_TOP_GAP;
+        let rect = c.rect([
+            downloads::PAGE_CONTENT_LEFT,
+            top,
+            c.width - downloads::PAGE_CONTENT_RIGHT_MARGIN,
+            (c.height - top - 52.).max(160.),
+        ]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-            ui.style_mut().override_font_id = Some(FontId::proportional(16.));
+            downloads::page_content_style(ui);
+            ui.set_width(ui.available_width());
+            let backups = self.vault.backups.shown;
+            if let Some(index) = downloads::page_tabs(
+                ui,
+                &theme,
+                &[("Vault Cache", !backups), ("Backups", backups)],
+            ) && (index == 1) != backups
+            {
+                self.vault.backups.shown = index == 1;
+                // Counts may have changed while the other tab was open.
+                self.vault.backups.loaded = false;
+            }
             ui.spacing_mut().item_spacing = vec2(16., 12.);
             ui.spacing_mut().button_padding = vec2(14., 8.);
-            ui.set_width(ui.available_width());
+            if self.vault.backups.shown {
+                self.backup_overview(ui, &theme);
+                return;
+            }
             ui.horizontal_wrapped(|ui| {
                 let total = self
                     .vault

@@ -316,6 +316,32 @@ pub(super) fn toggle(
     ui.add_space(14.);
     changed
 }
+/// Where a page's content starts below the header divider, and the spacing and
+/// font of its flow. Downloads and Storage share it so their tabs sit on the
+/// same pixels.
+pub(super) const PAGE_CONTENT_LEFT: f32 = 266.;
+pub(super) const PAGE_CONTENT_RIGHT_MARGIN: f32 = 292.;
+pub(super) const PAGE_CONTENT_TOP_GAP: f32 = 15.;
+pub(super) fn page_content_style(ui: &mut Ui) {
+    ui.spacing_mut().item_spacing = vec2(12., 10.);
+    ui.style_mut().override_font_id = Some(FontId::proportional(16.));
+}
+/// The row of page tabs under the header. Returns the tab that was clicked.
+pub(super) fn page_tabs(ui: &mut Ui, theme: &Theme, tabs: &[(&str, bool)]) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        for (index, (label, selected)) in tabs.iter().enumerate() {
+            if buttons::tab_button(ui, theme, *selected, *label, 116.)
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                clicked = Some(index);
+            }
+        }
+    });
+    ui.add_space(6.);
+    clicked
+}
 impl Workspace {
     pub(super) fn record_activity(
         &mut self,
@@ -389,11 +415,15 @@ impl Workspace {
             [c.width - 26., header.divider_y],
             theme.border,
         );
-        let top = header.divider_y + 15.;
-        let rect = c.rect([266., top, c.width - 292., (c.height - top - 52.).max(200.)]);
+        let top = header.divider_y + PAGE_CONTENT_TOP_GAP;
+        let rect = c.rect([
+            PAGE_CONTENT_LEFT,
+            top,
+            c.width - PAGE_CONTENT_RIGHT_MARGIN,
+            (c.height - top - 52.).max(200.),
+        ]);
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-            ui.spacing_mut().item_spacing = vec2(12., 10.);
-            ui.style_mut().override_font_id = Some(FontId::proportional(16.));
+            page_content_style(ui);
             AppScrollArea::vertical(&theme)
                 .id_salt("downloads-content")
                 .show(ui, |ui| {
@@ -408,23 +438,17 @@ impl Workspace {
     }
     fn download_overview(&mut self, ui: &mut Ui, t: &Theme) {
         let recent_count = self.downloads.history.iter().filter(|a| a.success).count();
-        ui.horizontal(|ui| {
-            for (recent, label) in [
-                (false, "Overview".to_owned()),
-                (true, format!("Recently updated ({recent_count})")),
-            ] {
-                let selected = self.downloads.recent == recent;
-                let response = buttons::tab_button(ui, t, selected, label, 116.);
-                if response
-                    .clone()
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.downloads.recent = recent;
-                }
-            }
-        });
-        ui.add_space(6.);
+        let recent = self.downloads.recent;
+        if let Some(index) = page_tabs(
+            ui,
+            t,
+            &[
+                ("Overview", !recent),
+                (&format!("Recently updated ({recent_count})"), recent),
+            ],
+        ) {
+            self.downloads.recent = index == 1;
+        }
         let active = self.transfer.busy() as usize
             + self.plugin_work.mutating as usize
             + self.library_transfer_status().is_some() as usize;

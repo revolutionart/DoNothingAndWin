@@ -617,48 +617,27 @@ fn install_package(
     fs::create_dir(&stage).map_err(|e| e.to_string())?;
     let mut retain_stage = false;
     let result = (|| {
-        let mut cache = HashMap::new();
-        let mut prepared = 0u64;
-        let mut downloaded = 0u64;
-        for (i, (file, relative)) in files.iter().enumerate() {
-            control.check()?;
-            progress(transfer_status(
-                i + 1,
-                files.len(),
-                prepared,
-                bytes,
-                downloaded,
-                download_bytes,
-            ));
-            let path = stage.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let mut file_downloaded = 0;
-            let mut last_report = std::time::Instant::now();
-            crate::plugins::payload_to_file_controlled(
-                &manifest,
-                &bases,
-                file,
-                &mut cache,
-                &path,
-                control,
-                &mut |written, received| {
-                    file_downloaded = received;
-                    if last_report.elapsed().as_millis() >= 150 || written == file.size() {
-                        progress(transfer_status(
-                            i + 1,
-                            files.len(),
-                            prepared + written,
-                            bytes,
-                            downloaded + received,
-                            download_bytes,
-                        ));
-                        last_report = std::time::Instant::now();
-                    }
-                },
-            )?;
-            prepared += file.size();
-            downloaded += file_downloaded;
-        }
+        let staged: Vec<_> = files
+            .iter()
+            .map(|(file, relative)| (*file, stage.join(relative)))
+            .collect();
+        crate::package_chunks::write_files(
+            &manifest,
+            &bases,
+            &staged,
+            &mut HashMap::new(),
+            control,
+            |p| {
+                progress(transfer_status(
+                    p.file_number(files.len()),
+                    files.len(),
+                    p.prepared,
+                    bytes,
+                    p.io.downloaded,
+                    download_bytes,
+                ))
+            },
+        )?;
         if !item.plugin() {
             check_conflicts(&mut approved)?;
         }
@@ -1312,71 +1291,31 @@ fn write_template_files(
     control: &installer::Control,
     progress: impl Fn(String),
 ) -> Result<Option<PathBuf>, String> {
-    use crate::package_chunks::{self, ChunkSource};
     let bytes = files.iter().map(|(file, _)| file.size()).sum();
     let download_bytes = crate::plugins::package_files::compressed_size(
         manifest,
         files.iter().map(|(file, _)| *file),
     );
-    let chunks = package_chunks::ordered_chunks(manifest, files.iter().map(|(file, _)| *file))?;
-    let source = ChunkSource::new(manifest, bases, control)?;
-    package_chunks::with_prefetch(
-        chunks,
-        4,
-        control,
-        |chunk| source.load(chunk),
-        |prefetch| {
-            let mut cache = HashMap::new();
-            let mut prepared = 0u64;
-            let mut project = None;
-            for (i, (file, relative)) in files.iter().enumerate() {
-                control.check()?;
-                progress(transfer_status(
-                    i + 1,
-                    files.len(),
-                    prepared,
-                    bytes,
-                    source.io().downloaded,
-                    download_bytes,
-                ));
-                let path = destination.join(relative);
-                installer::no_links(&path)?;
-                fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-                let mut last_report = std::time::Instant::now();
-                crate::plugins::payload_to_file_with_prefetch(
-                    manifest,
-                    bases,
-                    file,
-                    &mut cache,
-                    &path,
-                    control,
-                    &mut |written, _| {
-                        if last_report.elapsed().as_millis() >= 150 || written == file.size() {
-                            progress(transfer_status(
-                                i + 1,
-                                files.len(),
-                                prepared + written,
-                                bytes,
-                                source.io().downloaded,
-                                download_bytes,
-                            ));
-                            last_report = std::time::Instant::now();
-                        }
-                    },
-                    |chunk| prefetch.take(chunk).map(Some),
-                )?;
-                prepared += file.size();
-                if path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
-                {
-                    project = Some(path);
-                }
-            }
-            control.check()?;
-            Ok(project)
-        },
-    )
+    let targets: Vec<_> = files
+        .iter()
+        .map(|(file, relative)| (*file, destination.join(relative)))
+        .collect();
+    let mut cache = HashMap::new();
+    crate::package_chunks::write_files(manifest, bases, &targets, &mut cache, control, |p| {
+        progress(transfer_status(
+            p.file_number(files.len()),
+            files.len(),
+            p.prepared,
+            bytes,
+            p.io.downloaded,
+            download_bytes,
+        ))
+    })?;
+    control.check()?;
+    Ok(targets.into_iter().map(|(_, path)| path).rfind(|path| {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("uproject"))
+    }))
 }
 
 #[cfg(test)]

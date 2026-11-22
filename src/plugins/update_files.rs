@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DOWNLOAD_WORKERS: usize = 8;
 const REPORT_INTERVAL: Duration = Duration::from_millis(150);
 
 pub(super) fn prepare(
@@ -60,9 +59,10 @@ pub(super) fn prepare(
     let mut file_writes = state.written;
     package_chunks::with_prefetch(
         chunks,
-        DOWNLOAD_WORKERS,
+        package_chunks::Connections::ADAPTIVE,
         &control,
         |chunk| source.load(chunk),
+        || source.io(),
         |prefetch| {
             for (file, relative) in pending {
                 state.file = relative.to_string_lossy().into_owned();

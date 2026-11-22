@@ -25,7 +25,7 @@ pub(super) struct Manager {
     preview: bool,
 }
 impl Workspace {
-    pub(super) fn open_plugin_backups(&mut self, engine: Installation, ctx: Context) {
+    pub(in crate::ui) fn open_plugin_backups(&mut self, engine: Installation, ctx: Context) {
         if self.plugin_work.busy() || self.transfer.busy() || self.library_work_pending() {
             return;
         }

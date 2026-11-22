@@ -261,6 +261,9 @@ pub fn refresh(engine: &Installation) -> Result<Vec<Backup>, String> {
     let eng = engine_root(engine)?;
     let _lock = crate::maintenance::lock(&eng)?;
     expire_locked(engine, crate::epic::now())?;
+    // Leftovers of an interrupted update are not backups; a failure to remove
+    // them must not hide the backups that exist.
+    let _ = clean_interrupted_locked(&eng);
     list(engine)
 }
 pub fn restore(
