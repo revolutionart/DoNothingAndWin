@@ -488,7 +488,44 @@ fn install_package(
     package: impl FnOnce() -> Result<(buildpatch::Manifest, Vec<reqwest::Url>), String>,
     control: &installer::Control,
     progress: impl Fn(String),
+    approve: impl FnMut(&[PathBuf]) -> Result<(), String>,
+) -> Result<String, String> {
+    install_package_keeping(
+        item,
+        version,
+        target,
+        engine_version,
+        package,
+        control,
+        progress,
+        approve,
+        false,
+    )
+}
+
+fn not_enough_space(needed: u64, free: u64, folder: &Path) -> String {
+    let gib = |bytes: u64| bytes as f64 / 1073741824.;
+    format!(
+        "Not enough disk space: {:.2} GiB needed, {:.2} GiB free on {}",
+        gib(needed),
+        gib(free),
+        folder.display()
+    )
+}
+
+/// `keep_chunks` leaves the downloaded chunks cached after a successful
+/// install, for another install of the same package that follows directly.
+#[allow(clippy::too_many_arguments)]
+fn install_package_keeping(
+    item: &Item,
+    version: &Version,
+    target: &Path,
+    engine_version: &str,
+    package: impl FnOnce() -> Result<(buildpatch::Manifest, Vec<reqwest::Url>), String>,
+    control: &installer::Control,
+    progress: impl Fn(String),
     mut approve: impl FnMut(&[PathBuf]) -> Result<(), String>,
+    keep_chunks: bool,
 ) -> Result<String, String> {
     control.check()?;
     if item.complete_project() {
@@ -604,8 +641,9 @@ fn install_package(
     let bytes: u64 = files.iter().map(|(f, _)| f.size()).sum();
     let download_bytes =
         crate::plugins::package_files::compressed_size(&manifest, files.iter().map(|(f, _)| *f));
-    if fs2::available_space(&target).map_err(|e| e.to_string())? < bytes + 64 * 1024 * 1024 {
-        return Err("Not enough disk space".into());
+    let free = fs2::available_space(&target).map_err(|e| e.to_string())?;
+    if free < bytes + 64 * 1024 * 1024 {
+        return Err(not_enough_space(bytes, free, &target));
     }
     let stage = target.join(format!(
         ".engine-workspace-fab-{}",
@@ -617,27 +655,59 @@ fn install_package(
     fs::create_dir(&stage).map_err(|e| e.to_string())?;
     let mut retain_stage = false;
     let result = (|| {
+        // A plugin saved with Download is already unpacked: copy it, and fetch
+        // only what the copy lacks.
+        let saved = item
+            .plugin()
+            .then(|| plugin_download::saved_copy(&manifest, engine_version))
+            .flatten();
+        let copied = match &saved {
+            Some(saved) => {
+                let copies: Vec<_> = files
+                    .iter()
+                    .map(|(file, relative)| (*file, saved.join(relative), stage.join(relative)))
+                    .collect();
+                crate::package_chunks::copy_saved_files(&copies, control, |done, count| {
+                    progress(copy_status(count, files.len(), done, bytes))
+                })?
+            }
+            None => vec![false; files.len()],
+        };
         let staged: Vec<_> = files
             .iter()
-            .map(|(file, relative)| (*file, stage.join(relative)))
+            .zip(&copied)
+            .filter(|(_, copied)| !**copied)
+            .map(|((file, relative), _)| (*file, stage.join(relative)))
             .collect();
-        crate::package_chunks::write_files(
-            &manifest,
-            &bases,
-            &staged,
-            &mut HashMap::new(),
-            control,
-            |p| {
-                progress(transfer_status(
-                    p.file_number(files.len()),
-                    files.len(),
-                    p.prepared,
-                    bytes,
-                    p.io.downloaded,
-                    download_bytes,
-                ))
-            },
-        )?;
+        let copied_files = files.len() - staged.len();
+        let copied_bytes = bytes - staged.iter().map(|(f, _)| f.size()).sum::<u64>();
+        let download_bytes = if copied_files == 0 {
+            download_bytes
+        } else {
+            crate::plugins::package_files::compressed_size(
+                &manifest,
+                staged.iter().map(|(f, _)| *f),
+            )
+        };
+        if !staged.is_empty() {
+            crate::package_chunks::write_files(
+                &manifest,
+                &bases,
+                &staged,
+                &mut HashMap::new(),
+                control,
+                |p| {
+                    progress(transfer_status(
+                        copied_files + p.file_number(staged.len()),
+                        files.len(),
+                        copied_bytes + p.prepared,
+                        bytes,
+                        p.io.downloaded,
+                        download_bytes,
+                    ))
+                },
+            )?;
+        }
         if !item.plugin() {
             check_conflicts(&mut approved)?;
         }
@@ -703,6 +773,10 @@ fn install_package(
     })();
     if retain_stage {
         return result;
+    }
+    if result.is_ok() && !keep_chunks {
+        progress(REMOVING_CHUNKS.into());
+        crate::package_chunks::forget_chunks(&manifest, files.iter().map(|(f, _)| *f));
     }
     if stage.exists() {
         let _ = fs::remove_dir_all(&stage);
@@ -883,6 +957,110 @@ mod tests {
     }
 
     #[test]
+    fn plugin_install_copies_a_saved_download_instead_of_fetching_it_again() {
+        let target = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let manifest = crate::plugins::package_files::cached_fixture(cache.path(), "5.7.0");
+        let item:Item = serde_json::from_value(serde_json::json!({"assetId":"test","assetNamespace":"test","title":"Test","distributionMethod":"CODE_PLUGIN","projectVersions":[{"artifactId":"fixture-artifact","engineVersions":["5.7"],"targetPlatforms":["Windows"]}]})).unwrap();
+        let version = item.compatible("5.7.4").unwrap();
+        let chunks = cache.path().join("EngineWorkspace/Chunks");
+        let descriptor = chunks.join(buildpatch::hex(&manifest.files[0].sha));
+        let descriptor_bytes = fs::read(&descriptor).unwrap();
+        let dll = chunks.join(buildpatch::hex(&manifest.files[1].sha));
+        let statuses = std::cell::RefCell::new(Vec::new());
+        crate::download_policy::with_cache_root(Some(cache.path().to_owned()), || {
+            let saved = plugin_download::extract(
+                &manifest,
+                &[],
+                "5.7",
+                &plugin_download::cache_directory(&cache.path().to_string_lossy()),
+                &installer::Control::default(),
+                &mut HashMap::new(),
+                |_| {},
+            )
+            .unwrap();
+            assert!(saved.join("Binaries/Win64/Test.dll").is_file());
+            assert!(
+                !dll.exists() && !descriptor.exists(),
+                "A saved plugin must not also stay in the chunk cache"
+            );
+            // Installing reads the descriptor first; in the launcher that one
+            // small chunk is fetched again. Every other chunk stays missing.
+            fs::write(&descriptor, &descriptor_bytes).unwrap();
+            install_package(
+                &item,
+                &version,
+                target.path(),
+                "5.7.4",
+                || Ok((manifest, vec![])),
+                &installer::Control::default(),
+                |status| statuses.borrow_mut().push(status),
+                reject_conflicts,
+            )
+        })
+        .unwrap();
+        let plugin = target.path().join("Engine/Plugins/Marketplace/Test");
+        assert_eq!(
+            fs::read(plugin.join("Binaries/Win64/Test.dll")).unwrap(),
+            vec![1; 32]
+        );
+        assert!(plugin.join("Test.uplugin").is_file());
+        assert!(!plugin.join("Binaries/Mac").exists());
+        let statuses = statuses.into_inner();
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.starts_with("Copying the downloaded plugin"))
+        );
+        assert!(!statuses.iter().any(|s| s.starts_with("Preparing file")));
+    }
+
+    #[test]
+    fn a_damaged_saved_file_is_not_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = buildpatch::File {
+            name: "Good.bin".into(),
+            sha: buildpatch::digest(b"good"),
+            parts: vec![buildpatch::Part {
+                size: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bad = buildpatch::File {
+            name: "Bad.bin".into(),
+            ..good.clone()
+        };
+        fs::write(dir.path().join("Good.bin"), b"good").unwrap();
+        fs::write(dir.path().join("Bad.bin"), b"evil").unwrap();
+        let out = dir.path().join("out");
+        let copies: Vec<_> = [&good, &bad, &good]
+            .into_iter()
+            .zip(["Good.bin", "Bad.bin", "Missing.bin"])
+            .map(|(file, name)| (file, dir.path().join(name), out.join(name)))
+            .collect();
+        let mut reported = (0, 0);
+        let kept = crate::package_chunks::copy_saved_files(
+            &copies,
+            &installer::Control::default(),
+            |bytes, files| reported = (bytes, files),
+        )
+        .unwrap();
+        assert_eq!(kept, [true, false, false]);
+        assert_eq!(reported, (4, 1));
+        assert_eq!(fs::read(out.join("Good.bin")).unwrap(), b"good");
+        assert!(!out.join("Bad.bin").exists() && !out.join("Missing.bin").exists());
+    }
+
+    #[test]
+    fn rechecking_saved_files_is_not_presented_as_writing_them() {
+        assert_eq!(
+            checked_totals(5_830_000_000, 20_644_321_820),
+            "Checked: 5.43 GiB of 19.23 GiB"
+        );
+    }
+
+    #[test]
     fn compressed_download_size_is_not_presented_as_the_expanded_file_size() {
         let status = transfer_status(
             18101,
@@ -892,9 +1070,8 @@ mod tests {
             2_752_302_284,
             Some(7_628_572_581),
         );
-        assert!(status.contains("Package download size: 7.10 GiB"));
-        assert!(status.contains("Network received: 2.56 GiB"));
-        assert!(status.contains("Files prepared: 27.76 GiB / 32.46 GiB"));
+        assert!(status.contains("Downloaded: 2.56 GiB of 7.10 GiB compressed"));
+        assert!(status.contains("Written to disk: 27.76 GiB of 32.46 GiB unpacked"));
         assert!(
             !status.contains("Downloading file"),
             "File preparation percentage must not imply network percentage"
@@ -918,7 +1095,8 @@ mod tests {
         };
         let chunks = cache.path().join("EngineWorkspace/Chunks");
         fs::create_dir_all(&chunks).unwrap();
-        fs::write(chunks.join(buildpatch::hex(&chunk.sha)), payload).unwrap();
+        let cached_chunk = chunks.join(buildpatch::hex(&chunk.sha));
+        fs::write(&cached_chunk, payload).unwrap();
         let manifest = buildpatch::Manifest {
             files: (0..3)
                 .map(|index| buildpatch::File {
@@ -949,16 +1127,20 @@ mod tests {
             )
         })
         .unwrap();
+        assert!(
+            !cached_chunk.exists(),
+            "An installed package must not also stay in the chunk cache"
+        );
         let statuses = statuses.into_inner();
         let downloading: Vec<_> = statuses
             .iter()
             .filter(|status| status.starts_with("Preparing file"))
             .collect();
         assert!(downloading.len() >= 6);
-        assert!(downloading.iter().any(|s| s.contains("Network received:")));
+        assert!(downloading.iter().any(|s| s.contains("Downloaded:")));
         for status in downloading {
             assert!(
-                status.contains("Files prepared:") && status.contains("Network received:"),
+                status.contains("Written to disk:") && status.contains("Downloaded:"),
                 "File-boundary event hid the byte counters: {status}"
             );
         }
@@ -1258,7 +1440,11 @@ pub fn create_project_with_control(
     if fs2::available_space(&parent).map_err(|e| e.to_string())?
         < bytes.saturating_add(64 * 1024 * 1024)
     {
-        return Err("Not enough disk space".into());
+        return Err(not_enough_space(
+            bytes,
+            fs2::available_space(&parent).unwrap_or(0),
+            &parent,
+        ));
     }
     // Reserve the destination exclusively. Other folders, including existing projects, are untouched.
     let _change = crate::vault_health::changing(&destination);
@@ -1269,6 +1455,7 @@ pub fn create_project_with_control(
                 .ok_or("No project descriptor installed")?;
         // Keep the publisher's descriptor/module names, including C++ module references.
         crate::platform::import_project(&project)?;
+        crate::package_chunks::forget_chunks(&manifest, files.iter().map(|(f, _)| *f));
         let receipt = TemplateReceipt {
             item: item.key(),
             branch: branch.into(),
@@ -1560,30 +1747,59 @@ fn transfer_status(
     )
 }
 
-/// Keep compressed network traffic distinct from expanded, verified output.
+fn copy_status(files_done: usize, files: usize, copied: u64, total: u64) -> String {
+    let percent = if total == 0 {
+        100.
+    } else {
+        copied as f64 / total as f64 * 100.
+    };
+    format!(
+        "Copying the downloaded plugin - file {} / {files} - {percent:.1}%\n{}",
+        (files_done + 1).min(files.max(1)),
+        transfer_totals(copied, total, 0, None)
+    )
+}
+
+/// Shown as the last status of a transfer while its cached chunks are deleted.
+/// Nothing is left to stop at that point.
+pub const REMOVING_CHUNKS: &str = "Removing downloaded chunks…";
+
+fn size(bytes: u64, reference: u64) -> String {
+    if reference >= 1024 * 1024 * 1024 {
+        format!("{:.2} GiB", bytes as f64 / 1073741824.)
+    } else if reference >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / 1048576.)
+    } else if reference >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Progress of re-checking files that are already saved: nothing is
+/// downloaded or written.
+pub fn checked_totals(checked: u64, total: u64) -> String {
+    format!(
+        "Checked: {} of {}",
+        size(checked, total),
+        size(total, total)
+    )
+}
+
+/// Keep the compressed download distinct from the unpacked files written to
+/// disk: a package unpacks to several times its download size.
 pub fn transfer_totals(
     prepared: u64,
     total: u64,
     downloaded: u64,
     download_bytes: Option<u64>,
 ) -> String {
-    fn size(bytes: u64, reference: u64) -> String {
-        if reference >= 1024 * 1024 * 1024 {
-            format!("{:.2} GiB", bytes as f64 / 1073741824.)
-        } else if reference >= 1024 * 1024 {
-            format!("{:.1} MiB", bytes as f64 / 1048576.)
-        } else if reference >= 1024 {
-            format!("{:.1} KiB", bytes as f64 / 1024.)
-        } else {
-            format!("{bytes} B")
-        }
-    }
     let network = size(downloaded, download_bytes.unwrap_or(downloaded));
     let package = download_bytes
-        .map(|bytes| format!(" • Package download size: {}", size(bytes, bytes)))
+        .map(|bytes| format!(" of {} compressed", size(bytes, bytes)))
         .unwrap_or_default();
     format!(
-        "Network received: {network}{package}\nFiles prepared: {} / {}",
+        "Downloaded: {network}{package}\nWritten to disk: {} of {} unpacked",
         size(prepared, total),
         size(total, total)
     )

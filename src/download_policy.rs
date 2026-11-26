@@ -72,17 +72,45 @@ fn cache_directory(root: impl AsRef<Path>) -> PathBuf {
 pub(crate) struct ChunkCache {
     directories: Vec<PathBuf>,
 }
+/// Every cache folder in use: the one this transfer writes to, then the others.
+pub(crate) fn cache_roots() -> Vec<PathBuf> {
+    let prefs = storage::load_preferences();
+    let mut roots = vec![selected_cache_root().unwrap_or_else(|| PathBuf::from(&prefs.fab_cache))];
+    for root in prefs.vault_cache_roots().into_iter().map(PathBuf::from) {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 impl ChunkCache {
     pub(crate) fn new() -> Self {
-        let prefs = storage::load_preferences();
-        let primary = selected_cache_root().unwrap_or_else(|| PathBuf::from(&prefs.fab_cache));
-        let mut directories = vec![cache_directory(primary)];
-        for dir in prefs.vault_cache_roots().into_iter().map(cache_directory) {
-            if !directories.contains(&dir) {
-                directories.push(dir);
+        Self {
+            directories: cache_roots().into_iter().map(cache_directory).collect(),
+        }
+    }
+
+    /// Delete these chunks from every cache folder. They are named by content
+    /// hash, so nothing but a copy of the same data can be removed.
+    pub(crate) fn remove<'a>(&self, chunks: impl IntoIterator<Item = &'a Chunk>) {
+        let _changes: Vec<_> = self
+            .directories
+            .iter()
+            .map(|directory| crate::vault_health::changing(directory))
+            .collect();
+        for chunk in chunks {
+            if chunk.rolling_only {
+                continue;
+            }
+            let key = buildpatch::hex(&chunk.sha);
+            for directory in &self.directories {
+                let path = directory.join(&key);
+                if crate::installer::no_links(&path).is_ok() {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
-        Self { directories }
     }
 
     pub(crate) fn read(&self, chunk: &Chunk, read: &mut impl FnMut(u64)) -> Option<Vec<u8>> {

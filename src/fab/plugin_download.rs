@@ -25,6 +25,8 @@ pub struct Progress {
     pub download_bytes: Option<u64>,
     pub files: usize,
     pub total_files: usize,
+    /// Saved files are being re-checked; nothing is downloaded or written.
+    pub checking: bool,
 }
 
 pub fn cache_directory(fab_cache: &str) -> PathBuf {
@@ -66,6 +68,24 @@ fn fingerprint(manifest: &Manifest, windows_only: bool) -> Result<String, String
         identity.extend_from_slice(&file.size().to_le_bytes());
     }
     Ok(buildpatch::hex(&buildpatch::digest(&identity)))
+}
+
+/// The folder of a saved Download-only copy of exactly this package, if a
+/// cache folder holds one. Its files are still verified when they are used.
+pub(super) fn saved_copy(manifest: &Manifest, engine: &str) -> Option<PathBuf> {
+    let branch = crate::model::EngineVersion::parse(engine)?.branch();
+    let descriptor = installer::relative(&descriptor_file(manifest).ok()?.name).ok()?;
+    let name = descriptor.file_stem()?;
+    let fingerprint = windows_cache_fingerprint(manifest).ok()?;
+    crate::download_policy::cache_roots()
+        .into_iter()
+        .map(|root| {
+            cache_directory(&root.to_string_lossy())
+                .join(name)
+                .join(format!("UE_{branch}-{}", &fingerprint[..16]))
+                .join(name)
+        })
+        .find(|plugin| installer::no_links(plugin).is_ok() && plugin.is_dir())
 }
 
 pub fn download(
@@ -116,7 +136,7 @@ pub fn download(
     })
 }
 
-fn extract(
+pub(super) fn extract(
     manifest: &Manifest,
     bases: &[reqwest::Url],
     branch: &str,
@@ -178,6 +198,7 @@ fn extract(
     };
     if destination.exists() {
         state.phase = "Checking saved plugin files…".into();
+        state.checking = true;
         progress(state.clone());
         for (file, relative) in &files {
             control.check()?;
@@ -209,7 +230,11 @@ fn extract(
     if fs2::available_space(&root).map_err(|e| e.to_string())?
         < state.total.saturating_add(64 * 1024 * 1024)
     {
-        return Err("Not enough space to download this plugin.".into());
+        return Err(super::not_enough_space(
+            state.total,
+            fs2::available_space(&root).unwrap_or(0),
+            &root,
+        ));
     }
     let stage = parent.join(format!(
         ".engine-workspace-plugin-download-{}-{}",
@@ -254,6 +279,10 @@ fn extract(
         let _change = crate::vault_health::changing(&destination);
         fs::rename(&stage, &destination)
             .map_err(|e| format!("Cannot save downloaded plugin: {e}"))?;
+        // The saved plugin is now the copy to install from.
+        state.phase = super::REMOVING_CHUNKS.into();
+        progress(state.clone());
+        crate::package_chunks::forget_chunks(manifest, files.iter().map(|(f, _)| *f));
         state.phase = "Plugin downloaded".into();
         state.file.clear();
         progress(state);

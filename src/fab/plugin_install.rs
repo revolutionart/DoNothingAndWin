@@ -245,7 +245,11 @@ pub fn install_many(
                 Ok((manifest, bases, descriptor))
             })?;
             let name = crate::plugins::display_version(&candidate.name);
-            super::install_package(
+            // The next engine of the same branch installs the same package.
+            let keep_chunks = engines[index + 1..]
+                .iter()
+                .any(|next| same_branch(&next.version, &engine.version));
+            super::install_package_keeping(
                 item,
                 &candidate.version,
                 &canonical,
@@ -259,6 +263,7 @@ pub fn install_many(
                     ))
                 },
                 super::reject_conflicts,
+                keep_chunks,
             )?;
             Ok(format!(
                 "Installed {} (version {name}) for Unreal Engine {}",

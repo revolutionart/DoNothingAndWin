@@ -348,6 +348,129 @@ pub(crate) fn ordered_chunks<'a>(
         .collect()
 }
 
+/// Delete the cached chunks of `files` once they are installed. The files on
+/// disk are the result; keeping the unpacked chunks as well doubles the space
+/// a package takes. Epic's launcher also discards its chunks after an install.
+pub(crate) fn forget_chunks<'a>(manifest: &'a Manifest, files: impl IntoIterator<Item = &'a File>) {
+    if let Ok(chunks) = ordered_chunks(manifest, files) {
+        download_policy::ChunkCache::new().remove(chunks);
+    }
+}
+
+/// Copy the files of a saved download into place instead of fetching them again.
+///
+/// Each file is hashed while it is copied and kept only if it matches the
+/// package. Returns, per file, whether its copy was kept; the caller downloads
+/// the rest. `report` gets the bytes and files copied so far.
+pub(crate) fn copy_saved_files(
+    files: &[(&File, PathBuf, PathBuf)],
+    control: &installer::Control,
+    mut report: impl FnMut(u64, usize),
+) -> Result<Vec<bool>, String> {
+    use sha1::{Digest, Sha1};
+    use std::io::{Read, Write};
+
+    fn copy(
+        file: &File,
+        from: &Path,
+        to: &Path,
+        control: &installer::Control,
+        bytes: &AtomicU64,
+    ) -> Result<bool, String> {
+        if installer::no_links(from).is_err()
+            || !std::fs::metadata(from).is_ok_and(|m| m.is_file() && m.len() == file.size())
+        {
+            return Ok(false);
+        }
+        let Ok(mut input) = std::fs::File::open(from) else {
+            return Ok(false);
+        };
+        installer::no_links(to)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)
+            .map_err(|e| format!("Creating {}: {e}", to.display()))?;
+        let mut hash = Sha1::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let mut copied = 0u64;
+        let result = (|| loop {
+            control.check()?;
+            // A source that cannot be read is skipped, not an install failure.
+            let Ok(n) = input.read(&mut buffer) else {
+                return Ok(false);
+            };
+            if n == 0 {
+                let matches = <[u8; 20]>::from(hash.finalize()) == file.sha;
+                if matches {
+                    output.sync_all().map_err(|e| e.to_string())?;
+                }
+                return Ok(matches);
+            }
+            hash.update(&buffer[..n]);
+            output
+                .write_all(&buffer[..n])
+                .map_err(|e| format!("Writing {}: {e}", to.display()))?;
+            copied += n as u64;
+            bytes.fetch_add(n as u64, Ordering::Relaxed);
+        })();
+        drop(output);
+        if !matches!(result, Ok(true)) {
+            let _ = std::fs::remove_file(to);
+            // Bytes of a rejected copy are downloaded instead; do not count them.
+            bytes.fetch_sub(copied, Ordering::Relaxed);
+        }
+        result
+    }
+
+    let kept: Vec<_> = files.iter().map(|_| AtomicUsize::new(0)).collect();
+    let (next, done, bytes) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicU64::new(0));
+    let failure = Mutex::new(None);
+    let child = control.child();
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..writer_count(files.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    while child.check().is_ok() {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((file, from, to)) = files.get(index) else {
+                            break;
+                        };
+                        match copy(file, from, to, &child, &bytes) {
+                            Ok(true) => {
+                                kept[index].store(1, Ordering::Relaxed);
+                                done.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                failure.lock().unwrap().get_or_insert(error);
+                                child.stop();
+                                break;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        while !workers.iter().all(|worker| worker.is_finished()) {
+            std::thread::sleep(Duration::from_millis(100));
+            report(bytes.load(Ordering::Relaxed), done.load(Ordering::Relaxed));
+        }
+    });
+    control.check()?;
+    if let Some(error) = failure.into_inner().unwrap() {
+        return Err(error);
+    }
+    report(bytes.load(Ordering::Relaxed), done.load(Ordering::Relaxed));
+    Ok(kept
+        .iter()
+        .map(|kept| kept.load(Ordering::Relaxed) == 1)
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WriteProgress {
     /// Index of the most recently started file.

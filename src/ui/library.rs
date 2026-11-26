@@ -3,6 +3,7 @@ use super::*;
 use engine_workspace::fab::{self, Item};
 use engine_workspace::fab_listing::{self, DateEvent, Sort};
 use engine_workspace::fab_search::{SearchDocument, SearchQuery};
+use engine_workspace::storage::{LibraryTarget, Retry};
 use std::path::PathBuf;
 mod plugin_download;
 const AVAILABLE_UPDATES_FILTER: usize = 4;
@@ -57,6 +58,8 @@ pub(super) struct Library {
     install_item: String,
     install_engine: String,
     install_results: usize,
+    /// How to run the active transfer again if it does not succeed.
+    install_retry: Option<Retry>,
     install_control: Option<engine_workspace::installer::Control>,
     asset_conflict: Option<AssetConflict>,
     download: plugin_download::Download,
@@ -97,7 +100,10 @@ impl Library {
             .any(|item| fab_listing::listing_id(item).as_deref() == Some(id))
     }
     pub(super) fn transfer_controls(&self, ui: &mut Ui) {
-        if let Some(control) = &self.install_control {
+        // The transfer is complete while its chunks are removed; nothing can stop.
+        if let Some(control) = &self.install_control
+            && !self.status.ends_with(fab::REMOVING_CHUNKS)
+        {
             let stopping = control.cancel.load(std::sync::atomic::Ordering::Relaxed);
             if ui
                 .add_enabled(
@@ -427,10 +433,12 @@ impl Workspace {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::TryRecvError::Disconnected)) if self.library.installing => {
                     let result = Err("Transfer worker stopped unexpectedly. Check the destination before retrying.".into());
-                    self.record_activity(
+                    let retry = self.library.install_retry.take();
+                    self.record_activity_with_retry(
                         self.library.install_item.clone(),
                         self.library.install_engine.clone(),
                         &result,
+                        retry,
                     );
                     self.library.install_queue.finished();
                     self.library.install_control = None;
@@ -553,21 +561,34 @@ impl Workspace {
                 }
                 Event::PluginInstalled(engine, result) => {
                     self.library.install_results += 1;
-                    self.record_activity(
+                    // Each engine gets its own row, so its retry targets that engine only.
+                    let retry = match self.library.install_retry.clone() {
+                        Some(Retry::Library { item, .. }) => Some(Retry::Library {
+                            item,
+                            target: LibraryTarget::Engines {
+                                paths: vec![engine.path],
+                            },
+                        }),
+                        other => other,
+                    };
+                    self.record_activity_with_retry(
                         self.library.install_item.clone(),
                         engine.version,
                         &result,
+                        retry,
                     );
                     self.plugin_counts.clear();
                     self.workspace_cache.invalidate();
                 }
                 Event::PluginBatchFinished(result) => {
                     self.library.install_queue.finished();
+                    let retry = self.library.install_retry.take();
                     if self.library.install_results == 0 {
-                        self.record_activity(
+                        self.record_activity_with_retry(
                             self.library.install_item.clone(),
                             self.library.install_engine.clone(),
                             &result,
+                            retry,
                         );
                     }
                     self.library.installing = false;
@@ -606,10 +627,12 @@ impl Workspace {
                             }
                         }
                     }
-                    self.record_activity(
+                    let retry = self.library.install_retry.take();
+                    self.record_activity_with_retry(
                         self.library.install_item.clone(),
                         self.library.install_engine.clone(),
                         &result,
+                        retry,
                     );
                     self.library.installing = false;
                     self.library.install_control = None;
@@ -1379,6 +1402,86 @@ impl Workspace {
         }
     }
 
+    /// Whether a Retry on a Library history row can be accepted now. Installs join
+    /// the queue; a plugin download needs the Library transfer slot to be free.
+    pub(super) fn library_retry_ready(&self, target: &LibraryTarget) -> bool {
+        !self.demo
+            && self.session.is_some()
+            && !self.launcher_updates.blocks_work()
+            && (!matches!(target, LibraryTarget::Download { .. }) || !self.library_transfer_busy())
+    }
+
+    /// Run a Library transfer from the download history again with its original choices.
+    pub(super) fn retry_library_transfer(
+        &mut self,
+        item: Item,
+        target: LibraryTarget,
+        ctx: &Context,
+    ) {
+        if !self.library_retry_ready(&target) {
+            return;
+        }
+        let title = item.title.clone();
+        let queued = match target {
+            LibraryTarget::Engines { paths } => {
+                let engines: Vec<_> = self
+                    .engines
+                    .iter()
+                    .filter(|e| paths.iter().any(|p| p.eq_ignore_ascii_case(&e.path)))
+                    .cloned()
+                    .collect();
+                if engines.is_empty() {
+                    self.notify("This engine is no longer installed.");
+                    return;
+                }
+                self.library.install_queue.enqueue(item, engines) > 0
+            }
+            LibraryTarget::Import {
+                project,
+                name,
+                version,
+                branch,
+            } => self.library.install_queue.enqueue_project(Request {
+                item,
+                target: Target::Import {
+                    project,
+                    name,
+                    version,
+                    branch,
+                },
+            }),
+            LibraryTarget::Create {
+                folder,
+                name,
+                version,
+                branch,
+            } => self.library.install_queue.enqueue_project(Request {
+                item,
+                target: Target::Create {
+                    folder,
+                    name,
+                    version,
+                    branch,
+                },
+            }),
+            LibraryTarget::Download {
+                branch,
+                location,
+                cache_root,
+            } => {
+                self.begin_plugin_download(item, branch, location, cache_root, ctx);
+                return;
+            }
+        };
+        if !queued {
+            self.notify(format!("{title} is already installing or waiting."));
+            return;
+        }
+        self.page = Page::Downloads;
+        self.downloads.show_overview();
+        self.start_next_library_install(ctx);
+    }
+
     fn start_next_library_install(&mut self, ctx: &Context) {
         if self.demo || self.library_transfer_busy() {
             return;
@@ -1401,6 +1504,36 @@ impl Workspace {
             Target::Create { name, .. } => format!("Project creation: {name} ({})", item.title),
         };
         self.library.install_engine = target.engine_label();
+        self.library.install_retry = Some(Retry::Library {
+            item: retry_item(&item),
+            target: match &target {
+                Target::Engines(engines) => LibraryTarget::Engines {
+                    paths: engines.iter().map(|e| e.path.clone()).collect(),
+                },
+                Target::Import {
+                    project,
+                    name,
+                    version,
+                    branch,
+                } => LibraryTarget::Import {
+                    project: project.clone(),
+                    name: name.clone(),
+                    version: version.clone(),
+                    branch: branch.clone(),
+                },
+                Target::Create {
+                    folder,
+                    name,
+                    version,
+                    branch,
+                } => LibraryTarget::Create {
+                    folder: folder.clone(),
+                    name: name.clone(),
+                    version: version.clone(),
+                    branch: branch.clone(),
+                },
+            },
+        });
         self.library.status = format!("Preparing {}…", item.title);
         let wait_for_library = self.prefs.wait_for_library_plugin_builds;
         let ctx = ctx.clone();
@@ -2602,4 +2735,14 @@ impl Workspace {
             )
         );
     }
+}
+
+/// The item as saved with a history row: enough to install it again, without
+/// the listing text and pictures that only the Library page shows.
+fn retry_item(item: &Item) -> Box<Item> {
+    let mut item = item.clone();
+    item.description = None;
+    item.images = None;
+    item.listing_search = None;
+    Box::new(item)
 }

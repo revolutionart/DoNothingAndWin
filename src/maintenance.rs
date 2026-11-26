@@ -98,7 +98,7 @@ pub(crate) fn ensure_closed(root: &Path) -> Result<(), String> {
             ..Default::default()
         };
         let mut next = Process32FirstW(snapshot, &mut entry).is_ok();
-        let mut running = false;
+        let mut running = None;
         while next {
             if let Ok(process) = OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION,
@@ -116,26 +116,33 @@ pub(crate) fn ensure_closed(root: &Path) -> Result<(), String> {
                 .is_ok()
                 {
                     let path = PathBuf::from(String::from_utf16_lossy(&buffer[..len as usize]));
-                    if fs::canonicalize(path).is_ok_and(|p| p.starts_with(root)) {
-                        running = true;
+                    if let Ok(path) = fs::canonicalize(path)
+                        && path.starts_with(root)
+                    {
+                        running = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned());
                     }
                 }
                 let _ = CloseHandle(process);
             }
-            if running {
+            if running.is_some() {
                 break;
             }
             next = Process32NextW(snapshot, &mut entry).is_ok();
         }
         let _ = CloseHandle(snapshot);
-        if running {
-            return Err(
-                "Close Unreal Editor and other applications using this engine, then try again."
-                    .into(),
-            );
+        if let Some(name) = running {
+            return Err(in_use_message(&name));
         }
     }
     Ok(())
+}
+/// Name the program, so the user knows what to close.
+fn in_use_message(program: &str) -> String {
+    format!(
+        "{program} is running from this engine. Close it and any other applications using this engine, then try again."
+    )
 }
 fn validate(plan: &Plan) -> Result<(), String> {
     installer::validate_manifest(&plan.manifest)?;

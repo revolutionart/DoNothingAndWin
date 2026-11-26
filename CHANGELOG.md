@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.15 - 2026-11-26
+
+### Fab downloads
+
+- Install a plugin saved with **Download only** from the saved copy instead of downloading it again. Each file is verified while it is copied, and only missing or damaged files are downloaded.
+- Delete the downloaded chunks once a package is installed, a plugin is saved or a project is created, so a package no longer takes its space twice. When a plugin is installed into several engines of the same version, the chunks are kept until the last engine.
+- Add **Retry** to failed and stopped Fab Library transfers in **Downloads**: plugin installs, **Add to project**, project creation and plugin **Download only**. Retry uses the same choices, and a plugin install retries only the engine of that row.
+- Show progress as **Downloaded: X of Y compressed** and **Written to disk: X of Y unpacked**. Re-checking a saved plugin shows **Checked: X of Y**, since nothing is downloaded or written.
+- Hide **Stop transfer** while downloaded chunks are being removed, as the transfer is already complete.
+
+### Messages
+
+- Say how much space is needed, how much is free and on which folder when there is not enough disk space.
+- Name the program running from an engine when an engine change needs it closed.
+
 ## 1.3.14 - 2026-11-22
 
 ### Faster Fab downloads

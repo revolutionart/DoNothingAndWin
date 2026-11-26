@@ -24,12 +24,11 @@ impl Library {
                 ProgressBar::new((p.prepared as f32 / p.total as f32).clamp(0., 1.))
                     .show_percentage(),
             );
-            ui.label(fab::transfer_totals(
-                p.prepared,
-                p.total,
-                p.downloaded,
-                p.download_bytes,
-            ));
+            ui.label(if p.checking {
+                fab::checked_totals(p.prepared, p.total)
+            } else {
+                fab::transfer_totals(p.prepared, p.total, p.downloaded, p.download_bytes)
+            });
             ui.label(format!("{} / {} files verified", p.files, p.total_files));
         }
         if !p.file.is_empty() {
@@ -148,9 +147,6 @@ impl Workspace {
     }
 
     pub(super) fn start_plugin_download(&mut self, item: Item, ctx: &Context) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
         let d = &mut self.library.download;
         let branch = d.branch.clone();
         let location = if d.custom {
@@ -168,6 +164,23 @@ impl Workspace {
                 .vault_download_root(&d.cache_root)
                 .map(PathBuf::from)
         };
+        self.begin_plugin_download(item, branch, location, cache_root, ctx);
+    }
+
+    /// Start a plugin download whose destination is already decided, as when a
+    /// failed download is retried from the history.
+    pub(in crate::ui) fn begin_plugin_download(
+        &mut self,
+        item: Item,
+        branch: String,
+        location: PathBuf,
+        cache_root: Option<PathBuf>,
+        ctx: &Context,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let d = &mut self.library.download;
         d.active = true;
         d.completed = None;
         d.progress = Default::default();
@@ -178,6 +191,14 @@ impl Workspace {
         self.library.install_control = Some(control.clone());
         self.library.install_item = format!("Plugin download: {}", item.title);
         self.library.install_engine = branch.clone();
+        self.library.install_retry = Some(Retry::Library {
+            item: super::retry_item(&item),
+            target: LibraryTarget::Download {
+                branch: branch.clone(),
+                location: location.clone(),
+                cache_root: cache_root.clone(),
+            },
+        });
         self.library.status = format!("{} — Preparing download…", self.library.install_item);
         self.library.selected = None;
         self.page = Page::Downloads;
@@ -222,10 +243,12 @@ impl Workspace {
                 )
             })
             .map_err(Clone::clone);
-        self.record_activity(
+        let retry = self.library.install_retry.take();
+        self.record_activity_with_retry(
             self.library.install_item.clone(),
             self.library.install_engine.clone(),
             &message,
+            retry,
         );
         self.library.download.completed = result.ok();
         self.library.download.active = false;
@@ -266,6 +289,7 @@ impl Workspace {
             download_bytes: Some(35_000_000),
             files: 12,
             total_files: 30,
+            checking: false,
         };
         self.library.download.completed = complete.then(|| {
             PathBuf::from("C:/Plugin downloads/AssetsCleaner/UE_5.8-example/AssetsCleaner")

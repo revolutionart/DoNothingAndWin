@@ -1,7 +1,7 @@
 use super::*;
 use engine_workspace::{
     download_policy,
-    storage::{Activity, DownloadSettings, Retry},
+    storage::{Activity, DownloadSettings, LibraryTarget, Retry},
 };
 use std::{
     path::PathBuf,
@@ -803,6 +803,14 @@ impl Workspace {
             let query = self.downloads.search.to_lowercase();
             let mut count = 0;
             let busy = self.transfer.busy() || self.plugin_work.mutating;
+            // Library installs wait in the queue, so they can be retried while busy.
+            let install_ready =
+                self.library_retry_ready(&LibraryTarget::Engines { paths: Vec::new() });
+            let download_ready = self.library_retry_ready(&LibraryTarget::Download {
+                branch: String::new(),
+                location: Default::default(),
+                cache_root: None,
+            });
             let retry_width = 76.;
             let mut retry_clicked = None;
             for a in &self.downloads.history {
@@ -871,10 +879,18 @@ impl Workspace {
                         .truncate()
                         .halign(Align::LEFT),
                     );
+                    let ready = match retry {
+                        Some(Retry::Library {
+                            target: LibraryTarget::Download { .. },
+                            ..
+                        }) => download_ready,
+                        Some(Retry::Library { .. }) => install_ready,
+                        _ => !busy,
+                    };
                     if let Some(retry) = retry
                         && ui
                             .add_enabled(
-                                !busy,
+                                ready,
                                 buttons::secondary_button("Retry")
                                     .min_size(vec2(retry_width, COMPACT_BUTTON_HEIGHT)),
                             )
@@ -925,15 +941,24 @@ impl Workspace {
             }
             if let Some(retry) = retry_clicked {
                 let ctx = ui.ctx().clone();
-                let (Retry::Components { path, .. } | Retry::Verify { path }) = &retry;
-                match self.engines.iter().find(|e| &e.path == path).cloned() {
-                    None => self.notify("This engine is no longer installed."),
-                    Some(engine) => match retry {
-                        Retry::Components { selected, .. } => {
-                            self.start_component_change(engine, None, selected, &ctx);
+                match retry {
+                    Retry::Library { item, target } => {
+                        self.retry_library_transfer(*item, target, &ctx);
+                    }
+                    Retry::Components { path, selected } => {
+                        match self.engines.iter().find(|e| e.path == path).cloned() {
+                            None => self.notify("This engine is no longer installed."),
+                            Some(engine) => {
+                                self.start_component_change(engine, None, selected, &ctx);
+                            }
                         }
-                        Retry::Verify { .. } => self.start_maintenance(engine, false, ctx),
-                    },
+                    }
+                    Retry::Verify { path } => {
+                        match self.engines.iter().find(|e| e.path == path).cloned() {
+                            None => self.notify("This engine is no longer installed."),
+                            Some(engine) => self.start_maintenance(engine, false, ctx),
+                        }
+                    }
                 }
             }
             if count == 0 {

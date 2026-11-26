@@ -41,18 +41,50 @@ pub struct Activity {
     pub success: bool,
     pub message: String,
     pub seen: bool,
-    /// How to run an unsuccessful engine operation again from the history row.
+    /// How to run an unsuccessful operation again from the history row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<Retry>,
 }
 
-/// Enough of an engine operation to start it again without reopening the engine.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Enough of an operation to start it again from its history row.
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Retry {
     /// Apply this component selection to the engine at `path`.
     Components { path: String, selected: Vec<String> },
     /// Verify and repair the engine at `path`.
     Verify { path: String },
+    /// Run this Fab Library transfer again with the same choices.
+    Library {
+        item: Box<crate::fab::Item>,
+        target: LibraryTarget,
+    },
+}
+
+/// Where a Fab Library transfer was going.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum LibraryTarget {
+    /// Install the plugin into the engines at these paths.
+    Engines { paths: Vec<String> },
+    /// Add the asset to the project file at `project`.
+    Import {
+        project: PathBuf,
+        name: String,
+        version: crate::fab::Version,
+        branch: String,
+    },
+    /// Create the project `name` inside `folder`.
+    Create {
+        folder: PathBuf,
+        name: String,
+        version: crate::fab::Version,
+        branch: String,
+    },
+    /// Save the plugin for `branch` under `location` without installing it.
+    Download {
+        branch: String,
+        location: PathBuf,
+        cache_root: Option<PathBuf>,
+    },
 }
 
 impl Activity {
@@ -177,7 +209,29 @@ mod activity_tests {
             selected: vec!["templates".into()],
         });
         let saved: Activity = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
-        assert_eq!(saved.retryable(), a.retry.as_ref());
+        assert!(matches!(
+            saved.retryable(),
+            Some(super::Retry::Components { path, selected })
+                if path == "E:/UE_5.9" && selected == &["templates".to_owned()]
+        ));
+        // A Library transfer keeps its item and target.
+        let item: crate::fab::Item = serde_json::from_value(serde_json::json!({
+            "assetId": "plugin", "assetNamespace": "test", "title": "Plugin",
+            "distributionMethod": "CODE_PLUGIN"
+        }))
+        .unwrap();
+        a.retry = Some(super::Retry::Library {
+            item: Box::new(item),
+            target: super::LibraryTarget::Engines {
+                paths: vec!["E:/UE_5.8".into()],
+            },
+        });
+        let saved: Activity = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert!(matches!(
+            saved.retryable(),
+            Some(super::Retry::Library { item, target: super::LibraryTarget::Engines { paths } })
+                if item.key() == "test:plugin" && paths == &["E:/UE_5.8".to_owned()]
+        ));
         a.success = true;
         assert!(a.retryable().is_none());
     }
